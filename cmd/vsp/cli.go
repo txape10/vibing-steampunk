@@ -255,39 +255,10 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 // --- search command ---
 
-// canonicalObjectType maps the documented short forms (CLAS, INTF, PROG, ...)
-// to the ADT-canonical group codes the SAP server expects on the
-// informationsystem/search endpoint. Unknown values pass through verbatim,
-// covering already-canonical input ("CLAS/OC"), namespaced types, or custom codes.
+// canonicalObjectType delegates to adt.CanonicalObjectType.
+// Kept as thin shim so the CLI flag wiring stays in cli.go.
 func canonicalObjectType(s string) string {
-	switch strings.ToUpper(s) {
-	case "":
-		return ""
-	case "CLAS":
-		return "CLAS/OC"
-	case "INTF":
-		return "INTF/OI"
-	case "PROG":
-		return "PROG/P"
-	case "FUGR":
-		return "FUGR/F"
-	case "FUNC":
-		return "FUGR/FF"
-	case "TABL":
-		return "TABL/DT"
-	case "DTEL":
-		return "DTEL/DE"
-	case "DOMA":
-		return "DOMA/DD"
-	case "DDLS":
-		return "DDLS/DF"
-	case "MSAG":
-		return "MSAG/N"
-	case "TRAN":
-		return "TRAN/T"
-	// TODO: add INCL→PROG/I once https://github.com/oisee/vibing-steampunk/pull/121 is merged upstream
-	}
-	return s
+	return adt.CanonicalObjectType(s)
 }
 
 var searchCmd = &cobra.Command{

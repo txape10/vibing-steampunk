@@ -33,6 +33,16 @@ func (s *Server) routeSearchAction(ctx context.Context, action, objectType, obje
 	if v, ok := getFloatParam(params, "max_results"); ok {
 		args["maxResults"] = v
 	}
+	if v, ok := getFloatParam(params, "max"); ok {
+		args["maxResults"] = v
+	}
+	// Pass object type for server-side filtering (prevents --max from applying after client-side filter)
+	if v := getStringParam(params, "type"); v != "" {
+		args["objectType"] = v
+	}
+	if v := getStringParam(params, "objectType"); v != "" {
+		args["objectType"] = v
+	}
 	return s.callHandler(ctx, s.handleSearchObject, args)
 }
 
@@ -49,7 +59,8 @@ func (s *Server) handleSearchObject(ctx context.Context, request mcp.CallToolReq
 		maxResults = int(mr)
 	}
 
-	results, err := s.adtClient.SearchObject(ctx, query, maxResults)
+	objectType, _ := request.GetArguments()["objectType"].(string)
+	results, err := s.adtClient.SearchObjectByType(ctx, query, objectType, maxResults)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to search: %v", err)), nil
 	}
