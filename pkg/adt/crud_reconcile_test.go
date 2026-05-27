@@ -665,3 +665,44 @@ func TestNormalizeObjectURLForPackageCheck(t *testing.T) {
 		}
 	}
 }
+
+func TestLockObject_AllowsNoModificationWithExistingTransport(t *testing.T) {
+    const existingTransportLockXML = `<?xml version="1.0" encoding="UTF-8"?>
+<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">
+  <asx:values>
+    <DATA>
+      <LOCK_HANDLE>HANDLE-Y</LOCK_HANDLE>
+      <CORRNR>TR-EXAMPLE-1</CORRNR>
+      <CORRUSER>TESTUSER</CORRUSER>
+      <CORRTEXT>ZADT_VSP</CORRTEXT>
+      <IS_LOCAL></IS_LOCAL>
+      <IS_LINK_UP></IS_LINK_UP>
+      <MODIFICATION_SUPPORT>NoModification</MODIFICATION_SUPPORT>
+    </DATA>
+  </asx:values>
+</asx:abap>`
+    mock := &methodPathMock{
+        routes: []routedResponse{
+            resp("", "discovery", 200, "ok"),
+            resp(http.MethodPost, "/oo/classes/ZCL_VSP_APC_HANDLER", 200, existingTransportLockXML),
+        },
+    }
+    cfg := NewConfig("https://devsys-adt.example.local:44300", "user", "pass")
+    transport := NewTransportWithClient(cfg, mock)
+    client := NewClientWithTransport(cfg, transport)
+    result, err := client.LockObject(
+        context.Background(),
+        "/sap/bc/adt/oo/classes/ZCL_VSP_APC_HANDLER",
+        "MODIFY",
+    )
+    if err != nil {
+        t.Fatalf("LockObject should succeed when NoModification but CorrNr present "+
+            "(object already in open transport): %v", err)
+    }
+    if result.LockHandle != "HANDLE-Y" {
+        t.Errorf("LockHandle = %q, want HANDLE-Y", result.LockHandle)
+    }
+    if result.CorrNr != "TR-EXAMPLE-1" {
+        t.Errorf("CorrNr = %q, want TR-EXAMPLE-1", result.CorrNr)
+    }
+}

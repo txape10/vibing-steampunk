@@ -64,14 +64,24 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 	// Without this guard the caller proceeds to PUT/POST and gets a
 	// confusing 423 InvalidLockHandle several seconds later. Surface it
 	// upfront so the user sees a clear, actionable error (issue #91).
-	if accessMode == "MODIFY" && strings.EqualFold(result.ModificationSupport, "NoModification") {
-		return nil, fmt.Errorf(
-			"object %s is not modifiable via ADT on this system "+
-				"(SAP returned modificationSupport=%q during LOCK). "+
-				"Common causes: read-only system class, missing developer/edit role, "+
-				"BTP ABAP Environment object outside the customer namespace, "+
-				"or hyperfocused mode locking the object as read-only",
-			objectURL, result.ModificationSupport)
+	if accessMode == "MODIFY" &&
+		strings.EqualFold(result.ModificationSupport, "NoModification") {
+
+		if result.CorrNr == "" {
+			// Genuinely read-only (no transport) — reject upfront (issue #91).
+			return nil, fmt.Errorf(
+				"object %s is not modifiable via ADT on this system "+
+					"(SAP returned modificationSupport=%q during LOCK). "+
+					"Common causes: read-only system class, missing developer/edit role, "+
+					"BTP ABAP Environment object outside the customer namespace, "+
+					"or hyperfocused mode locking the object as read-only",
+				objectURL, result.ModificationSupport)
+		}
+
+		// Object is already in the user's active transport — allow it.
+		// SAP returns NoModification+CorrNr when the object is locked inside an
+		// existing transport request. The lock handle is valid; the write succeeds
+		// when the session is kept stateful (SAP_SESSION_TYPE=stateful, issue #132).
 	}
 
 	return result, nil

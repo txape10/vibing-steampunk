@@ -990,15 +990,20 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 		return result, nil
 	}
 
+	writeLockHandle := lock.LockHandle
+	writeTransport := transport
+	if writeTransport == "" && lock.CorrNr != "" {
+		writeTransport = lock.CorrNr // adopt transport reported by SAP if caller omitted it
+	}
+
 	defer func() {
 		if !result.Success {
 			c.UnlockObject(ctx, objectURL, lock.LockHandle)
 		}
 	}()
 
-	// Update
 	sourceURL := objectURL + "/source/main"
-	err = c.UpdateSource(ctx, sourceURL, newSource, lock.LockHandle, transport)
+	err = c.UpdateSource(ctx, sourceURL, newSource, writeLockHandle, writeTransport)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to update class source: %v", err)
 		return result, nil
