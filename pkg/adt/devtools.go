@@ -39,7 +39,12 @@ func (c *Client) SyntaxCheck(ctx context.Context, objectURL string, content stri
 	// SAP's URI length limit for long namespaced classes.
 	checkObjectURI := objectURL
 	artifactURI := objectURL
-	if !strings.Contains(objectURL, "/includes/") {
+	// Class includes (/oo/classes/{x}/includes/{type}) do not use /source/main.
+	// Program includes (/programs/includes/{name}) do need /source/main — they must
+	// NOT be caught by the /includes/ check, which would leave artifactURI without
+	// the suffix and cause SAP to report error locations against the wrong resource.
+	isClassInclude := strings.Contains(objectURL, "/oo/classes/") && strings.Contains(objectURL, "/includes/")
+	if !isClassInclude {
 		artifactURI = objectURL + "/source/main"
 	}
 	encodedContent := base64.StdEncoding.EncodeToString([]byte(content))
