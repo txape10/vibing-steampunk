@@ -376,12 +376,20 @@ func (c *Client) EditSourceWithOptions(ctx context.Context, objectURL, oldString
 		}
 	}()
 
+	// Adopt transport from lock result when caller did not supply one.
+	// SAP returns the active corrNr in the lock response; without it the PUT
+	// fails with ExceptionParameterNotFound for transport-owned objects.
+	effectiveTransport := opts.Transport
+	if effectiveTransport == "" && lockResult.CorrNr != "" {
+		effectiveTransport = lockResult.CorrNr
+	}
+
 	// 6. Update source
 	if isClassInclude && className != "" {
 		// Use UpdateClassInclude for class includes
-		err = c.UpdateClassInclude(ctx, className, includeType, newSource, lockResult.LockHandle, opts.Transport)
+		err = c.UpdateClassInclude(ctx, className, includeType, newSource, lockResult.LockHandle, effectiveTransport)
 	} else {
-		err = c.UpdateSource(ctx, sourceURL, newSource, lockResult.LockHandle, opts.Transport)
+		err = c.UpdateSource(ctx, sourceURL, newSource, lockResult.LockHandle, effectiveTransport)
 	}
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to update source: %v", err)
