@@ -255,12 +255,6 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 // --- search command ---
 
-// canonicalObjectType delegates to adt.CanonicalObjectType.
-// Kept as thin shim so the CLI flag wiring stays in cli.go.
-func canonicalObjectType(s string) string {
-	return adt.CanonicalObjectType(s)
-}
-
 var searchCmd = &cobra.Command{
 	Use:   "search <query>",
 	Short: "Search for ABAP objects",
@@ -291,13 +285,12 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	query := args[0]
 	ctx := context.Background()
 
-	adtType := canonicalObjectType(objectType)
 	if v, _ := cmd.Flags().GetBool("verbose"); v {
 		fmt.Fprintf(os.Stderr, "[DEBUG] search: query=%q objectType=%q maxResults=%d\n",
-			query, adtType, maxResults)
+			query, objectType, maxResults)
 	}
 
-	results, err := client.SearchObjectByType(ctx, query, adtType, maxResults)
+	results, err := client.SearchObjectByType(ctx, query, objectType, maxResults)
 	if err != nil {
 		return fmt.Errorf("search failed: %w", err)
 	}
