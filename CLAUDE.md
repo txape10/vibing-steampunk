@@ -8,20 +8,18 @@
 
 ## Current Priorities
 
-### 1. Bug #132 — ALL objects fail PUT with 423 (on-prem) — Investigation
-**Scope correction (2026-05-27):** Initially reported as "transport-owned objects only" but confirmed to affect
-**all** objects including `$TMP` locals. The lock is always acquired (valid handle returned) but the subsequent
-PUT fails with `423 ExceptionResourceInvalidLockHandle`. `mcp-abap-abap-adt-api` works correctly for the same
-lock+write sequence, proving the ADT API is fine and the bug is in vsp's session handling.
-- Root cause: HTTP session/cookie affinity — SAP ENQUEUE lock is bound to the `sap-contextid` cookie of the
-  session that created it. vsp loses that cookie between the LOCK POST and the UPDATE PUT even when both use
-  `Stateful: true`. See `pkg/adt/http.go`.
-- Guard fix (`&& result.CorrNr == ""`) is still correct — transport-owned objects no longer rejected upfront.
-- Re-lock attempt (second POST with corrNr) also returns invalid handle — approach removed.
-- **Next step:** intercept HTTP from `mcp-abap-abap-adt-api` (mitmproxy) and compare `sap-contextid` cookie
-  between lock and PUT requests vs. vsp's requests.
+### 1. Bug #132 — ALL objects fail PUT with 423 (on-prem) — FIXED (2026-05-28)
+- Root cause: the unified mutation gate inside `UpdateSource`/`UpdateClassInclude` ran `getObjectPackage →
+  SearchObject` (a **stateless** hop) between the stateful Lock and the stateful PUT. SAP ICM retired the
+  stateful session on the stateless hop (`ICMENOSESSION`), invalidating the lock handle → HTTP 423.
+- Fix (PR #125): `mutationGateSkipKey` context flag. Outer workflows mark the context after their own gate
+  call; inner mutators see the flag and skip their redundant gate, eliminating the stateless hop.
+  Files: `pkg/adt/mutation_gate.go`, all `workflows_*.go`.
+- Also included: CSRF HEAD→GET fallback (`pkg/adt/http.go`), `corrNr` adoption from lock result
+  (`workflows_edit.go`, `workflows_source.go`), `NoModification+CorrNr` guard (`crud.go`).
+- Verified on-prem without `SAP_SESSION_TYPE=stateful`: PROG, PROG/I, CLAS all edit+activate correctly.
+- `SAP_SESSION_TYPE=stateful` is **no longer needed** in the MCP config.
 - Investigation: [004](reports/2026-05-27-004-issue-132-investigation.md) | Issue: [#132](https://github.com/oisee/vibing-steampunk/issues/132)
-- Workaround: use `mcp-abap-abap-adt-api` for lock+write+unlock. See `~/.claude/sap-mcp-servers.md`.
 
 ### 2. Bug #133 — INCL package resolution + isClassInclude detection — FIXED (2026-05-27)
 Two bugs found and fixed:
