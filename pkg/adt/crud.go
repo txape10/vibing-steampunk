@@ -67,8 +67,11 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 	if accessMode == "MODIFY" &&
 		strings.EqualFold(result.ModificationSupport, "NoModification") {
 
-		if result.CorrNr == "" {
-			// Genuinely read-only (no transport) — reject upfront (issue #91).
+		if result.CorrNr == "" && !result.IsLocal {
+			// Genuinely read-only: not a local object and no active transport.
+			// SAP granted the lock but marked it NoModification — the object cannot
+			// be written via ADT. Common causes: SAP-delivered class, missing
+			// developer/edit role, BTP ABAP object outside the customer namespace.
 			return nil, fmt.Errorf(
 				"object %s is not modifiable via ADT on this system "+
 					"(SAP returned modificationSupport=%q during LOCK). "+
@@ -78,10 +81,11 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 				objectURL, result.ModificationSupport)
 		}
 
-		// Object is already in the user's active transport — allow it.
-		// SAP returns NoModification+CorrNr when the object is locked inside an
-		// existing transport request. The lock handle is valid; the write succeeds
-		// when the session is kept stateful (SAP_SESSION_TYPE=stateful, issue #132).
+		// Allow if the object is in a local package ($TMP) — IsLocal=true, no transport
+		// is needed and the lock handle is valid for the subsequent PUT.
+		// Allow if the object is already in the user's active transport — CorrNr != "".
+		// SAP returns NoModification+CorrNr when the object is locked inside an existing
+		// transport request (issue #132). In both cases the write succeeds.
 	}
 
 	return result, nil
