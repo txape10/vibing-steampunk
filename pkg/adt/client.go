@@ -17,8 +17,9 @@ import (
 
 // Client is the main ADT API client.
 type Client struct {
-	transport *Transport
-	config    *Config
+	transport   *Transport
+	config      *Config
+	sourceCache *SourceCache
 
 	// Keep-alive goroutine management
 	keepAliveCancel context.CancelFunc
@@ -30,8 +31,9 @@ type Client struct {
 func NewClient(baseURL, username, password string, opts ...Option) *Client {
 	cfg := NewConfig(baseURL, username, password, opts...)
 	return &Client{
-		transport: NewTransport(cfg),
-		config:    cfg,
+		transport:   NewTransport(cfg),
+		config:      cfg,
+		sourceCache: newSourceCache(),
 	}
 }
 
@@ -39,8 +41,9 @@ func NewClient(baseURL, username, password string, opts ...Option) *Client {
 // This is useful for testing.
 func NewClientWithTransport(cfg *Config, transport *Transport) *Client {
 	return &Client{
-		transport: transport,
-		config:    cfg,
+		transport:   transport,
+		config:      cfg,
+		sourceCache: newSourceCache(),
 	}
 }
 

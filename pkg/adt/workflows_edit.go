@@ -410,6 +410,7 @@ func (c *Client) EditSourceWithOptions(ctx context.Context, objectURL, oldString
 		result.Message = fmt.Sprintf("Source updated but unlock failed: %v", err)
 		return result, nil
 	}
+	c.sourceCache.InvalidateByURL(objectURL)
 
 	// 8. Activate (for class includes, activate the parent class)
 	activateURL := objectURL

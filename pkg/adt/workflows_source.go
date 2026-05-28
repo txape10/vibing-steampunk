@@ -54,6 +54,28 @@ func (c *Client) GetSource(ctx context.Context, objectType, name string, opts *G
 	objectType = strings.ToUpper(objectType)
 	name = strings.ToUpper(name)
 
+	// Cache lookup
+	method := ""
+	include := ""
+	parent := ""
+	if opts != nil {
+		method = opts.Method
+		include = opts.Include
+		parent = opts.Parent
+	}
+	if cached, ok := c.sourceCache.get(objectType, name, method, include, parent); ok {
+		return cached, nil
+	}
+
+	source, err := c.getSourceUncached(ctx, objectType, name, opts)
+	if err != nil {
+		return "", err
+	}
+	c.sourceCache.set(objectType, name, method, include, parent, source)
+	return source, nil
+}
+
+func (c *Client) getSourceUncached(ctx context.Context, objectType, name string, opts *GetSourceOptions) (string, error) {
 	switch objectType {
 	case "PROG":
 		return c.GetProgram(ctx, name)
@@ -277,11 +299,17 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 	}
 
 	// Execute create or update workflow
+	var writeResult *WriteSourceResult
+	var writeErr error
 	if actualMode == WriteModeCreate {
-		return c.writeSourceCreate(ctx, objectType, name, source, opts)
+		writeResult, writeErr = c.writeSourceCreate(ctx, objectType, name, source, opts)
 	} else {
-		return c.writeSourceUpdate(ctx, objectType, name, source, opts)
+		writeResult, writeErr = c.writeSourceUpdate(ctx, objectType, name, source, opts)
 	}
+	if writeResult != nil && writeResult.Success {
+		c.sourceCache.InvalidateByName(name)
+	}
+	return writeResult, writeErr
 }
 
 // writeSourceCreate handles creation workflow
