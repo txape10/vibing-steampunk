@@ -200,6 +200,7 @@ func (s *Server) handleEditSource(ctx context.Context, request mcp.CallToolReque
 	if !ok || objectURL == "" {
 		return newToolResultError("object_url is required"), nil
 	}
+	objectURL = strings.ToLower(objectURL) // ADT paths are always lowercase; normalize defensively
 
 	oldString, ok := request.GetArguments()["old_string"].(string)
 	if !ok || oldString == "" {
@@ -231,7 +232,8 @@ func (s *Server) handleEditSource(ctx context.Context, request mcp.CallToolReque
 		method = m
 	}
 
-	ignoreWarnings := false
+	// Default to global safety config; per-call ignore_warnings overrides it.
+	ignoreWarnings := s.adtClient.Safety().IgnoreWarnings
 	if iw, ok := request.GetArguments()["ignore_warnings"].(bool); ok {
 		ignoreWarnings = iw
 	}

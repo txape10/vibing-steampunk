@@ -75,6 +75,7 @@ type Config struct {
 	TransportReadOnly       bool     // Only allow read operations on transports (list, get)
 	AllowedTransports       []string // Whitelist specific transports (supports wildcards like "A4HK*")
 	AllowTransportableEdits bool     // Allow editing objects that require transport requests
+	IgnoreWarnings          bool     // Globally ignore syntax warnings on edit (per-call ignore_warnings still overrides)
 
 	// Feature configuration (safety network)
 	// Values: "auto" (default, probe system), "on" (force enabled), "off" (force disabled)
@@ -171,6 +172,9 @@ func NewServer(cfg *Config) *Server {
 	}
 	if cfg.AllowTransportableEdits {
 		safety.AllowTransportableEdits = true
+	}
+	if cfg.IgnoreWarnings {
+		safety.IgnoreWarnings = true
 	}
 	opts = append(opts, adt.WithSafety(safety))
 

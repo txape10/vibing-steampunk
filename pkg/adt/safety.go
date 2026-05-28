@@ -70,6 +70,14 @@ type SafetyConfig struct {
 	//   - User takes responsibility for transport management
 	// Use --allow-transportable-edits or SAP_ALLOW_TRANSPORTABLE_EDITS=true to enable
 	AllowTransportableEdits bool
+
+	// IgnoreWarnings makes syntax warnings non-blocking for all edit operations.
+	// By default false — any warning from SAP's syntax check aborts the edit so the
+	// agent can decide whether to proceed. Setting this to true applies the same
+	// behaviour as passing ignore_warnings=true on every individual SAP(action="edit")
+	// call, which is useful for codebases that permanently emit style/formatter warnings.
+	// Use --ignore-warnings or SAP_IGNORE_WARNINGS=true to enable.
+	IgnoreWarnings bool
 }
 
 // DefaultSafetyConfig returns a safe default configuration (read-only, no free SQL)

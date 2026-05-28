@@ -132,6 +132,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.TransportReadOnly, "transport-read-only", false, "Only allow read operations on transports (list, get)")
 	rootCmd.Flags().StringSliceVar(&cfg.AllowedTransports, "allowed-transports", nil, "Restrict transport operations to specific transports (comma-separated, supports wildcards like A4HK*)")
 	rootCmd.Flags().BoolVar(&cfg.AllowTransportableEdits, "allow-transportable-edits", false, "Allow editing objects in transportable packages (requires transport parameter)")
+	rootCmd.Flags().BoolVar(&cfg.IgnoreWarnings, "ignore-warnings", false, "Globally ignore syntax warnings on edit (same as passing ignore_warnings=true on every SAP(action=\"edit\") call)")
 
 	// Mode options
 	rootCmd.Flags().StringVar(&cfg.Mode, "mode", "hyperfocused", "Tool mode: hyperfocused (single universal SAP tool), focused (100 tools), or expert (147 tools)")
@@ -423,6 +424,9 @@ func resolveConfig(cmd *cobra.Command) {
 	}
 	if !cmd.Flags().Changed("allow-transportable-edits") {
 		cfg.AllowTransportableEdits = viper.GetBool("ALLOW_TRANSPORTABLE_EDITS")
+	}
+	if !cmd.Flags().Changed("ignore-warnings") {
+		cfg.IgnoreWarnings = viper.GetBool("IGNORE_WARNINGS")
 	}
 
 	// Feature configuration: flag > SAP_FEATURE_* env
