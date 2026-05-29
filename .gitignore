@@ -102,3 +102,6 @@ cookie-*
 # Third-party source drops evaluated in place
 quickjs/
 quickjs.zip
+
+# Internal project documentation (never pushed to GitHub)
+docs/
