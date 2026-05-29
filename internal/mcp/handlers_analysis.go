@@ -42,6 +42,10 @@ func (s *Server) routeAnalysisAction(ctx context.Context, action, objectType, ob
 		return s.callHandler(ctx, s.handleImpact, params)
 	case "where_used_config":
 		return s.callHandler(ctx, s.handleWhereUsedConfig, params)
+	case "hardcode_usage":
+		return s.callHandler(ctx, s.handleHardcodeUsage, params)
+	case "hardcode_audit":
+		return s.callHandler(ctx, s.handleHardcodeAudit, params)
 	case "usage_examples":
 		return s.callHandler(ctx, s.handleUsageExamples, params)
 	case "health":

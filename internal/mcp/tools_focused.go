@@ -153,6 +153,10 @@ func focusedToolSet() map[string]bool {
 		"InstallDummyTest": true, // Test tool for verifying Install* workflow
 		"DeployZip":        true, // Deploy objects from abapGit-format ZIP to SAP package
 
+		// Custom hardcode table analysis (ZTCA_HARDCODE)
+		"HardcodeUsage": true, // Find ZTCA_HARDCODE entries and their callers by FIELD or program
+		"HardcodeAudit": true, // Full system-wide audit of ZTCA_HARDCODE usage and classification
+
 		// i18n/Translation tools (read-only in focused mode)
 		"GetObjectTextsInLanguage": true, // Get object source in specific language
 		"GetDataElementLabels":     true, // Get data element labels in specific language

@@ -21,6 +21,15 @@
 - `SAP_SESSION_TYPE=stateful` is **no longer needed** in the MCP config.
 - Investigation: [004](reports/2026-05-27-004-issue-132-investigation.md) | Issue: [#132](https://github.com/oisee/vibing-steampunk/issues/132)
 
+### 1b. Bug — $TMP objects blocked by NoModification guard — FIXED (2026-05-28)
+- Root cause: `LockObject` in `crud.go` rejected `NoModification + corrNr=""` assuming "read-only", but
+  local package objects (`$TMP`) also have `corrNr=""` since they need no transport. The guard missed
+  `IsLocal=true` in the lock response, which signals the lock handle IS valid for a local object.
+- Fix: `if result.CorrNr == "" && !result.IsLocal` — one extra condition. `IsLocal` was already parsed
+  from `IS_LOCAL` in the lock XML; the guard simply wasn't using it. File: `pkg/adt/crud.go`.
+- Verified on-prem: surgical edit of a class in `$TMP` (`ZCL_TST_STOCK_PARTIDAS`) succeeds — lock,
+  syntax check, write, activate all pass. Commit: `4d4adfc`.
+
 ### 2. Bug #133 — INCL package resolution + isClassInclude detection — FIXED (2026-05-27)
 Two bugs found and fixed:
 - `normalizeObjectURLForPackageCheck` stripped `/programs/includes/NAME` to `/programs` (matched the
@@ -35,6 +44,7 @@ Two bugs found and fixed:
 ### 3. Graph Engine (`pkg/graph/`) — In Progress
 Sequence: unify existing dep logic → SQL/ADT adapters → impact/path queries.
 - Done: core types, parser dep extraction, boundary analyzer (11 tests)
+- Done (fork): `hardcode_usage` + `hardcode_audit` — ZTCA_HARDCODE caller analysis (2026-05-29)
 - Pending: SQL adapters (CROSS/WBCROSSGT/D010INC), ADT adapters, unify `cli_deps.go` + `cli_extra.go` + `ctxcomp/analyzer.go`
 - Design: [002](reports/2026-04-05-002-graph-engine-design.md), [003](reports/2026-04-05-003-graph-engine-alignment-for-claude.md)
 
@@ -52,7 +62,8 @@ Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_A
 
 ```bash
 go build -o vsp ./cmd/vsp              # Build
-go test ./...                           # Unit tests
+go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)  # Unit tests (pkg/cache y cmd/vsp fallan siempre por CGO/SQLite — ignorar)
+go test ./...                           # Suite completa (cmd/vsp y pkg/cache fallarán — esperado, CGO no disponible)
 go test -tags=integration -v ./pkg/adt/ # Integration (needs SAP)
 make build-all                          # 9 platforms
 ```
@@ -64,9 +75,12 @@ Key flags: `--mode focused|expert|hyperfocused`, `--read-only`, `--allowed-packa
 ## Codebase
 
 ```
-cmd/vsp/              CLI entry + 28 commands
+cmd/vsp/              CLI entry + 30 commands
+  cli_hardcode.go     hardcode-usage / hardcode-audit (fork-specific, ZTCA_HARDCODE)
 internal/mcp/
   handlers_*.go       Domain handlers (read, edit, debug, graph, ...)
+  handlers_hardcode.go  ZTCA_HARDCODE analysis (fork-specific)
+  server_cli.go       Thin constructor + exported methods for CLI commands
   tools_register.go   Registration + mode logic
   tools_focused.go    Focused mode whitelist
   handlers_universal.go  Hyperfocused single-tool (SAP)
@@ -84,7 +98,8 @@ pkg/
 
 | Task | Files |
 |------|-------|
-| Add MCP tool | `tools_register.go` + `handlers_*.go` + `tools_focused.go` |
+| Add MCP tool | `tools_register.go` + `handlers_*.go` + `tools_focused.go` + `handlers_analysis.go` (route) |
+| Add CLI command that needs handler logic | `server_cli.go` (export method) + `cmd/vsp/cli_*.go` |
 | Add ADT operation | `pkg/adt/client.go`, `crud.go`, `devtools.go`, `codeintel.go` |
 | Add graph feature | `pkg/graph/` |
 | Add lint rule | `pkg/abaplint/rules.go` |

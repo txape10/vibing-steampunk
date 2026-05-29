@@ -500,6 +500,38 @@ func (s *Server) registerAnalysisTools(shouldRegister func(string) bool) {
 			),
 		), s.handleGraphStats)
 	}
+
+	// --- ZTCA_HARDCODE analysis (customer-specific) ---
+
+	if shouldRegister("HardcodeUsage") {
+		s.mcpServer.AddTool(mcp.NewTool("HardcodeUsage",
+			mcp.WithDescription("Find ZTCA_HARDCODE configuration entries by FIELD or calling PROGRAM, enriched with usage analysis. "+
+				"Shows which programs actually call each entry, whether SUBKEYFLD is correctly configured (sy-repid convention), "+
+				"and classifies each entry as: STANDARD (OK), REUSE (INFO), MISCONFIGURED (WARN), DEAD, or DYNAMIC. "+
+				"Use SAP(action=\"analyze\", params={\"type\":\"hardcode_usage\",\"field\":\"FRA_ABONO\"}) in hyperfocused mode."),
+			mcp.WithString("field",
+				mcp.Description("Filter by FIELD column value (e.g. FRA_ABONO). At least one of field or program is required."),
+			),
+			mcp.WithString("program",
+				mcp.Description("Filter by SUBKEYFLD column value (calling program, e.g. ZXEDFU02). At least one of field or program is required."),
+			),
+			mcp.WithBoolean("grep",
+				mcp.Description("Grep-confirm each caller's source for the FIELD literal (default: true). Set false for faster MEDIUM-confidence-only results."),
+			),
+		), s.handleHardcodeUsage)
+	}
+
+	if shouldRegister("HardcodeAudit") {
+		s.mcpServer.AddTool(mcp.NewTool("HardcodeAudit",
+			mcp.WithDescription("Full system-wide audit of all ZTCA_HARDCODE entries. "+
+				"Reads all entries, cross-references via CROSS (direct SELECT) and WBCROSSGT (ZCL_GET_HARDCODE accessor), "+
+				"and classifies each entry by status. Returns JSON with summary counts and per-entry details. "+
+				"Use SAP(action=\"analyze\", params={\"type\":\"hardcode_audit\"}) in hyperfocused mode."),
+			mcp.WithBoolean("grep",
+				mcp.Description("Grep-confirm callers per FIELD (default: true). Set false for faster MEDIUM-confidence-only results."),
+			),
+		), s.handleHardcodeAudit)
+	}
 }
 
 // registerDiagnosticsTools registers runtime error, profiler, and SQL trace tools.
