@@ -882,6 +882,57 @@ func (c *Client) DeleteObject(ctx context.Context, objectURL string, lockHandle 
 	return nil
 }
 
+// DeleteObjectWithAutoLock acquires a lock and deletes the object atomically in a single stateful
+// session. This avoids the session-affinity problem where a lock acquired in one MCP call is
+// invalidated before the delete call in a separate MCP call (issue #88 / lock handle rejected).
+//
+// Some SAP systems require accessMode="DELETE" for the lock; others only accept "MODIFY".
+// The function tries "DELETE" first and falls back to "MODIFY" on failure.
+func (c *Client) DeleteObjectWithAutoLock(ctx context.Context, objectURL string, transport string) error {
+	if err := c.checkMutation(ctx, MutationContext{
+		Op:        OpDelete,
+		OpName:    "DeleteObjectWithAutoLock",
+		ObjectURL: objectURL,
+		Transport: transport,
+	}); err != nil {
+		return err
+	}
+	ctx = withMutationGateAlreadyRan(ctx)
+
+	// Try DELETE access mode first; some systems require it, others only support MODIFY.
+	lock, err := c.LockObject(ctx, objectURL, "DELETE")
+	if err != nil {
+		lock, err = c.LockObject(ctx, objectURL, "MODIFY")
+		if err != nil {
+			return fmt.Errorf("acquiring lock for delete: %w", err)
+		}
+	}
+
+	effectiveTransport := transport
+	if effectiveTransport == "" && lock.CorrNr != "" {
+		effectiveTransport = lock.CorrNr
+	}
+
+	params := url.Values{}
+	params.Set("lockHandle", lock.LockHandle)
+	if effectiveTransport != "" {
+		params.Set("corrNr", effectiveTransport)
+	}
+
+	_, err = c.transport.Request(ctx, objectURL, &RequestOptions{
+		Method:   http.MethodDelete,
+		Query:    params,
+		Stateful: true,
+	})
+	if err != nil {
+		// Lock was acquired but delete failed — release the lock to avoid leaving it dangling.
+		_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		return fmt.Errorf("deleting object: %w", err)
+	}
+
+	return nil
+}
+
 // --- Helper to get object URLs ---
 
 // GetObjectURL returns the ADT URL for an object based on its type and name.

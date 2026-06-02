@@ -291,7 +291,8 @@ func CanonicalObjectType(s string) string {
 		return "MSAG/N"
 	case "TRAN":
 		return "TRAN/T"
-	// TODO: add INCL→PROG/I once https://github.com/oisee/vibing-steampunk/pull/121 is merged upstream
+	case "INCL":
+		return "PROG/I"
 	}
 	return s
 }
@@ -1020,31 +1021,38 @@ type TableColumn struct {
 }
 
 // GetTableContents retrieves data from a database table.
-// Optional sqlQuery can be a full SELECT statement to filter/transform results
-// (e.g., "SELECT * FROM T000 WHERE MANDT = '001'").
+// Optional sqlFilter can be a full SELECT statement or just a WHERE clause.
+// When sqlFilter is provided, the freestyle SQL endpoint is used instead of the
+// DDIC endpoint (which does not support WHERE filtering via request body).
 func (c *Client) GetTableContents(ctx context.Context, tableName string, maxRows int, sqlFilter string) (*TableContentsResult, error) {
 	tableName = strings.ToUpper(tableName)
 	if maxRows <= 0 {
 		maxRows = 100
 	}
 
+	// When a filter is provided, the DDIC endpoint ignores request bodies.
+	// Route to the freestyle SQL endpoint instead.
+	if sqlFilter != "" {
+		if err := c.checkSafety(OpFreeSQL, "GetTableContents(filtered)"); err != nil {
+			return nil, err
+		}
+		sqlQuery := sqlFilter
+		upper := strings.TrimSpace(strings.ToUpper(sqlFilter))
+		if !strings.HasPrefix(upper, "SELECT") {
+			// Treat as a WHERE clause and build a complete SELECT statement.
+			sqlQuery = fmt.Sprintf("SELECT * FROM %s WHERE %s", tableName, strings.TrimSpace(sqlFilter))
+		}
+		return c.runFreestyleQuery(ctx, sqlQuery, maxRows)
+	}
+
 	params := url.Values{}
 	params.Set("rowNumber", fmt.Sprintf("%d", maxRows))
 	params.Set("ddicEntityName", tableName)
 
-	opts := &RequestOptions{
-		Method: http.MethodPost,
+	resp, err := c.transport.Request(ctx, "/sap/bc/adt/datapreview/ddic", &RequestOptions{
 		Query:  params,
 		Accept: "application/*",
-	}
-
-	// Add SQL filter as request body if provided
-	if sqlFilter != "" {
-		opts.Body = []byte(sqlFilter)
-		opts.ContentType = "text/plain"
-	}
-
-	resp, err := c.transport.Request(ctx, "/sap/bc/adt/datapreview/ddic", opts)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("getting table contents: %w", err)
 	}
@@ -1052,21 +1060,12 @@ func (c *Client) GetTableContents(ctx context.Context, tableName string, maxRows
 	return parseTableContents(resp.Body)
 }
 
-// RunQuery executes a freestyle SQL query against the SAP database.
-// Example: "SELECT * FROM T000 WHERE MANDT = '001'"
-func (c *Client) RunQuery(ctx context.Context, sqlQuery string, maxRows int) (*TableContentsResult, error) {
-	// Safety check - free SQL can be dangerous
-	if err := c.checkSafety(OpFreeSQL, "RunQuery"); err != nil {
-		return nil, err
-	}
-
-	if sqlQuery == "" {
-		return nil, fmt.Errorf("SQL query is required")
-	}
+// runFreestyleQuery sends a raw ABAP SQL statement to the ADT freestyle endpoint.
+// Callers are responsible for safety checks before calling this method.
+func (c *Client) runFreestyleQuery(ctx context.Context, sqlQuery string, maxRows int) (*TableContentsResult, error) {
 	if maxRows <= 0 {
 		maxRows = 100
 	}
-
 	params := url.Values{}
 	params.Set("rowNumber", fmt.Sprintf("%d", maxRows))
 
@@ -1084,8 +1083,32 @@ func (c *Client) RunQuery(ctx context.Context, sqlQuery string, maxRows int) (*T
 	return parseTableContents(resp.Body)
 }
 
+// RunQuery executes a freestyle SQL query against the SAP database.
+// Example: "SELECT * FROM T000 WHERE MANDT = '001'"
+func (c *Client) RunQuery(ctx context.Context, sqlQuery string, maxRows int) (*TableContentsResult, error) {
+	if err := c.checkSafety(OpFreeSQL, "RunQuery"); err != nil {
+		return nil, err
+	}
+	if sqlQuery == "" {
+		return nil, fmt.Errorf("SQL query is required")
+	}
+	return c.runFreestyleQuery(ctx, sqlQuery, maxRows)
+}
+
 // parseTableContents parses the XML response for table contents.
 func parseTableContents(data []byte) (*TableContentsResult, error) {
+	if len(data) == 0 {
+		return &TableContentsResult{Columns: []TableColumn{}, Rows: []map[string]interface{}{}}, nil
+	}
+
+	// Detect SAP error responses that arrive with HTTP 200 but carry an error
+	// XML payload (e.g. <exc:ExceptionFault>, <atom:feed> with error entries,
+	// or plain text messages). Return the embedded message as a proper error
+	// instead of silently producing an empty result.
+	if msg := extractSAPErrorFromBody(data); msg != "" {
+		return nil, fmt.Errorf("SAP error: %s", msg)
+	}
+
 	// The ADT table data response is complex XML
 	// We'll parse it into a generic structure
 	type tableData struct {
@@ -1140,6 +1163,53 @@ func parseTableContents(data []byte) (*TableContentsResult, error) {
 	}
 
 	return result, nil
+}
+
+// extractSAPErrorFromBody inspects the first 2 KB of a response body for known
+// SAP error XML patterns and returns a human-readable message when found.
+// Returns "" when the body looks like a normal table data response.
+func extractSAPErrorFromBody(data []byte) string {
+	// Only inspect the preamble to avoid large allocations.
+	peek := data
+	if len(peek) > 2048 {
+		peek = peek[:2048]
+	}
+	lower := strings.ToLower(string(peek))
+
+	// ExceptionFault is the standard ADT error envelope.
+	if strings.Contains(lower, "exceptionfault") {
+		type faultMsg struct {
+			Message string `xml:"message"`
+		}
+		type fault struct {
+			Inner faultMsg `xml:"ExceptionFault"`
+		}
+		var f fault
+		if err := xml.Unmarshal(data, &f); err == nil && f.Inner.Message != "" {
+			return f.Inner.Message
+		}
+		// Fallback: extract first <message> element text.
+		if start := strings.Index(lower, "<message>"); start != -1 {
+			end := strings.Index(lower[start:], "</message>")
+			if end != -1 {
+				return string(data[start+9 : start+end])
+			}
+		}
+		return "ADT ExceptionFault (no detail)"
+	}
+
+	// Plain-text SQL error from the data preview engine.
+	// SAP sometimes returns e.g. "<error>SQL: ..." as a simple XML tag.
+	if strings.Contains(lower, "<error>") {
+		if start := strings.Index(lower, "<error>"); start != -1 {
+			end := strings.Index(lower[start:], "</error>")
+			if end != -1 {
+				return string(data[start+7 : start+end])
+			}
+		}
+	}
+
+	return ""
 }
 
 // --- Transaction Operations ---

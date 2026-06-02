@@ -512,19 +512,28 @@ func (s *Server) handleDeleteObject(ctx context.Context, request mcp.CallToolReq
 		return newToolResultError("object_url is required"), nil
 	}
 
-	lockHandle, ok := request.GetArguments()["lock_handle"].(string)
-	if !ok || lockHandle == "" {
-		return newToolResultError("lock_handle is required"), nil
-	}
-
 	transport := ""
 	if t, ok := request.GetArguments()["transport"].(string); ok {
 		transport = t
 	}
 
-	err := s.adtClient.DeleteObject(ctx, objectURL, lockHandle, transport)
-	if err != nil {
-		return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
+	// lock_handle is optional. When not provided, DeleteObjectWithAutoLock acquires
+	// the lock and deletes atomically in a single stateful session, avoiding the
+	// session-affinity problem where a lock from a prior MCP call is invalidated
+	// before the delete call reaches SAP (issue #88 / "lock handle rejected").
+	lockHandle, _ := request.GetArguments()["lock_handle"].(string)
+	if lockHandle != "" {
+		// Caller already holds a lock — use it directly.
+		err := s.adtClient.DeleteObject(ctx, objectURL, lockHandle, transport)
+		if err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
+		}
+	} else {
+		// Auto-lock + delete atomically.
+		err := s.adtClient.DeleteObjectWithAutoLock(ctx, objectURL, transport)
+		if err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
+		}
 	}
 
 	return mcp.NewToolResultText("Object deleted successfully"), nil

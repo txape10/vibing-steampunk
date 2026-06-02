@@ -193,7 +193,15 @@ func newToolResultJSON(v any) *mcp.CallToolResult {
 type handlerFunc func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error)
 
 // callHandler is a convenience function that calls an existing handler with constructed args.
-func (s *Server) callHandler(ctx context.Context, handler server.ToolHandlerFunc, args map[string]any) (*mcp.CallToolResult, bool, error) {
-	result, err := handler(ctx, newRequest(args))
-	return result, true, err
+// Panics inside the handler are recovered and surfaced as tool error results.
+func (s *Server) callHandler(ctx context.Context, handler server.ToolHandlerFunc, args map[string]any) (result *mcp.CallToolResult, handled bool, err error) {
+	handled = true
+	defer func() {
+		if r := recover(); r != nil {
+			result = newToolResultError(fmt.Sprintf("internal error: %v", r))
+			err = nil
+		}
+	}()
+	result, err = handler(ctx, newRequest(args))
+	return
 }
