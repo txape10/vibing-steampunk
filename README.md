@@ -11,6 +11,48 @@
 
 ![Vibing ABAP Developer](./media/vibing-steampunk.png)
 
+## txape10 Fork — S/4HANA On-Premise Bug Fixes
+
+This fork (`txape10/vibing-steampunk`) ships a set of fixes required to work reliably on S/4HANA on-premise systems. All fixes are reported upstream via issues/PRs.
+
+| Fix | Commit | Upstream issue |
+|-----|--------|---------------|
+| **INCL write support** — program includes are a first-class type; `PROG` workaround created wrong objects | `da499ff` | [#116](https://github.com/oisee/vibing-steampunk/issues/116) |
+| **Activation error detection** — S/4HANA returns `<chkl:messages>` format; old parser silently returned `success:true` | `b2f0564` | [#136](https://github.com/oisee/vibing-steampunk/issues/136) |
+| **XML namespace attributes** — Go `encoding/xml` doesn't match `adtcomp:type="E"` against `xml:"type,attr"`; affects syntax check too | `dedfebc` | [#136](https://github.com/oisee/vibing-steampunk/issues/136) |
+| **ActivateMultiple** — batch activation resolves mutual dependencies like Eclipse ADT; `ActivatePackage` updated to use it | `c741c69` | [#137](https://github.com/oisee/vibing-steampunk/issues/137) |
+| **DELETE auto-lock** — `DeleteObjectWithAutoLock` does lock+delete atomically; no dangling lock on failure | `da499ff` | — |
+| **$TMP objects** — `NoModification+corrNr=""` guard wrongly rejected local-package objects | `4d4adfc` | — |
+| **Global `SAP_IGNORE_WARNINGS`** — warnings no longer block edits system-wide without per-call flag | `d938fa6` | [#131](https://github.com/oisee/vibing-steampunk/issues/131) |
+| **Lock 423 on-prem** — stateless hop between Lock and PUT invalidated the session; eliminated via `mutationGateSkipKey` | `c40b1bf` | [#132](https://github.com/oisee/vibing-steampunk/issues/132) |
+
+### ActivateMultiple (MCP)
+
+```
+SAP(action="edit", target="ACTIVATE_MULTI", params={
+  "objects": ["PROG ZPROG", "INCL ZPROG_TOP", "INCL ZPROG_F01"]
+})
+```
+
+Activates all objects in one SAP request — SAP resolves mutual dependencies within the group, same as Eclipse ADT. Use this when activating a program and its includes together.
+
+### Activation error reporting
+
+With the `b2f0564` fix, activation failures on S/4HANA on-prem are now properly reported:
+
+```json
+{
+  "success": false,
+  "messages": [
+    {"type": "W", "shortText": "Activation was cancelled."},
+    {"type": "E", "objDescr": "Include ZMYREPORT_F01", "line": 42,
+     "shortText": "\"IV_AMOUNT\" is not type-compatible with formal parameter \"I_MATNR\"."}
+  ]
+}
+```
+
+Previously vsp returned `{"success": true, "messages": []}` for the same SAP response.
+
 ## Hot Right Now
 
 ### Package Analysis Suite

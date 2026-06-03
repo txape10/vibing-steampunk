@@ -41,6 +41,28 @@ Two bugs found and fixed:
 - Verified on-prem: source reads correctly (`matchCount: 1`). Write fails with #132 (same as CLAS) — not #133.
 - Issue: [#133](https://github.com/oisee/vibing-steampunk/issues/133)
 
+### 2b. Bug #136 — Activation silently returns success=true on S/4HANA — FIXED (2026-06-03)
+Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
+- **Bug A** (commit `dedfebc`): Go `encoding/xml` doesn't match namespace-qualified attributes
+  (`adtcomp:type="E"`) against unqualified struct tags (`xml:"type,attr"`). Fix: `stripXMLNamespaces()`
+  removes all namespace declarations and prefixes before `xml.Unmarshal`. Also fixes `parseSyntaxCheckResults`.
+- **Bug B** (commit `b2f0564`): S/4HANA on-prem returns `<chkl:messages>` root element
+  (namespace `http://www.sap.com/abapxml/checklist`), NOT `<adtcomp:activationLog>`. The old parser
+  only branched on `<activationLog>` → found nothing → `success: true` always. Fix: format detection
+  (`strings.Contains(xmlStr, "<activationLog")`) + Format B parser that reads `<properties activationExecuted="false"/>`.
+  Also fixed `ShortText` parsing: SAP sends multiple `<txt>` children (primary + localized key), requiring
+  `Txts []string \`xml:"txt"\`` instead of `Text string`.
+- Verified on-prem: include with real syntax error now returns `success:false` + error message with line number.
+- Issue: [#136](https://github.com/oisee/vibing-steampunk/issues/136)
+
+### 2c. ActivateMultiple — IMPLEMENTED & VERIFIED (2026-06-03)
+- `ActivateMultiple(ctx, []ObjectRef)` in `pkg/adt/devtools.go` — single POST with all object references.
+- SAP resolves mutual dependencies within the group (same as Eclipse ADT).
+- `ActivatePackage` updated to use batch instead of N individual calls.
+- MCP: `SAP(action="edit", target="ACTIVATE_MULTI", params={"objects": ["PROG ZPROG", "INCL ZPROG_F01"]})`
+- Verified on-prem with real includes that have mutual type dependencies. Commit: `c741c69`.
+- Issue: [#137](https://github.com/oisee/vibing-steampunk/issues/137)
+
 ### 3. Graph Engine (`pkg/graph/`) — In Progress
 Sequence: unify existing dep logic → SQL/ADT adapters → impact/path queries.
 - Done: core types, parser dep extraction, boundary analyzer (11 tests)

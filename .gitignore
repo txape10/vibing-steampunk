@@ -105,3 +105,7 @@ quickjs.zip
 
 # Internal project documentation (never pushed to GitHub)
 docs/
+
+# Local analysis artifacts (customer-specific exports, scratch scripts)
+*.xlsx
+scripts/
