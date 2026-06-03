@@ -320,8 +320,12 @@ func (c *Client) ResolveObjectRef(typeAndName string) (objectURL, objectName str
 		return "/sap/bc/adt/function/groups/" + encoded, name, nil
 	case "DDLS":
 		return "/sap/bc/adt/ddic/ddl/sources/" + encoded, name, nil
+	case "TABL":
+		return "/sap/bc/adt/ddic/tables/" + encoded, name, nil
+	case "STRU":
+		return "/sap/bc/adt/ddic/structures/" + encoded, name, nil
 	default:
-		return "", "", fmt.Errorf("unsupported object type %q (supported: PROG, INCL, CLAS, INTF, FUGR, DDLS)", objType)
+		return "", "", fmt.Errorf("unsupported object type %q (supported: PROG, INCL, CLAS, INTF, FUGR, DDLS, TABL, STRU)", objType)
 	}
 }
 

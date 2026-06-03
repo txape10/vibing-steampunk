@@ -47,6 +47,7 @@ func focusedToolSet() map[string]bool {
 		"GetInactiveObjects": true,  // List pending activations
 		"CreatePackage":      true,  // Create local packages ($...)
 		"CreateTable":        true,  // Create DDIC tables from JSON
+		"CreateStructure":    true,  // Create DDIC structures (STRU) from JSON
 		"CompareSource":      true,  // Diff two objects
 		"CloneObject":        true,  // Copy object to new name
 		"GetClassInfo":       true,  // Quick class metadata

@@ -1066,6 +1066,30 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 		), s.handleCreateTable)
 	}
 
+	if shouldRegister("CreateStructure") {
+		s.mcpServer.AddTool(mcp.NewTool("CreateStructure",
+			mcp.WithDescription("Create a DDIC structure (SE11 STRU) from a simple JSON definition. Handles full workflow: create → set source → activate. Use data element names as field types (e.g. BUKRS, WERKS_D) or ABAP built-in types (CHAR32, INT4, etc.)."),
+			mcp.WithString("name",
+				mcp.Required(),
+				mcp.Description("Structure name (uppercase, max 30 chars, must start with Z/Y)"),
+			),
+			mcp.WithString("description",
+				mcp.Required(),
+				mcp.Description("Short description of the structure"),
+			),
+			mcp.WithString("package",
+				mcp.Description("Target package (default: $TMP)"),
+			),
+			mcp.WithString("fields",
+				mcp.Required(),
+				mcp.Description("JSON array of fields: [{\"name\":\"BUKRS\",\"type\":\"BUKRS\"},{\"name\":\"WERKS\",\"type\":\"WERKS_D\"}]. Use data element names or ABAP types (CHAR/CHARnn, NUMC, INT4, DEC, STRING, DATS, TIMS)."),
+			),
+			mcp.WithString("transport",
+				mcp.Description("Transport request number (optional for $TMP)"),
+			),
+		), s.handleCreateStructure)
+	}
+
 	if shouldRegister("CompareSource") {
 		s.mcpServer.AddTool(mcp.NewTool("CompareSource",
 			mcp.WithDescription("Compare source code of two objects and return unified diff. Supports all object types from GetSource."),

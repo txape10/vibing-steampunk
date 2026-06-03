@@ -41,6 +41,8 @@ func (s *Server) routeCRUDAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleCreatePackage, params)
 		case "TABL":
 			return s.callHandler(ctx, s.handleCreateTable, params)
+		case "STRU":
+			return s.callHandler(ctx, s.handleCreateStructure, params)
 		case "CLONE":
 			return s.callHandler(ctx, s.handleCloneObject, params)
 		}
@@ -335,6 +337,65 @@ func (s *Server) handleCreateTable(ctx context.Context, request mcp.CallToolRequ
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil
+}
+
+func (s *Server) handleCreateStructure(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+
+	name, ok := request.GetArguments()["name"].(string)
+	if !ok || name == "" {
+		return newToolResultError("name is required"), nil
+	}
+
+	description, ok := request.GetArguments()["description"].(string)
+	if !ok || description == "" {
+		return newToolResultError("description is required"), nil
+	}
+
+	fieldsJSON, ok := request.GetArguments()["fields"].(string)
+	if !ok || fieldsJSON == "" {
+		return newToolResultError("fields is required (JSON array)"), nil
+	}
+
+	var fields []adt.TableField
+	if err := json.Unmarshal([]byte(fieldsJSON), &fields); err != nil {
+		return newToolResultError(fmt.Sprintf("Invalid fields JSON: %v", err)), nil
+	}
+	if len(fields) == 0 {
+		return newToolResultError("At least one field is required"), nil
+	}
+
+	pkg := "$TMP"
+	if p, ok := request.GetArguments()["package"].(string); ok && p != "" {
+		pkg = strings.ToUpper(p)
+	}
+
+	transport := ""
+	if t, ok := request.GetArguments()["transport"].(string); ok && t != "" {
+		transport = t
+	}
+
+	opts := adt.CreateStructureOptions{
+		Name:        name,
+		Description: description,
+		Package:     pkg,
+		Fields:      fields,
+		Transport:   transport,
+	}
+
+	if err := s.adtClient.CreateStructure(ctx, opts); err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to create structure: %v", err)), nil
+	}
+
+	result := map[string]interface{}{
+		"status":      "created",
+		"structure":   strings.ToUpper(name),
+		"package":     pkg,
+		"description": description,
+		"fields":      len(fields),
+	}
+	output, _ := json.MarshalIndent(result, "", "  ")
+	return mcp.NewToolResultText(string(output)), nil
+
 }
 
 func (s *Server) handleCompareSource(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

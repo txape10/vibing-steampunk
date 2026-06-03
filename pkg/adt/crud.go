@@ -1189,6 +1189,128 @@ func parsePublishResult(data []byte) (*PublishResult, error) {
 
 // --- DDIC Table/Structure Operations ---
 
+// CreateStructureOptions defines options for creating a DDIC structure (SE11 STRU).
+type CreateStructureOptions struct {
+	Name        string       `json:"name"`                  // Structure name (uppercase, max 30 chars, must start with Z/Y)
+	Description string       `json:"description"`           // Short description
+	Package     string       `json:"package,omitempty"`     // Target package (default: $TMP)
+	Fields      []TableField `json:"fields"`                // Field definitions
+	Transport   string       `json:"transport,omitempty"`   // Transport request (optional for $TMP)
+}
+
+// CreateStructure creates a new DDIC structure from JSON-like options.
+// Handles the full workflow: create → set source → activate.
+func (c *Client) CreateStructure(ctx context.Context, opts CreateStructureOptions) error {
+	if err := c.checkSafety(OpCreate, "CreateStructure"); err != nil {
+		return err
+	}
+
+	opts.Name = strings.ToUpper(opts.Name)
+	if opts.Name == "" || len(opts.Name) > 30 {
+		return fmt.Errorf("structure name must be 1-30 characters")
+	}
+	if len(opts.Fields) == 0 {
+		return fmt.Errorf("at least one field is required")
+	}
+	if opts.Package == "" {
+		opts.Package = "$TMP"
+	}
+
+	ddlSource := generateStructureDDL(opts)
+
+	// Step 1: Create structure object
+	createBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<blue:blueSource xmlns:blue="http://www.sap.com/wbobj/blue"
+                 xmlns:adtcore="http://www.sap.com/adt/core"
+                 adtcore:name="%s"
+                 adtcore:type="STRU/DS"
+                 adtcore:description="%s">
+  <adtcore:packageRef adtcore:name="%s"/>
+</blue:blueSource>`, opts.Name, escapeXML(opts.Description), opts.Package)
+
+	params := url.Values{}
+	if opts.Transport != "" {
+		params.Set("corrNr", opts.Transport)
+	}
+
+	_, err := c.transport.Request(ctx, "/sap/bc/adt/ddic/structures", &RequestOptions{
+		Method:      http.MethodPost,
+		Query:       params,
+		Body:        []byte(createBody),
+		ContentType: "application/vnd.sap.adt.structures.v2+xml",
+		Accept:      "application/vnd.sap.adt.structures.v2+xml",
+	})
+	if err != nil {
+		return fmt.Errorf("creating structure object: %w", err)
+	}
+
+	// Step 2: Lock, update source, unlock
+	structURL := fmt.Sprintf("/sap/bc/adt/ddic/structures/%s", strings.ToLower(opts.Name))
+	sourceURL := structURL + "/source/main"
+
+	lock, err := c.LockObject(ctx, structURL, "MODIFY")
+	if err != nil {
+		return fmt.Errorf("locking structure: %w", err)
+	}
+
+	params = url.Values{}
+	params.Set("lockHandle", lock.LockHandle)
+	if opts.Transport != "" {
+		params.Set("corrNr", opts.Transport)
+	}
+
+	_, err = c.transport.Request(ctx, sourceURL, &RequestOptions{
+		Method:      http.MethodPut,
+		Query:       params,
+		Body:        []byte(ddlSource),
+		ContentType: "text/plain",
+	})
+	if err != nil {
+		c.UnlockObject(ctx, structURL, lock.LockHandle)
+		return fmt.Errorf("updating structure source: %w", err)
+	}
+
+	c.UnlockObject(ctx, structURL, lock.LockHandle)
+
+	// Step 3: Activate
+	if _, err := c.Activate(ctx, structURL, opts.Name); err != nil {
+		return fmt.Errorf("activating structure: %w", err)
+	}
+
+	return nil
+}
+
+// generateStructureDDL converts CreateStructureOptions to Dictionary DDL source.
+// Enhancement category defaults to #CHAR_NUMERIC (extensible with char/numeric fields),
+// which is the SAP-recommended value for most Z structures. Switches to #FREE if any
+// field maps to a deep type (string, rawstring) that requires unrestricted extensibility.
+func generateStructureDDL(opts CreateStructureOptions) string {
+	var sb strings.Builder
+
+	// Determine enhancement category: #CHAR_NUMERIC unless deep types are present.
+	enhCat := "#CHAR_NUMERIC"
+	for _, f := range opts.Fields {
+		t := mapFieldType(f)
+		if t == "abap.string(0)" || t == "abap.rawstring(0)" {
+			enhCat = "#FREE"
+			break
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf("@EndUserText.label : '%s'\n", escapeQuote(opts.Description)))
+	sb.WriteString(fmt.Sprintf("@AbapCatalog.enhancement.category : %s\n", enhCat))
+	sb.WriteString(fmt.Sprintf("define structure %s {\n\n", strings.ToLower(opts.Name)))
+
+	for _, f := range opts.Fields {
+		fieldName := strings.ToLower(f.Name)
+		fieldType := mapFieldType(f)
+		sb.WriteString(fmt.Sprintf("  %s : %s;\n", fieldName, fieldType))
+	}
+
+	sb.WriteString("\n}\n")
+	return sb.String()
+}
+
 // CreateTableOptions defines options for creating a DDIC table.
 type CreateTableOptions struct {
 	Name          string       `json:"name"`          // Table name (uppercase, max 30 chars, must start with Z/Y)
