@@ -115,6 +115,54 @@ func TestParseActivationResult_MessagesOnlyNoInactive_DetectsFailure(t *testing.
 	}
 }
 
+func TestParseActivationResult_ChklMessages_DetectsFailure(t *testing.T) {
+	// Actual SAP S/4HANA on-prem response format: chkl:messages root element.
+	// Previously BOTH vsp and mcp-abap-abap-adt-api silently reported success.
+	xmlData := `<?xml version="1.0" encoding="utf-8"?><chkl:messages xmlns:chkl="http://www.sap.com/abapxml/checklist"><chkl:properties checkExecuted="true" activationExecuted="false" generationExecuted="false"/><msg objDescr="" type="W" line="0" href=""><shortText><txt>Activation was cancelled.</txt><txt>"Tratamiento cancelado" (EU 202)</txt></shortText></msg><msg objDescr="Programa ZPROG_WITH_INCL" type="E" line="1" href="/sap/bc/adt/programs/programs/zprog_with_incl/source/main#start=2,8" forceSupported="true"><shortText><txt>INCLUDE report "ZRCG1_INCL" not found.</txt></shortText></msg></chkl:messages>`
+
+	result, err := parseActivationResult([]byte(xmlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Error("should be failure: activationExecuted=false and E-type message")
+	}
+	if len(result.Messages) != 2 {
+		t.Fatalf("expected 2 messages (W + E), got %d", len(result.Messages))
+	}
+	if result.Messages[0].Type != "W" {
+		t.Errorf("expected first message type 'W', got %q", result.Messages[0].Type)
+	}
+	if result.Messages[1].Type != "E" {
+		t.Errorf("expected second message type 'E', got %q", result.Messages[1].Type)
+	}
+	if result.Messages[1].ShortText == "" {
+		t.Error("expected non-empty short text for E message")
+	}
+	if result.Messages[1].ObjDescr == "" {
+		t.Error("expected non-empty objDescr for E message")
+	}
+	if result.Messages[1].Line != 1 {
+		t.Errorf("expected line 1, got %d", result.Messages[1].Line)
+	}
+}
+
+func TestParseActivationResult_ChklMessages_SuccessWhenActivated(t *testing.T) {
+	// chkl:messages with activationExecuted="true" and no error messages = real success.
+	xmlData := `<?xml version="1.0" encoding="utf-8"?><chkl:messages xmlns:chkl="http://www.sap.com/abapxml/checklist"><chkl:properties checkExecuted="true" activationExecuted="true" generationExecuted="true"/></chkl:messages>`
+
+	result, err := parseActivationResult([]byte(xmlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Error("should be success: activationExecuted=true and no error messages")
+	}
+	if len(result.Messages) != 0 {
+		t.Errorf("expected 0 messages, got %d", len(result.Messages))
+	}
+}
+
 // --- parseSyntaxCheckResults ---
 
 func TestParseSyntaxCheckResults_NamespacedResponse_ParsesErrors(t *testing.T) {

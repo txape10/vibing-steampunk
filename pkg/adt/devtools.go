@@ -212,9 +212,24 @@ func parseActivationResult(data []byte) (*ActivationResult, error) {
 		return result, nil
 	}
 
-	// Strip namespace prefixes (adtcomp:, adtcore:, etc.) so that xml:"type,attr" etc. match.
+	// Strip namespace prefixes (adtcomp:, adtcore:, chkl:, etc.) so xml struct tags match.
 	data = stripXMLNamespaces(data)
+	xmlStr := string(data)
 
+	// SAP ADT uses two different XML formats for activation results depending on the
+	// SAP version and endpoint behavior:
+	//
+	// Format A — adtcomp:activationLog (legacy/some SAP versions):
+	//   Root: <activationLog>
+	//   Errors under: <messages><msg type="E" ...>
+	//   Inactive under: <inactiveObjects><entry>...
+	//
+	// Format B — chkl:messages (S/4HANA, observed on-prem):
+	//   Root: <messages>
+	//   Properties: <properties activationExecuted="false"/>
+	//   Errors as direct children: <msg type="E" objDescr="..." line="N">
+
+	// Shared message type used by both formats.
 	type msg struct {
 		ObjDescr       string `xml:"objDescr,attr"`
 		Type           string `xml:"type,attr"`
@@ -222,67 +237,117 @@ func parseActivationResult(data []byte) (*ActivationResult, error) {
 		Href           string `xml:"href,attr"`
 		ForceSupported bool   `xml:"forceSupported,attr"`
 		ShortText      struct {
-			Text string `xml:"txt"`
+			// SAP may return multiple <txt> elements; first is the primary text.
+			Txts []string `xml:"txt"`
 		} `xml:"shortText"`
 	}
-	type messages struct {
-		Msgs []msg `xml:"msg"`
-	}
-	type inactiveRef struct {
-		URI       string `xml:"uri,attr"`
-		Type      string `xml:"type,attr"`
-		Name      string `xml:"name,attr"`
-		ParentURI string `xml:"parentUri,attr"`
-	}
-	type inactiveEntry struct {
-		Object *struct {
-			Ref inactiveRef `xml:"ref"`
-		} `xml:"object"`
-	}
-	type inactiveObjects struct {
-		Entries []inactiveEntry `xml:"entry"`
-	}
-	type response struct {
-		Messages messages        `xml:"messages"`
-		Inactive inactiveObjects `xml:"inactiveObjects"`
+
+	if strings.Contains(xmlStr, "<activationLog") {
+		// --- Format A: adtcomp:activationLog ---
+		type messages struct {
+			Msgs []msg `xml:"msg"`
+		}
+		type inactiveRef struct {
+			URI       string `xml:"uri,attr"`
+			Type      string `xml:"type,attr"`
+			Name      string `xml:"name,attr"`
+			ParentURI string `xml:"parentUri,attr"`
+		}
+		type inactiveEntry struct {
+			Object *struct {
+				Ref inactiveRef `xml:"ref"`
+			} `xml:"object"`
+		}
+		type inactiveObjects struct {
+			Entries []inactiveEntry `xml:"entry"`
+		}
+		type activationLog struct {
+			Messages messages        `xml:"messages"`
+			Inactive inactiveObjects `xml:"inactiveObjects"`
+		}
+
+		var doc activationLog
+		if err := xml.Unmarshal(data, &doc); err != nil {
+			result.Success = false
+			result.Messages = append(result.Messages, ActivationResultMessage{
+				Type:      "E",
+				ShortText: xmlStr,
+			})
+			return result, nil
+		}
+		for _, m := range doc.Messages.Msgs {
+			text := ""
+			if len(m.ShortText.Txts) > 0 {
+				text = m.ShortText.Txts[0]
+			}
+			result.Messages = append(result.Messages, ActivationResultMessage{
+				ObjDescr:       m.ObjDescr,
+				Type:           m.Type,
+				Line:           m.Line,
+				Href:           m.Href,
+				ForceSupported: m.ForceSupported,
+				ShortText:      text,
+			})
+			if strings.ContainsAny(m.Type, "EAX") {
+				result.Success = false
+			}
+		}
+		for _, entry := range doc.Inactive.Entries {
+			if entry.Object != nil {
+				result.Success = false
+				result.Inactive = append(result.Inactive, InactiveObject{
+					URI:       entry.Object.Ref.URI,
+					Type:      entry.Object.Ref.Type,
+					Name:      entry.Object.Ref.Name,
+					ParentURI: entry.Object.Ref.ParentURI,
+				})
+			}
+		}
+		return result, nil
 	}
 
-	var resp response
-	if err := xml.Unmarshal(data, &resp); err != nil {
-		// If parsing fails, try to extract any error message
+	// --- Format B: chkl:messages (S/4HANA actual response) ---
+	// Root element is <messages> (after namespace stripping).
+	// <properties activationExecuted="false"/> signals overall failure.
+	// Error messages are direct <msg> children of the root.
+	type chklProperties struct {
+		ActivationExecuted bool `xml:"activationExecuted,attr"`
+	}
+	type chklDoc struct {
+		Properties chklProperties `xml:"properties"`
+		Msgs       []msg          `xml:"msg"`
+	}
+
+	var doc chklDoc
+	if err := xml.Unmarshal(data, &doc); err != nil {
 		result.Success = false
 		result.Messages = append(result.Messages, ActivationResultMessage{
 			Type:      "E",
-			ShortText: string(data),
+			ShortText: xmlStr,
 		})
 		return result, nil
 	}
 
-	for _, m := range resp.Messages.Msgs {
+	for _, m := range doc.Msgs {
+		text := ""
+		if len(m.ShortText.Txts) > 0 {
+			text = m.ShortText.Txts[0]
+		}
 		result.Messages = append(result.Messages, ActivationResultMessage{
 			ObjDescr:       m.ObjDescr,
 			Type:           m.Type,
 			Line:           m.Line,
 			Href:           m.Href,
 			ForceSupported: m.ForceSupported,
-			ShortText:      m.ShortText.Text,
+			ShortText:      text,
 		})
-		// Check for errors
 		if strings.ContainsAny(m.Type, "EAX") {
 			result.Success = false
 		}
 	}
-
-	for _, entry := range resp.Inactive.Entries {
-		if entry.Object != nil {
-			result.Success = false
-			result.Inactive = append(result.Inactive, InactiveObject{
-				URI:       entry.Object.Ref.URI,
-				Type:      entry.Object.Ref.Type,
-				Name:      entry.Object.Ref.Name,
-				ParentURI: entry.Object.Ref.ParentURI,
-			})
-		}
+	// activationExecuted=false is an explicit SAP signal that activation did not complete.
+	if !doc.Properties.ActivationExecuted && len(doc.Msgs) > 0 {
+		result.Success = false
 	}
 
 	return result, nil
