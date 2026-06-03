@@ -4,6 +4,149 @@ import (
 	"testing"
 )
 
+// --- stripXMLNamespaces ---
+
+func TestStripXMLNamespaces_RemovesDeclarations(t *testing.T) {
+	input := `<root xmlns:adtcomp="http://www.sap.com/adt/activation" xmlns:adtcore="http://www.sap.com/adt/core"><adtcomp:msg adtcomp:type="E"/></root>`
+	got := string(stripXMLNamespaces([]byte(input)))
+	for _, bad := range []string{"xmlns:", "adtcomp:", "adtcore:"} {
+		if idx := indexStr(got, bad); idx >= 0 {
+			t.Errorf("output still contains %q at pos %d: %s", bad, idx, got)
+		}
+	}
+}
+
+func TestStripXMLNamespaces_PreservesURLsInValues(t *testing.T) {
+	// http:// inside attribute values must not be modified
+	input := `<root xmlns:ns="http://example.com"><ns:link ns:href="http://example.com/path"/></root>`
+	got := string(stripXMLNamespaces([]byte(input)))
+	if indexStr(got, "http://example.com/path") < 0 {
+		t.Errorf("URL in attribute value was stripped: %s", got)
+	}
+}
+
+func indexStr(s, sub string) int {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+// --- parseActivationResult ---
+
+func TestParseActivationResult_EmptyBody_Success(t *testing.T) {
+	result, err := parseActivationResult([]byte{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Error("empty body should mean success")
+	}
+}
+
+func TestParseActivationResult_NamespacedErrorMessage_DetectsFailure(t *testing.T) {
+	// SAP ADT response with adtcomp: namespace prefix — previously undetected due to namespace bug
+	xmlData := `<?xml version="1.0" encoding="utf-8"?>
+<adtcomp:activationLog xmlns:adtcomp="http://www.sap.com/adt/activation" xmlns:adtcore="http://www.sap.com/adt/core">
+  <adtcomp:inactiveObjects>
+    <adtcomp:entry>
+      <adtcomp:object>
+        <adtcore:ref adtcore:uri="/sap/bc/adt/programs/includes/ztest_f01" adtcore:type="PROG/I" adtcore:name="ZTEST_F01"/>
+      </adtcomp:object>
+    </adtcomp:entry>
+  </adtcomp:inactiveObjects>
+  <adtcomp:messages>
+    <adtcomp:msg adtcomp:type="E" adtcomp:objDescr="ZTEST_F01" adtcomp:line="5">
+      <adtcomp:shortText>
+        <adtcomp:txt>Syntax error: "." expected.</adtcomp:txt>
+      </adtcomp:shortText>
+    </adtcomp:msg>
+  </adtcomp:messages>
+</adtcomp:activationLog>`
+
+	result, err := parseActivationResult([]byte(xmlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Error("should be failure: SAP returned E-type message and inactive object")
+	}
+	if len(result.Messages) == 0 {
+		t.Fatal("expected at least one message")
+	}
+	if result.Messages[0].Type != "E" {
+		t.Errorf("expected message type 'E', got %q", result.Messages[0].Type)
+	}
+	if result.Messages[0].ShortText == "" {
+		t.Error("expected non-empty short text")
+	}
+	if len(result.Inactive) == 0 {
+		t.Fatal("expected at least one inactive object")
+	}
+	if result.Inactive[0].Name != "ZTEST_F01" {
+		t.Errorf("expected inactive name 'ZTEST_F01', got %q", result.Inactive[0].Name)
+	}
+}
+
+func TestParseActivationResult_MessagesOnlyNoInactive_DetectsFailure(t *testing.T) {
+	// Some SAP versions return messages without inactiveObjects for include errors
+	xmlData := `<?xml version="1.0" encoding="utf-8"?>
+<adtcomp:activationLog xmlns:adtcomp="http://www.sap.com/adt/activation">
+  <adtcomp:messages>
+    <adtcomp:msg adtcomp:type="E" adtcomp:line="3">
+      <adtcomp:shortText>
+        <adtcomp:txt>Syntax error in include.</adtcomp:txt>
+      </adtcomp:shortText>
+    </adtcomp:msg>
+  </adtcomp:messages>
+</adtcomp:activationLog>`
+
+	result, err := parseActivationResult([]byte(xmlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Error("should be failure: E-type message present")
+	}
+	if result.Messages[0].Type != "E" {
+		t.Errorf("expected type 'E', got %q", result.Messages[0].Type)
+	}
+}
+
+// --- parseSyntaxCheckResults ---
+
+func TestParseSyntaxCheckResults_NamespacedResponse_ParsesErrors(t *testing.T) {
+	// Verify that stripping all namespaces (not just chkrun:) works correctly
+	xmlData := `<?xml version="1.0" encoding="utf-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun" xmlns:adtcore="http://www.sap.com/adt/core">
+  <chkrun:checkReport chkrun:reporter="abapCheckRun">
+    <chkrun:checkMessageList>
+      <chkrun:checkMessage chkrun:uri="/sap/bc/adt/programs/includes/ztest_f01/source/main#start=5,1" chkrun:type="E" chkrun:shortText="Syntax error: period expected."/>
+      <chkrun:checkMessage chkrun:uri="/sap/bc/adt/programs/includes/ztest_f01/source/main#start=8,3" chkrun:type="W" chkrun:shortText="Unused variable LV_X."/>
+    </chkrun:checkMessageList>
+  </chkrun:checkReport>
+</chkrun:checkRunReports>`
+
+	results, err := parseSyntaxCheckResults([]byte(xmlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].Severity != "E" {
+		t.Errorf("expected severity 'E', got %q", results[0].Severity)
+	}
+	if results[0].Line != 5 {
+		t.Errorf("expected line 5, got %d", results[0].Line)
+	}
+	if results[1].Severity != "W" {
+		t.Errorf("expected severity 'W', got %q", results[1].Severity)
+	}
+}
+
 func TestParseInactiveObjects(t *testing.T) {
 	xmlData := `<?xml version="1.0" encoding="utf-8"?>
 <ioc:inactiveObjects xmlns:ioc="http://www.sap.com/adt/activation/inactiveobjects"

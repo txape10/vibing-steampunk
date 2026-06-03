@@ -13,6 +13,23 @@ import (
 	"strings"
 )
 
+// --- XML namespace helpers ---
+
+// SAP ADT responses use namespace-prefixed attributes and elements (e.g., adtcomp:type="E",
+// chkrun:msg, adtcore:uri). Go's encoding/xml matches elements by local name regardless of
+// prefix, but does NOT match namespace-qualified attributes (ns:attr ≠ attr). stripXMLNamespaces
+// removes all namespace declarations and prefixes so unqualified struct tags work correctly.
+var (
+	reXMLNSDecl   = regexp.MustCompile(`\s*xmlns(?::\w+)?="[^"]*"`)
+	reXMLNSPrefix = regexp.MustCompile(`(</?|\s)(\w[\w-]*):([\w])`)
+)
+
+func stripXMLNamespaces(data []byte) []byte {
+	s := reXMLNSDecl.ReplaceAllString(string(data), "")
+	s = reXMLNSPrefix.ReplaceAllString(s, "${1}${3}")
+	return []byte(s)
+}
+
 // --- Syntax Check ---
 
 // SyntaxCheckResult represents a single syntax check message.
@@ -73,10 +90,9 @@ func (c *Client) SyntaxCheck(ctx context.Context, objectURL string, content stri
 }
 
 func parseSyntaxCheckResults(data []byte) ([]SyntaxCheckResult, error) {
-	// The response uses namespace prefixes like chkrun:uri, chkrun:type, etc.
-	// Go's xml package doesn't handle namespaced attributes well, so we strip the prefix
-	xmlStr := string(data)
-	xmlStr = strings.ReplaceAll(xmlStr, "chkrun:", "")
+	// stripXMLNamespaces removes all namespace prefixes and declarations (chkrun:, adtcore:, etc.)
+	// so that Go's encoding/xml can match elements and attributes by local name.
+	xmlStr := string(stripXMLNamespaces(data))
 
 	type checkMessage struct {
 		URI       string `xml:"uri,attr"`
@@ -195,6 +211,9 @@ func parseActivationResult(data []byte) (*ActivationResult, error) {
 	if len(data) == 0 {
 		return result, nil
 	}
+
+	// Strip namespace prefixes (adtcomp:, adtcore:, etc.) so that xml:"type,attr" etc. match.
+	data = stripXMLNamespaces(data)
 
 	type msg struct {
 		ObjDescr       string `xml:"objDescr,attr"`
