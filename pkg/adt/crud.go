@@ -1514,6 +1514,533 @@ func mapFieldType(f TableField) string {
 	return strings.ToLower(t)
 }
 
+// --- DDIC XML-Metadata Objects (Domain, Data Element, Table Type, Lock Object) ---
+//
+// These four object types use XML metadata format (not DDL text source).
+// Workflow: POST shell → Lock → PUT full XML → Unlock → Activate.
+
+// writeXMLObject locks an object, PUTs XML metadata to its URL, then unlocks.
+func (c *Client) writeXMLObject(ctx context.Context, objectURL, xmlBody, transport string) error {
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+	if err != nil {
+		return fmt.Errorf("locking: %w", err)
+	}
+
+	params := url.Values{}
+	params.Set("lockHandle", lock.LockHandle)
+	if transport != "" {
+		params.Set("corrNr", transport)
+	}
+
+	_, putErr := c.transport.Request(ctx, objectURL, &RequestOptions{
+		Method:      http.MethodPut,
+		Query:       params,
+		Body:        []byte(xmlBody),
+		ContentType: "application/*",
+	})
+	_ = c.UnlockObject(ctx, objectURL, lock.LockHandle) // best-effort
+	if putErr != nil {
+		return fmt.Errorf("writing XML metadata: %w", putErr)
+	}
+	return nil
+}
+
+// --- Domain (DOMA/DD) ---
+
+// DomainFixedValue represents a fixed value (value list) entry in a domain.
+type DomainFixedValue struct {
+	Value       string `json:"value"`
+	Description string `json:"description"`
+}
+
+// CreateDomainOptions defines options for creating a DDIC domain (SE11 DOMA).
+type CreateDomainOptions struct {
+	Name        string             `json:"name"`              // Domain name (max 30, Z/Y prefix)
+	Description string             `json:"description"`       // Short description
+	Package     string             `json:"package,omitempty"` // Target package (default: $TMP)
+	DataType    string             `json:"data_type"`         // CHAR, NUMC, INT4, DEC, DATS, TIMS…
+	Length      int                `json:"length"`            // Field length
+	Decimals    int                `json:"decimals,omitempty"`
+	Lowercase   bool               `json:"lowercase,omitempty"`
+	FixedValues []DomainFixedValue `json:"fixed_values,omitempty"` // Optional value list
+	Transport   string             `json:"transport,omitempty"`
+}
+
+// CreateDomain creates a new DDIC domain (SE11 DOMA).
+func (c *Client) CreateDomain(ctx context.Context, opts CreateDomainOptions) error {
+	if err := c.checkSafety(OpCreate, "CreateDomain"); err != nil {
+		return err
+	}
+	opts.Name = strings.ToUpper(opts.Name)
+	if opts.Name == "" || len(opts.Name) > 30 {
+		return fmt.Errorf("domain name must be 1–30 characters")
+	}
+	if opts.DataType == "" {
+		return fmt.Errorf("data_type is required (e.g. CHAR, NUMC, INT4)")
+	}
+	if opts.Package == "" {
+		opts.Package = "$TMP"
+	}
+	opts.DataType = strings.ToUpper(opts.DataType)
+
+	shellBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<doma:domain xmlns:doma="http://www.sap.com/dictionary/domain"
+             xmlns:adtcore="http://www.sap.com/adt/core"
+             adtcore:name="%s" adtcore:type="DOMA/DD"
+             adtcore:description="%s"
+             adtcore:language="ES" adtcore:masterLanguage="ES">
+  <adtcore:packageRef adtcore:name="%s"/>
+</doma:domain>`, opts.Name, escapeXML(opts.Description), opts.Package)
+
+	q := url.Values{}
+	if opts.Transport != "" {
+		q.Set("corrNr", opts.Transport)
+	}
+	if _, err := c.transport.Request(ctx, "/sap/bc/adt/ddic/domains", &RequestOptions{
+		Method: http.MethodPost, Query: q,
+		Body: []byte(shellBody), ContentType: "application/*", Accept: "application/*",
+	}); err != nil {
+		return fmt.Errorf("creating domain shell: %w", err)
+	}
+
+	objectURL := fmt.Sprintf("/sap/bc/adt/ddic/domains/%s", strings.ToLower(opts.Name))
+	if err := c.writeXMLObject(ctx, objectURL, generateDomainXML(opts), opts.Transport); err != nil {
+		return fmt.Errorf("writing domain metadata: %w", err)
+	}
+	if _, err := c.Activate(ctx, objectURL, opts.Name); err != nil {
+		return fmt.Errorf("activating domain: %w", err)
+	}
+	return nil
+}
+
+func generateDomainXML(opts CreateDomainOptions) string {
+	length := fmt.Sprintf("%06d", opts.Length)
+	decimals := fmt.Sprintf("%06d", opts.Decimals)
+	lowercase := boolStr(opts.Lowercase)
+
+	var fvSB strings.Builder
+	for _, fv := range opts.FixedValues {
+		fvSB.WriteString(fmt.Sprintf("\n        <doma:fixValue><doma:lowValue>%s</doma:lowValue><doma:description>%s</doma:description></doma:fixValue>",
+			escapeXML(fv.Value), escapeXML(fv.Description)))
+	}
+
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<doma:domain xmlns:doma="http://www.sap.com/dictionary/domain"
+             xmlns:adtcore="http://www.sap.com/adt/core"
+             adtcore:name="%s" adtcore:type="DOMA/DD"
+             adtcore:description="%s"
+             adtcore:language="ES" adtcore:masterLanguage="ES">
+  <adtcore:packageRef adtcore:name="%s"/>
+  <doma:content>
+    <doma:typeInformation>
+      <doma:datatype>%s</doma:datatype>
+      <doma:length>%s</doma:length>
+      <doma:decimals>%s</doma:decimals>
+    </doma:typeInformation>
+    <doma:outputInformation>
+      <doma:length>%s</doma:length>
+      <doma:style>00</doma:style>
+      <doma:conversionExit/>
+      <doma:signExists>false</doma:signExists>
+      <doma:lowercase>%s</doma:lowercase>
+      <doma:ampmFormat>false</doma:ampmFormat>
+    </doma:outputInformation>
+    <doma:valueInformation>
+      <doma:valueTableRef/>
+      <doma:appendExists>false</doma:appendExists>
+      <doma:fixValues>%s</doma:fixValues>
+    </doma:valueInformation>
+  </doma:content>
+</doma:domain>`,
+		opts.Name, escapeXML(opts.Description), opts.Package,
+		opts.DataType, length, decimals, length, lowercase, fvSB.String())
+}
+
+// --- Data Element (DTEL/DE) ---
+
+// CreateDataElementOptions defines options for creating a DDIC data element (SE11 DTEL).
+type CreateDataElementOptions struct {
+	Name             string `json:"name"`                        // Data element name (max 30, Z/Y prefix)
+	Description      string `json:"description"`                 // Short description
+	Package          string `json:"package,omitempty"`           // Target package (default: $TMP)
+	TypeKind         string `json:"type_kind"`                   // "domain" (default) or "predefinedAbapType"
+	TypeName         string `json:"type_name"`                   // Domain name or ABAP built-in type
+	DataType         string `json:"data_type,omitempty"`         // Underlying ABAP type (CHAR, INT4, DATS…). Required by SAP in PUT.
+	DataTypeLength   int    `json:"data_type_length,omitempty"`  // Underlying type length (0 = SAP default)
+	DataTypeDecimals int    `json:"data_type_decimals,omitempty"` // Underlying type decimals
+	LabelShort       string `json:"label_short"`                 // ≤10 chars
+	LabelMedium      string `json:"label_medium"`                // ≤20 chars
+	LabelLong        string `json:"label_long"`                  // ≤40 chars
+	LabelHeading     string `json:"label_heading"`               // ≤55 chars (column heading)
+	SearchHelp       string `json:"search_help,omitempty"`
+	ParameterID      string `json:"parameter_id,omitempty"`      // SET/GET parameter
+	Transport        string `json:"transport,omitempty"`
+}
+
+// CreateDataElement creates a new DDIC data element (SE11 DTEL).
+func (c *Client) CreateDataElement(ctx context.Context, opts CreateDataElementOptions) error {
+	if err := c.checkSafety(OpCreate, "CreateDataElement"); err != nil {
+		return err
+	}
+	opts.Name = strings.ToUpper(opts.Name)
+	if opts.Name == "" || len(opts.Name) > 30 {
+		return fmt.Errorf("data element name must be 1–30 characters")
+	}
+	if opts.TypeName == "" {
+		return fmt.Errorf("type_name is required (domain name or ABAP type)")
+	}
+	if opts.Package == "" {
+		opts.Package = "$TMP"
+	}
+	if opts.TypeKind == "" {
+		opts.TypeKind = "domain"
+	}
+	// Default labels to description if empty
+	if opts.LabelShort == "" {
+		opts.LabelShort = opts.Description
+	}
+	if opts.LabelMedium == "" {
+		opts.LabelMedium = opts.Description
+	}
+	if opts.LabelLong == "" {
+		opts.LabelLong = opts.Description
+	}
+	if opts.LabelHeading == "" {
+		opts.LabelHeading = opts.Description
+	}
+
+	shellBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<blue:wbobj xmlns:blue="http://www.sap.com/wbobj/dictionary/dtel"
+            xmlns:adtcore="http://www.sap.com/adt/core"
+            adtcore:name="%s" adtcore:type="DTEL/DE"
+            adtcore:description="%s"
+            adtcore:language="ES" adtcore:masterLanguage="ES">
+  <adtcore:packageRef adtcore:name="%s"/>
+</blue:wbobj>`, opts.Name, escapeXML(opts.Description), opts.Package)
+
+	q := url.Values{}
+	if opts.Transport != "" {
+		q.Set("corrNr", opts.Transport)
+	}
+	if _, err := c.transport.Request(ctx, "/sap/bc/adt/ddic/dataelements", &RequestOptions{
+		Method: http.MethodPost, Query: q,
+		Body: []byte(shellBody), ContentType: "application/*", Accept: "application/*",
+	}); err != nil {
+		return fmt.Errorf("creating data element shell: %w", err)
+	}
+
+	objectURL := fmt.Sprintf("/sap/bc/adt/ddic/dataelements/%s", strings.ToLower(opts.Name))
+	if err := c.writeXMLObject(ctx, objectURL, generateDataElementXML(opts), opts.Transport); err != nil {
+		return fmt.Errorf("writing data element metadata: %w", err)
+	}
+	if _, err := c.Activate(ctx, objectURL, opts.Name); err != nil {
+		return fmt.Errorf("activating data element: %w", err)
+	}
+	return nil
+}
+
+func generateDataElementXML(opts CreateDataElementOptions) string {
+	// dtel:dataType, dtel:dataTypeLength, dtel:dataTypeDecimals are required by SAP in the PUT.
+	// For predefinedAbapType: dataType = typeName. For domain: caller supplies it (derived from domain).
+	dataType := opts.DataType
+	if dataType == "" && opts.TypeKind == "predefinedAbapType" {
+		dataType = strings.ToUpper(opts.TypeName)
+	}
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<blue:wbobj xmlns:blue="http://www.sap.com/wbobj/dictionary/dtel"
+            xmlns:adtcore="http://www.sap.com/adt/core"
+            xmlns:dtel="http://www.sap.com/adt/dictionary/dataelements"
+            adtcore:name="%s" adtcore:type="DTEL/DE"
+            adtcore:description="%s"
+            adtcore:language="ES" adtcore:masterLanguage="ES">
+  <adtcore:packageRef adtcore:name="%s"/>
+  <dtel:dataElement>
+    <dtel:typeKind>%s</dtel:typeKind>
+    <dtel:typeName>%s</dtel:typeName>
+    <dtel:dataType>%s</dtel:dataType>
+    <dtel:dataTypeLength>%06d</dtel:dataTypeLength>
+    <dtel:dataTypeDecimals>%06d</dtel:dataTypeDecimals>
+    <dtel:shortFieldLabel>%s</dtel:shortFieldLabel>
+    <dtel:shortFieldLength>10</dtel:shortFieldLength>
+    <dtel:shortFieldMaxLength>10</dtel:shortFieldMaxLength>
+    <dtel:mediumFieldLabel>%s</dtel:mediumFieldLabel>
+    <dtel:mediumFieldLength>20</dtel:mediumFieldLength>
+    <dtel:mediumFieldMaxLength>20</dtel:mediumFieldMaxLength>
+    <dtel:longFieldLabel>%s</dtel:longFieldLabel>
+    <dtel:longFieldLength>40</dtel:longFieldLength>
+    <dtel:longFieldMaxLength>40</dtel:longFieldMaxLength>
+    <dtel:headingFieldLabel>%s</dtel:headingFieldLabel>
+    <dtel:headingFieldLength>55</dtel:headingFieldLength>
+    <dtel:headingFieldMaxLength>55</dtel:headingFieldMaxLength>
+    <dtel:searchHelp>%s</dtel:searchHelp>
+    <dtel:searchHelpParameter/>
+    <dtel:setGetParameter>%s</dtel:setGetParameter>
+    <dtel:defaultComponentName/>
+    <dtel:deactivateInputHistory>false</dtel:deactivateInputHistory>
+    <dtel:changeDocument>false</dtel:changeDocument>
+    <dtel:leftToRightDirection>false</dtel:leftToRightDirection>
+    <dtel:deactivateBIDIFiltering>false</dtel:deactivateBIDIFiltering>
+  </dtel:dataElement>
+</blue:wbobj>`,
+		opts.Name, escapeXML(opts.Description), opts.Package,
+		opts.TypeKind, escapeXML(opts.TypeName),
+		escapeXML(dataType), opts.DataTypeLength, opts.DataTypeDecimals,
+		escapeXML(truncateRunes(opts.LabelShort, 10)),
+		escapeXML(truncateRunes(opts.LabelMedium, 20)),
+		escapeXML(truncateRunes(opts.LabelLong, 40)),
+		escapeXML(truncateRunes(opts.LabelHeading, 55)),
+		escapeXML(opts.SearchHelp), escapeXML(opts.ParameterID))
+}
+
+// --- Table Type (TTYP/DA) ---
+
+// CreateTableTypeOptions defines options for creating a DDIC table type (SE11 TTYP).
+type CreateTableTypeOptions struct {
+	Name        string `json:"name"`                    // Table type name (max 30, Z/Y prefix)
+	Description string `json:"description"`             // Short description
+	Package     string `json:"package,omitempty"`       // Target package (default: $TMP)
+	RowTypeKind string `json:"row_type_kind,omitempty"` // "dictionaryType" (default) or "predefinedAbapType"
+	RowTypeName string `json:"row_type_name"`           // Structure/table name (e.g. BAPIRET2)
+	AccessType  string `json:"access_type,omitempty"`  // "standard" (default), "sorted", "hashed"
+	KeyDef      string `json:"key_definition,omitempty"` // "standard" (default), "rowType", "notSpecified"
+	KeyKind     string `json:"key_kind,omitempty"`      // "nonUnique" (default), "unique"
+	Transport   string `json:"transport,omitempty"`
+}
+
+// CreateTableType creates a new DDIC table type (SE11 TTYP).
+func (c *Client) CreateTableType(ctx context.Context, opts CreateTableTypeOptions) error {
+	if err := c.checkSafety(OpCreate, "CreateTableType"); err != nil {
+		return err
+	}
+	opts.Name = strings.ToUpper(opts.Name)
+	if opts.Name == "" || len(opts.Name) > 30 {
+		return fmt.Errorf("table type name must be 1–30 characters")
+	}
+	if opts.RowTypeName == "" {
+		return fmt.Errorf("row_type_name is required (e.g. BAPIRET2)")
+	}
+	if opts.Package == "" {
+		opts.Package = "$TMP"
+	}
+	if opts.RowTypeKind == "" {
+		opts.RowTypeKind = "dictionaryType"
+	}
+	if opts.AccessType == "" {
+		opts.AccessType = "standard"
+	}
+	if opts.KeyDef == "" {
+		opts.KeyDef = "standard"
+	}
+	if opts.KeyKind == "" {
+		opts.KeyKind = "nonUnique"
+	}
+
+	shellBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<ttyp:tableType xmlns:ttyp="http://www.sap.com/dictionary/tabletype"
+                xmlns:adtcore="http://www.sap.com/adt/core"
+                adtcore:name="%s" adtcore:type="TTYP/DA"
+                adtcore:description="%s"
+                adtcore:language="ES" adtcore:masterLanguage="ES">
+  <adtcore:packageRef adtcore:name="%s"/>
+</ttyp:tableType>`, opts.Name, escapeXML(opts.Description), opts.Package)
+
+	q := url.Values{}
+	if opts.Transport != "" {
+		q.Set("corrNr", opts.Transport)
+	}
+	if _, err := c.transport.Request(ctx, "/sap/bc/adt/ddic/tabletypes", &RequestOptions{
+		Method: http.MethodPost, Query: q,
+		Body: []byte(shellBody), ContentType: "application/*", Accept: "application/*",
+	}); err != nil {
+		return fmt.Errorf("creating table type shell: %w", err)
+	}
+
+	objectURL := fmt.Sprintf("/sap/bc/adt/ddic/tabletypes/%s", strings.ToLower(opts.Name))
+	if err := c.writeXMLObject(ctx, objectURL, generateTableTypeXML(opts), opts.Transport); err != nil {
+		return fmt.Errorf("writing table type metadata: %w", err)
+	}
+	if _, err := c.Activate(ctx, objectURL, opts.Name); err != nil {
+		return fmt.Errorf("activating table type: %w", err)
+	}
+	return nil
+}
+
+func generateTableTypeXML(opts CreateTableTypeOptions) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<ttyp:tableType xmlns:ttyp="http://www.sap.com/dictionary/tabletype"
+                xmlns:adtcore="http://www.sap.com/adt/core"
+                adtcore:name="%s" adtcore:type="TTYP/DA"
+                adtcore:description="%s"
+                adtcore:language="ES" adtcore:masterLanguage="ES">
+  <adtcore:packageRef adtcore:name="%s"/>
+  <ttyp:rowType>
+    <ttyp:typeKind>%s</ttyp:typeKind>
+    <ttyp:typeName>%s</ttyp:typeName>
+    <ttyp:builtInType>
+      <ttyp:dataType>STRU</ttyp:dataType>
+      <ttyp:length>000000</ttyp:length>
+      <ttyp:decimals>000000</ttyp:decimals>
+    </ttyp:builtInType>
+    <ttyp:rangeType/>
+  </ttyp:rowType>
+  <ttyp:initialRowCount>00000</ttyp:initialRowCount>
+  <ttyp:accessType>%s</ttyp:accessType>
+  <ttyp:primaryKey ttyp:isVisible="true" ttyp:isEditable="true">
+    <ttyp:definition>%s</ttyp:definition>
+    <ttyp:kind>%s</ttyp:kind>
+    <ttyp:components ttyp:isVisible="false"/>
+    <ttyp:alias/>
+  </ttyp:primaryKey>
+  <ttyp:secondaryKeys ttyp:isVisible="true" ttyp:isEditable="true">
+    <ttyp:allowed>notSpecified</ttyp:allowed>
+  </ttyp:secondaryKeys>
+</ttyp:tableType>`,
+		opts.Name, escapeXML(opts.Description), opts.Package,
+		opts.RowTypeKind, escapeXML(strings.ToUpper(opts.RowTypeName)),
+		opts.AccessType, opts.KeyDef, opts.KeyKind)
+}
+
+// --- Lock Object (ENQU/DL) ---
+
+// LockObjectParameter represents a field exposed as a lock parameter.
+type LockObjectParameter struct {
+	ParameterName string `json:"parameter_name,omitempty"` // Exposed name (defaults to field_name)
+	TableName     string `json:"table_name"`
+	FieldName     string `json:"field_name"`
+	Wanted        bool   `json:"wanted"` // Exposed as parameter (default: true)
+}
+
+// CreateLockObjectOptions defines options for creating a DDIC lock object (SE11 ENQU).
+type CreateLockObjectOptions struct {
+	Name           string                `json:"name"`                    // Lock object name (convention: E prefix, max 30)
+	Description    string                `json:"description"`             // Short description
+	Package        string                `json:"package,omitempty"`       // Target package (default: $TMP)
+	PrimaryTable   string                `json:"primary_table"`           // Primary table to lock
+	LockMode       string                `json:"lock_mode,omitempty"`     // "E" exclusive (default), "S" shared, "X" excl. non-cumul.
+	LockParameters []LockObjectParameter `json:"lock_parameters,omitempty"` // Key fields to expose
+	AllowRFC       bool                  `json:"allow_rfc,omitempty"`
+	Transport      string                `json:"transport,omitempty"`
+}
+
+// CreateLockObject creates a new DDIC lock object (SE11 ENQU).
+func (c *Client) CreateLockObject(ctx context.Context, opts CreateLockObjectOptions) error {
+	if err := c.checkSafety(OpCreate, "CreateLockObject"); err != nil {
+		return err
+	}
+	opts.Name = strings.ToUpper(opts.Name)
+	if opts.Name == "" || len(opts.Name) > 30 {
+		return fmt.Errorf("lock object name must be 1–30 characters")
+	}
+	if opts.PrimaryTable == "" {
+		return fmt.Errorf("primary_table is required")
+	}
+	if opts.Package == "" {
+		opts.Package = "$TMP"
+	}
+	if opts.LockMode == "" {
+		opts.LockMode = "E"
+	}
+	opts.PrimaryTable = strings.ToUpper(opts.PrimaryTable)
+
+	shellBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<enqu:lockobject xmlns:enqu="http://www.sap.com/adt/ddic/enqu"
+                 xmlns:adtcore="http://www.sap.com/adt/core"
+                 adtcore:name="%s" adtcore:type="ENQU/DL"
+                 adtcore:description="%s"
+                 adtcore:language="ES" adtcore:masterLanguage="ES">
+  <adtcore:packageRef adtcore:name="%s"/>
+  <enqu:content>
+    <enqu:allowRFC>false</enqu:allowRFC>
+    <enqu:primaryTable>
+      <enqu:tableName>%s</enqu:tableName>
+      <enqu:lockMode>%s</enqu:lockMode>
+    </enqu:primaryTable>
+    <enqu:secondaryTables/>
+    <enqu:lockParameters/>
+  </enqu:content>
+</enqu:lockobject>`, opts.Name, escapeXML(opts.Description), opts.Package, opts.PrimaryTable, opts.LockMode)
+
+	q := url.Values{}
+	if opts.Transport != "" {
+		q.Set("corrNr", opts.Transport)
+	}
+	if _, err := c.transport.Request(ctx, "/sap/bc/adt/ddic/lockobjects/sources", &RequestOptions{
+		Method: http.MethodPost, Query: q,
+		Body: []byte(shellBody), ContentType: "application/*", Accept: "application/*",
+	}); err != nil {
+		return fmt.Errorf("creating lock object shell: %w", err)
+	}
+
+	objectURL := fmt.Sprintf("/sap/bc/adt/ddic/lockobjects/sources/%s", strings.ToLower(opts.Name))
+	if err := c.writeXMLObject(ctx, objectURL, generateLockObjectXML(opts), opts.Transport); err != nil {
+		return fmt.Errorf("writing lock object metadata: %w", err)
+	}
+	if _, err := c.Activate(ctx, objectURL, opts.Name); err != nil {
+		return fmt.Errorf("activating lock object: %w", err)
+	}
+	return nil
+}
+
+func generateLockObjectXML(opts CreateLockObjectOptions) string {
+	var paramsSB strings.Builder
+	for _, p := range opts.LockParameters {
+		paramName := p.ParameterName
+		if paramName == "" {
+			paramName = p.FieldName
+		}
+		paramsSB.WriteString(fmt.Sprintf(`
+      <enqu:lockParameter>
+        <enqu:parameterWanted>%s</enqu:parameterWanted>
+        <enqu:parameterName>%s</enqu:parameterName>
+        <enqu:tableName>%s</enqu:tableName>
+        <enqu:fieldName>%s</enqu:fieldName>
+      </enqu:lockParameter>`,
+			boolStr(p.Wanted),
+			escapeXML(strings.ToUpper(paramName)),
+			escapeXML(strings.ToUpper(p.TableName)),
+			escapeXML(strings.ToUpper(p.FieldName))))
+	}
+
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<enqu:lockobject xmlns:enqu="http://www.sap.com/adt/ddic/enqu"
+                 xmlns:adtcore="http://www.sap.com/adt/core"
+                 adtcore:name="%s" adtcore:type="ENQU/DL"
+                 adtcore:description="%s"
+                 adtcore:language="ES" adtcore:masterLanguage="ES">
+  <adtcore:packageRef adtcore:name="%s"/>
+  <enqu:content>
+    <enqu:allowRFC>%s</enqu:allowRFC>
+    <enqu:primaryTable>
+      <enqu:tableName>%s</enqu:tableName>
+      <enqu:lockMode>%s</enqu:lockMode>
+    </enqu:primaryTable>
+    <enqu:secondaryTables/>
+    <enqu:lockParameters>%s
+    </enqu:lockParameters>
+  </enqu:content>
+</enqu:lockobject>`,
+		opts.Name, escapeXML(opts.Description), opts.Package,
+		boolStr(opts.AllowRFC), escapeXML(opts.PrimaryTable), opts.LockMode,
+		paramsSB.String())
+}
+
+// --- Helpers ---
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max])
+	}
+	return s
+}
+
 func escapeQuote(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }

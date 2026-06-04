@@ -153,8 +153,20 @@ func (c *Client) getSourceUncached(ctx context.Context, objectType, name string,
 		}
 		return string(data), nil
 
+	case "DOMA":
+		return c.GetXMLMetadataObject(ctx, fmt.Sprintf("/sap/bc/adt/ddic/domains/%s", strings.ToLower(name)))
+
+	case "DTEL":
+		return c.GetXMLMetadataObject(ctx, fmt.Sprintf("/sap/bc/adt/ddic/dataelements/%s", strings.ToLower(name)))
+
+	case "TTYP":
+		return c.GetXMLMetadataObject(ctx, fmt.Sprintf("/sap/bc/adt/ddic/tabletypes/%s", strings.ToLower(name)))
+
+	case "ENQU":
+		return c.GetXMLMetadataObject(ctx, fmt.Sprintf("/sap/bc/adt/ddic/lockobjects/sources/%s", strings.ToLower(name)))
+
 	default:
-		return "", fmt.Errorf("unsupported object type: %s (supported: PROG, CLAS, INTF, FUNC, FUGR, INCL, DDLS, VIEW, BDEF, SRVD, SRVB, MSAG)", objectType)
+		return "", fmt.Errorf("unsupported object type: %s (supported: PROG, CLAS, INTF, FUNC, FUGR, INCL, DDLS, VIEW, BDEF, SRVD, SRVB, MSAG, DOMA, DTEL, TTYP, ENQU)", objectType)
 	}
 }
 

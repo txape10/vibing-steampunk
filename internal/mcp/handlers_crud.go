@@ -43,6 +43,14 @@ func (s *Server) routeCRUDAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleCreateTable, params)
 		case "STRU":
 			return s.callHandler(ctx, s.handleCreateStructure, params)
+		case "DOMA":
+			return s.callHandler(ctx, s.handleCreateDomain, params)
+		case "DTEL":
+			return s.callHandler(ctx, s.handleCreateDataElement, params)
+		case "TTYP":
+			return s.callHandler(ctx, s.handleCreateTableType, params)
+		case "ENQU":
+			return s.callHandler(ctx, s.handleCreateLockObject, params)
 		case "CLONE":
 			return s.callHandler(ctx, s.handleCloneObject, params)
 		}
@@ -392,6 +400,243 @@ func (s *Server) handleCreateStructure(ctx context.Context, request mcp.CallTool
 		"package":     pkg,
 		"description": description,
 		"fields":      len(fields),
+	}
+	output, _ := json.MarshalIndent(result, "", "  ")
+	return mcp.NewToolResultText(string(output)), nil
+
+}
+
+func (s *Server) handleCreateDomain(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+
+	name, ok := request.GetArguments()["name"].(string)
+	if !ok || name == "" {
+		return newToolResultError("name is required"), nil
+	}
+	description, _ := request.GetArguments()["description"].(string)
+	dataType, ok := request.GetArguments()["data_type"].(string)
+	if !ok || dataType == "" {
+		return newToolResultError("data_type is required (e.g. CHAR, NUMC, INT4)"), nil
+	}
+
+	length := 0
+	if v, ok := request.GetArguments()["length"]; ok {
+		switch n := v.(type) {
+		case float64:
+			length = int(n)
+		case int:
+			length = n
+		}
+	}
+
+	decimals := 0
+	if v, ok := request.GetArguments()["decimals"]; ok {
+		if n, ok := v.(float64); ok {
+			decimals = int(n)
+		}
+	}
+
+	lowercase := false
+	if v, ok := request.GetArguments()["lowercase"].(bool); ok {
+		lowercase = v
+	}
+
+	pkg := "$TMP"
+	if p, ok := request.GetArguments()["package"].(string); ok && p != "" {
+		pkg = strings.ToUpper(p)
+	}
+	transport, _ := request.GetArguments()["transport"].(string)
+
+	var fixedValues []adt.DomainFixedValue
+	if fvJSON, ok := request.GetArguments()["fixed_values"].(string); ok && fvJSON != "" {
+		if err := json.Unmarshal([]byte(fvJSON), &fixedValues); err != nil {
+			return newToolResultError(fmt.Sprintf("Invalid fixed_values JSON: %v", err)), nil
+		}
+	}
+
+	opts := adt.CreateDomainOptions{
+		Name:        name,
+		Description: description,
+		Package:     pkg,
+		DataType:    dataType,
+		Length:      length,
+		Decimals:    decimals,
+		Lowercase:   lowercase,
+		FixedValues: fixedValues,
+		Transport:   transport,
+	}
+
+	if err := s.adtClient.CreateDomain(ctx, opts); err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to create domain: %v", err)), nil
+	}
+
+	result := map[string]interface{}{
+		"status": "created", "domain": strings.ToUpper(name),
+		"package": pkg, "data_type": dataType, "length": length,
+	}
+	output, _ := json.MarshalIndent(result, "", "  ")
+	return mcp.NewToolResultText(string(output)), nil
+
+}
+
+func (s *Server) handleCreateDataElement(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+
+	name, ok := request.GetArguments()["name"].(string)
+	if !ok || name == "" {
+		return newToolResultError("name is required"), nil
+	}
+	description, _ := request.GetArguments()["description"].(string)
+	typeName, ok := request.GetArguments()["type_name"].(string)
+	if !ok || typeName == "" {
+		return newToolResultError("type_name is required (domain name or ABAP type)"), nil
+	}
+
+	typeKind, _ := request.GetArguments()["type_kind"].(string)
+	dataType, _ := request.GetArguments()["data_type"].(string)
+	var dataTypeLength, dataTypeDecimals int
+	if n, ok := request.GetArguments()["data_type_length"].(float64); ok {
+		dataTypeLength = int(n)
+	}
+	if n, ok := request.GetArguments()["data_type_decimals"].(float64); ok {
+		dataTypeDecimals = int(n)
+	}
+	labelShort, _ := request.GetArguments()["label_short"].(string)
+	labelMedium, _ := request.GetArguments()["label_medium"].(string)
+	labelLong, _ := request.GetArguments()["label_long"].(string)
+	labelHeading, _ := request.GetArguments()["label_heading"].(string)
+	searchHelp, _ := request.GetArguments()["search_help"].(string)
+	parameterID, _ := request.GetArguments()["parameter_id"].(string)
+
+	pkg := "$TMP"
+	if p, ok := request.GetArguments()["package"].(string); ok && p != "" {
+		pkg = strings.ToUpper(p)
+	}
+	transport, _ := request.GetArguments()["transport"].(string)
+
+	opts := adt.CreateDataElementOptions{
+		Name:             name,
+		Description:      description,
+		Package:          pkg,
+		TypeKind:         typeKind,
+		TypeName:         typeName,
+		DataType:         dataType,
+		DataTypeLength:   dataTypeLength,
+		DataTypeDecimals: dataTypeDecimals,
+		LabelShort:       labelShort,
+		LabelMedium:      labelMedium,
+		LabelLong:        labelLong,
+		LabelHeading:     labelHeading,
+		SearchHelp:       searchHelp,
+		ParameterID:      parameterID,
+		Transport:        transport,
+	}
+
+	if err := s.adtClient.CreateDataElement(ctx, opts); err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to create data element: %v", err)), nil
+	}
+
+	result := map[string]interface{}{
+		"status": "created", "data_element": strings.ToUpper(name),
+		"package": pkg, "type_name": typeName,
+	}
+	output, _ := json.MarshalIndent(result, "", "  ")
+	return mcp.NewToolResultText(string(output)), nil
+
+}
+
+func (s *Server) handleCreateTableType(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+
+	name, ok := request.GetArguments()["name"].(string)
+	if !ok || name == "" {
+		return newToolResultError("name is required"), nil
+	}
+	description, _ := request.GetArguments()["description"].(string)
+	rowTypeName, ok := request.GetArguments()["row_type_name"].(string)
+	if !ok || rowTypeName == "" {
+		return newToolResultError("row_type_name is required (e.g. BAPIRET2)"), nil
+	}
+
+	rowTypeKind, _ := request.GetArguments()["row_type_kind"].(string)
+	accessType, _ := request.GetArguments()["access_type"].(string)
+	keyDef, _ := request.GetArguments()["key_definition"].(string)
+	keyKind, _ := request.GetArguments()["key_kind"].(string)
+
+	pkg := "$TMP"
+	if p, ok := request.GetArguments()["package"].(string); ok && p != "" {
+		pkg = strings.ToUpper(p)
+	}
+	transport, _ := request.GetArguments()["transport"].(string)
+
+	opts := adt.CreateTableTypeOptions{
+		Name:        name,
+		Description: description,
+		Package:     pkg,
+		RowTypeKind: rowTypeKind,
+		RowTypeName: rowTypeName,
+		AccessType:  accessType,
+		KeyDef:      keyDef,
+		KeyKind:     keyKind,
+		Transport:   transport,
+	}
+
+	if err := s.adtClient.CreateTableType(ctx, opts); err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to create table type: %v", err)), nil
+	}
+
+	result := map[string]interface{}{
+		"status": "created", "table_type": strings.ToUpper(name),
+		"package": pkg, "row_type": rowTypeName,
+	}
+	output, _ := json.MarshalIndent(result, "", "  ")
+	return mcp.NewToolResultText(string(output)), nil
+
+}
+
+func (s *Server) handleCreateLockObject(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+
+	name, ok := request.GetArguments()["name"].(string)
+	if !ok || name == "" {
+		return newToolResultError("name is required"), nil
+	}
+	description, _ := request.GetArguments()["description"].(string)
+	primaryTable, ok := request.GetArguments()["primary_table"].(string)
+	if !ok || primaryTable == "" {
+		return newToolResultError("primary_table is required"), nil
+	}
+
+	lockMode, _ := request.GetArguments()["lock_mode"].(string)
+	allowRFC, _ := request.GetArguments()["allow_rfc"].(bool)
+
+	pkg := "$TMP"
+	if p, ok := request.GetArguments()["package"].(string); ok && p != "" {
+		pkg = strings.ToUpper(p)
+	}
+	transport, _ := request.GetArguments()["transport"].(string)
+
+	var lockParams []adt.LockObjectParameter
+	if lpJSON, ok := request.GetArguments()["lock_parameters"].(string); ok && lpJSON != "" {
+		if err := json.Unmarshal([]byte(lpJSON), &lockParams); err != nil {
+			return newToolResultError(fmt.Sprintf("Invalid lock_parameters JSON: %v", err)), nil
+		}
+	}
+
+	opts := adt.CreateLockObjectOptions{
+		Name:           name,
+		Description:    description,
+		Package:        pkg,
+		PrimaryTable:   primaryTable,
+		LockMode:       lockMode,
+		LockParameters: lockParams,
+		AllowRFC:       allowRFC,
+		Transport:      transport,
+	}
+
+	if err := s.adtClient.CreateLockObject(ctx, opts); err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to create lock object: %v", err)), nil
+	}
+
+	result := map[string]interface{}{
+		"status": "created", "lock_object": strings.ToUpper(name),
+		"package": pkg, "primary_table": strings.ToUpper(primaryTable),
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil

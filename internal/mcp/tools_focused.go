@@ -48,6 +48,10 @@ func focusedToolSet() map[string]bool {
 		"CreatePackage":      true,  // Create local packages ($...)
 		"CreateTable":        true,  // Create DDIC tables from JSON
 		"CreateStructure":    true,  // Create DDIC structures (STRU) from JSON
+		"CreateDomain":       true,  // Create DDIC domains (DOMA)
+		"CreateDataElement":  true,  // Create DDIC data elements (DTEL)
+		"CreateTableType":    true,  // Create DDIC table types (TTYP)
+		"CreateLockObject":   true,  // Create DDIC lock objects (ENQU)
 		"CompareSource":      true,  // Diff two objects
 		"CloneObject":        true,  // Copy object to new name
 		"GetClassInfo":       true,  // Quick class metadata

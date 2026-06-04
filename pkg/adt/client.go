@@ -285,6 +285,10 @@ func CanonicalObjectType(s string) string {
 		return "DTEL/DE"
 	case "DOMA":
 		return "DOMA/DD"
+	case "TTYP":
+		return "TTYP/DA"
+	case "ENQU":
+		return "ENQU/DL"
 	case "DDLS":
 		return "DDLS/DF"
 	case "MSAG":
@@ -324,8 +328,16 @@ func (c *Client) ResolveObjectRef(typeAndName string) (objectURL, objectName str
 		return "/sap/bc/adt/ddic/tables/" + encoded, name, nil
 	case "STRU":
 		return "/sap/bc/adt/ddic/structures/" + encoded, name, nil
+	case "DOMA":
+		return "/sap/bc/adt/ddic/domains/" + encoded, name, nil
+	case "DTEL":
+		return "/sap/bc/adt/ddic/dataelements/" + encoded, name, nil
+	case "TTYP":
+		return "/sap/bc/adt/ddic/tabletypes/" + encoded, name, nil
+	case "ENQU":
+		return "/sap/bc/adt/ddic/lockobjects/sources/" + encoded, name, nil
 	default:
-		return "", "", fmt.Errorf("unsupported object type %q (supported: PROG, INCL, CLAS, INTF, FUGR, DDLS, TABL, STRU)", objType)
+		return "", "", fmt.Errorf("unsupported object type %q (supported: PROG, INCL, CLAS, INTF, FUGR, DDLS, TABL, STRU, DOMA, DTEL, TTYP, ENQU)", objType)
 	}
 }
 
@@ -1282,6 +1294,21 @@ func (c *Client) GetTransaction(ctx context.Context, tcode string) (*Transaction
 		Description: ti.Description,
 		Program:     ti.Program,
 	}, nil
+}
+
+// GetXMLMetadataObject retrieves the XML representation of a DDIC object that uses
+// XML metadata format (DOMA, DTEL, TTYP, ENQU) by GETting the object URL directly.
+func (c *Client) GetXMLMetadataObject(ctx context.Context, objectURL string) (string, error) {
+	if err := c.checkSafety(OpRead, "GetXMLMetadataObject"); err != nil {
+		return "", err
+	}
+	resp, err := c.transport.Request(ctx, objectURL, &RequestOptions{
+		Accept: "application/*",
+	})
+	if err != nil {
+		return "", fmt.Errorf("reading XML metadata object: %w", err)
+	}
+	return string(resp.Body), nil
 }
 
 // --- Type Info Operations ---

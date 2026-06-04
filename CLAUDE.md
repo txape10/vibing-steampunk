@@ -63,17 +63,43 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
 - Verified on-prem with real includes that have mutual type dependencies. Commit: `c741c69`.
 - Issue: [#137](https://github.com/oisee/vibing-steampunk/issues/137)
 
-### 3. Graph Engine (`pkg/graph/`) — In Progress
+### 3. Nuevos tipos DDIC — IMPLEMENTADOS & VERIFICADOS (2026-06-04)
+
+Cuatro nuevos tipos de objeto SE11 implementados en `pkg/adt/crud.go` y expuestos como herramientas MCP:
+
+| Tipo | Tool MCP | Verificado |
+|------|----------|-----------|
+| DOMA (dominio) | `CreateDomain` | ✅ `ZVSP_TST_DOMA` en `$TMP` |
+| DTEL (elemento de dato) | `CreateDataElement` | ✅ `ZVSP_TST_DTEL` en `$TMP` |
+| TTYP (tipo de tabla) | `CreateTableType` | ✅ `ZVSP_TST_TTYP` en `$TMP` |
+| ENQU (objeto de bloqueo) | `CreateLockObject` | ✅ `EZ_VSP_TST` en `$TMP` |
+
+**Gotchas descubiertos durante las pruebas:**
+- DTEL: `dtel:dataType`, `dtel:dataTypeLength`, `dtel:dataTypeDecimals` son **obligatorios** en el PUT aunque el DTEL referencie un dominio. Sin ellos → HTTP 400.
+- ENQU: el shell POST (creación inicial) también requiere `<enqu:primaryTable>` — no solo el PUT. Sin ella → HTTP 400 "Primary table name must not be empty". La tabla primaria debe ser una tabla transparente (TABL/DT), no un tipo de tabla.
+- TTYP: el type code real en S/4HANA on-prem es `TTYP/DA`, no `TTYP/TT`.
+
+**Archivos modificados:**
+- `pkg/adt/crud.go` — `CreateDomain`, `CreateDataElement`, `CreateTableType`, `CreateLockObject`, `writeXMLObject`
+- `pkg/adt/client.go` — `CanonicalObjectType`, `ResolveObjectRef`, `GetXMLMetadataObject`
+- `pkg/adt/workflows_source.go` — `GetSource` para DOMA/DTEL/TTYP/ENQU
+- `internal/mcp/handlers_crud.go` — 4 handlers + routing
+- `internal/mcp/tools_register.go` — schemas MCP de los 4 tools
+- `internal/mcp/tools_focused.go` — whitelist
+
+**Referencia ADT API:** ver `docs/adt-api-reference.md` (investigación de `marcellourbani/abap-adt-api` + SAP tools SDK).
+
+### 4. Graph Engine (`pkg/graph/`) — In Progress
 Sequence: unify existing dep logic → SQL/ADT adapters → impact/path queries.
 - Done: core types, parser dep extraction, boundary analyzer (11 tests)
 - Done (fork): `hardcode_usage` + `hardcode_audit` — ZTCA_HARDCODE caller analysis (2026-05-29)
 - Pending: SQL adapters (CROSS/WBCROSSGT/D010INC), ADT adapters, unify `cli_deps.go` + `cli_extra.go` + `ctxcomp/analyzer.go`
 - Design: [002](reports/2026-04-05-002-graph-engine-design.md), [003](reports/2026-04-05-003-graph-engine-alignment-for-claude.md)
 
-### 4. GUI Debugger (Issue #2) — Strategic
+### 5. GUI Debugger (Issue #2) — Strategic
 Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_ADT_RES_APP`. Design: [001](reports/2026-04-05-001-gui-debugger-design.md)
 
-### 5. Open Issues
+### 6. Open Issues
 - **#88** Lock handle bug (EditSource/WriteSource) — same root cause as #132 (session affinity)
 - **#55** RunReport in APC — architectural limit
 - **#46** / **#45** Sync script flags — closed upstream (script never existed in public repo)
