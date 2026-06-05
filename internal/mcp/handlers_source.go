@@ -16,9 +16,10 @@ import (
 // routeSourceAction routes "read" for GetSource and "edit" for WriteSource/EditSource.
 func (s *Server) routeSourceAction(ctx context.Context, action, objectType, objectName string, params map[string]any) (*mcp.CallToolResult, bool, error) {
 	if action == "read" {
-		// GetSource covers: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, MSAG, VIEW
+		// GetSource covers: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, MSAG, VIEW, DOMA, DTEL, TTYP, ENQU
 		switch objectType {
-		case "CLAS", "PROG", "INTF", "FUNC", "FUGR", "INCL", "DDLS", "BDEF", "SRVD", "MSAG", "VIEW":
+		case "CLAS", "PROG", "INTF", "FUNC", "FUGR", "INCL", "DDLS", "BDEF", "SRVD", "MSAG", "VIEW",
+			"DOMA", "DTEL", "TTYP", "ENQU":
 			args := map[string]any{
 				"object_type": objectType,
 				"name":        objectName,
@@ -45,7 +46,7 @@ func (s *Server) routeSourceAction(ctx context.Context, action, objectType, obje
 	if action == "edit" {
 		// High-level WriteSource
 		switch objectType {
-		case "CLAS", "PROG", "INTF", "INCL", "DDLS", "BDEF", "SRVD":
+		case "CLAS", "PROG", "INTF", "INCL", "DDLS", "BDEF", "SRVD", "FUNC":
 			if src := getStringParam(params, "source"); src != "" {
 				args := map[string]any{
 					"object_type": objectType,
@@ -70,6 +71,9 @@ func (s *Server) routeSourceAction(ctx context.Context, action, objectType, obje
 				if v := getStringParam(params, "method"); v != "" {
 					args["method"] = v
 				}
+				if v := getStringParam(params, "parent"); v != "" {
+					args["parent"] = v
+				}
 				return s.callHandler(ctx, s.handleWriteSource, args)
 			}
 		case "EDITSOURCE":
@@ -91,7 +95,7 @@ func (s *Server) registerGetSource() {
 		mcp.WithDescription("Unified tool for reading ABAP source code across different object types. Replaces GetProgram, GetClass, GetInterface, GetFunction, GetInclude, GetFunctionGroup, GetClassInclude."),
 		mcp.WithString("object_type",
 			mcp.Required(),
-			mcp.Description("Object type: PROG (program), CLAS (class), INTF (interface), FUNC (function module), FUGR (function group), INCL (include), DDLS (CDS DDL source), VIEW (DDIC view), BDEF (behavior definition), SRVD (service definition), SRVB (service binding), MSAG (message class)"),
+			mcp.Description("Object type: PROG (program), CLAS (class), INTF (interface), FUNC (function module), FUGR (function group), INCL (include), DDLS (CDS DDL source), VIEW (DDIC view), BDEF (behavior definition), SRVD (service definition), SRVB (service binding), MSAG (message class), DOMA (domain), DTEL (data element), TTYP (table type), ENQU (lock object)"),
 		),
 		mcp.WithString("name",
 			mcp.Required(),
@@ -226,12 +230,14 @@ func (s *Server) handleWriteSource(ctx context.Context, request mcp.CallToolRequ
 	testSource, _ := request.GetArguments()["test_source"].(string)
 	transport, _ := request.GetArguments()["transport"].(string)
 	method, _ := request.GetArguments()["method"].(string)
+	parent, _ := request.GetArguments()["parent"].(string)
 
 	opts := &adt.WriteSourceOptions{
 		Description: description,
 		Package:     packageName,
 		TestSource:  testSource,
 		Transport:   transport,
+		Parent:      parent,
 		Method:      method,
 	}
 

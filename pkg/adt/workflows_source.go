@@ -187,6 +187,7 @@ type WriteSourceOptions struct {
 	TestSource  string          // Test source for CLAS (auto-creates test include)
 	Transport   string          // Transport request number
 	Method      string          // For CLAS only: update only this method (source must be METHOD...ENDMETHOD block)
+	Parent      string          // For FUNC: function group name (required)
 }
 
 // WriteSourceResult represents the result of WriteSource operation
@@ -210,6 +211,9 @@ type WriteSourceResult struct {
 //   - PROG: Programs
 //   - CLAS: Classes (optionally with test source)
 //   - INTF: Interfaces
+//   - FUNC: Function modules (opts.Parent = function group name, required)
+//   - INCL: Includes
+//   - DDLS / BDEF / SRVD / SRVB: RAP and CDS objects
 //
 // Mode:
 //   - upsert (default): Auto-detect if object exists, create or update accordingly
@@ -252,10 +256,16 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 
 	// Validate object type
 	switch objectType {
-	case "PROG", "CLAS", "INTF", "INCL", "DDLS", "BDEF", "SRVD", "SRVB":
+	case "PROG", "CLAS", "INTF", "INCL", "DDLS", "BDEF", "SRVD", "SRVB", "FUNC":
 		// Supported types
 	default:
-		result.Message = fmt.Sprintf("Unsupported object type: %s (supported: PROG, CLAS, INTF, INCL, DDLS, BDEF, SRVD, SRVB)", objectType)
+		result.Message = fmt.Sprintf("Unsupported object type: %s (supported: PROG, CLAS, INTF, INCL, DDLS, BDEF, SRVD, SRVB, FUNC)", objectType)
+		return result, nil
+	}
+
+	// FUNC requires parent (function group)
+	if objectType == "FUNC" && opts.Parent == "" {
+		result.Message = "Parent (function group name) is required for FUNC type"
 		return result, nil
 	}
 
@@ -287,6 +297,9 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 			objectExists = (err == nil)
 		case "SRVB":
 			_, err := c.GetSRVB(ctx, name)
+			objectExists = (err == nil)
+		case "FUNC":
+			_, err := c.GetFunction(ctx, name, opts.Parent)
 			objectExists = (err == nil)
 		}
 	}
@@ -748,6 +761,71 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		}
 		return result, nil
 
+	case "FUNC":
+		objectURL := GetObjectURL(ObjectTypeFunctionMod, name, opts.Parent)
+		result.ObjectURL = objectURL
+
+		if err := c.checkMutation(ctx, MutationContext{
+			Op:        OpCreate,
+			OpName:    "WriteSource(FUNC,create)",
+			Package:   opts.Package,
+			Transport: opts.Transport,
+		}); err != nil {
+			result.Message = fmt.Sprintf("Failed mutation gate: %v", err)
+			return result, nil
+		}
+		ctx := withMutationGateAlreadyRan(ctx)
+
+		// Create FM shell inside the function group
+		err := c.CreateObject(ctx, CreateObjectOptions{
+			ObjectType:  ObjectTypeFunctionMod,
+			Name:        name,
+			Description: opts.Description,
+			PackageName: opts.Package,
+			Transport:   opts.Transport,
+			ParentName:  opts.Parent,
+		})
+		if err != nil {
+			result.Message = fmt.Sprintf("Failed to create function module: %v", err)
+			return result, nil
+		}
+
+		// Write source into the newly created FM
+		sourceURL := objectURL + "/source/main"
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+		if err != nil {
+			result.Message = fmt.Sprintf("FM created but failed to lock for source write: %v", err)
+			return result, nil
+		}
+
+		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, opts.Transport)
+		if err != nil {
+			_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			result.Message = fmt.Sprintf("FM created but failed to write source: %v", err)
+			return result, nil
+		}
+
+		err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		if err != nil {
+			result.Message = fmt.Sprintf("Failed to unlock function module: %v", err)
+			return result, nil
+		}
+
+		activation, err := c.Activate(ctx, objectURL, name)
+		if err != nil {
+			result.Message = fmt.Sprintf("Failed to activate function module: %v", err)
+			result.Activation = activation
+			return result, nil
+		}
+		result.Activation = activation
+		if activation.Success {
+			result.Success = true
+			result.Message = fmt.Sprintf("Function module %s created and activated successfully", name)
+		} else {
+			result.Message = "Activation failed - check activation messages"
+		}
+		return result, nil
+
 	default:
 		result.Message = fmt.Sprintf("Unsupported object type for creation: %s", objectType)
 		return result, nil
@@ -1035,6 +1113,61 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			result.Message = "Activation failed - check activation messages"
 		}
 
+		return result, nil
+
+	case "FUNC":
+		objectURL := GetObjectURL(ObjectTypeFunctionMod, name, opts.Parent)
+		sourceURL := objectURL + "/source/main"
+		result.ObjectURL = objectURL
+
+		if err := c.checkMutation(ctx, MutationContext{
+			Op:        OpUpdate,
+			OpName:    "WriteSource(FUNC)",
+			ObjectURL: objectURL,
+			Transport: opts.Transport,
+		}); err != nil {
+			result.Message = fmt.Sprintf("Failed mutation gate: %v", err)
+			return result, nil
+		}
+		ctx := withMutationGateAlreadyRan(ctx)
+
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+		if err != nil {
+			result.Message = fmt.Sprintf("Failed to lock function module: %v", err)
+			return result, nil
+		}
+
+		defer func() {
+			if !result.Success {
+				c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			}
+		}()
+
+		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, opts.Transport)
+		if err != nil {
+			result.Message = fmt.Sprintf("Failed to update function module source: %v", err)
+			return result, nil
+		}
+
+		err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		if err != nil {
+			result.Message = fmt.Sprintf("Failed to unlock function module: %v", err)
+			return result, nil
+		}
+
+		activation, err := c.Activate(ctx, objectURL, name)
+		if err != nil {
+			result.Message = fmt.Sprintf("Failed to activate function module: %v", err)
+			result.Activation = activation
+			return result, nil
+		}
+		result.Activation = activation
+		if activation.Success {
+			result.Success = true
+			result.Message = fmt.Sprintf("Function module %s updated and activated successfully", name)
+		} else {
+			result.Message = "Activation failed - check activation messages"
+		}
 		return result, nil
 
 	default:

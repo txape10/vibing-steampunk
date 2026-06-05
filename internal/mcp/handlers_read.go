@@ -80,6 +80,13 @@ func (s *Server) routeReadAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleGetCheckRunResults, map[string]any{"check_run_id": objectName})
 		case "API_STATE":
 			return s.callHandler(ctx, s.handleGetAPIReleaseState, map[string]any{"object_uri": objectName})
+		// SE11 DDIC types — read via GetSource (returns XML metadata)
+		case "DOMA", "DTEL", "TTYP", "ENQU":
+			return s.callHandler(ctx, s.handleGetSource, map[string]any{
+				"object_type":     objectType,
+				"name":            objectName,
+				"include_context": false,
+			})
 		}
 	}
 
