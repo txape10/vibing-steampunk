@@ -52,6 +52,7 @@ func focusedToolSet() map[string]bool {
 		"CreateDataElement":  true,  // Create DDIC data elements (DTEL)
 		"CreateTableType":    true,  // Create DDIC table types (TTYP)
 		"CreateLockObject":   true,  // Create DDIC lock objects (ENQU)
+		"CreateMessageClass": true,  // Create ABAP message classes (MSAG) — Z prefix required
 		"CompareSource":      true,  // Diff two objects
 		"CloneObject":        true,  // Copy object to new name
 		"GetClassInfo":       true,  // Quick class metadata

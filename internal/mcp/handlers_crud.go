@@ -51,6 +51,8 @@ func (s *Server) routeCRUDAction(ctx context.Context, action, objectType, object
 			return s.callHandler(ctx, s.handleCreateTableType, params)
 		case "ENQU":
 			return s.callHandler(ctx, s.handleCreateLockObject, params)
+		case "MSAG":
+			return s.callHandler(ctx, s.handleCreateMessageClass, params)
 		case "CLONE":
 			return s.callHandler(ctx, s.handleCloneObject, params)
 		}
@@ -637,6 +639,52 @@ func (s *Server) handleCreateLockObject(ctx context.Context, request mcp.CallToo
 	result := map[string]interface{}{
 		"status": "created", "lock_object": strings.ToUpper(name),
 		"package": pkg, "primary_table": strings.ToUpper(primaryTable),
+	}
+	output, _ := json.MarshalIndent(result, "", "  ")
+	return mcp.NewToolResultText(string(output)), nil
+
+}
+
+func (s *Server) handleCreateMessageClass(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+
+	name, ok := request.GetArguments()["name"].(string)
+	if !ok || name == "" {
+		return newToolResultError("name is required"), nil
+	}
+	description, _ := request.GetArguments()["description"].(string)
+
+	pkg := "$TMP"
+	if p, ok := request.GetArguments()["package"].(string); ok && p != "" {
+		pkg = strings.ToUpper(p)
+	}
+	language, _ := request.GetArguments()["language"].(string)
+	transport, _ := request.GetArguments()["transport"].(string)
+
+	var messages []adt.MessageClassMessage
+	if msgsJSON, ok := request.GetArguments()["messages"].(string); ok && msgsJSON != "" {
+		if err := json.Unmarshal([]byte(msgsJSON), &messages); err != nil {
+			return newToolResultError(fmt.Sprintf("Invalid messages JSON: %v", err)), nil
+		}
+	}
+
+	opts := adt.CreateMessageClassOptions{
+		Name:        name,
+		Description: description,
+		Package:     pkg,
+		Language:    language,
+		Messages:    messages,
+		Transport:   transport,
+	}
+
+	if err := s.adtClient.CreateMessageClass(ctx, opts); err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to create message class: %v", err)), nil
+	}
+
+	result := map[string]interface{}{
+		"status":        "created",
+		"message_class": strings.ToUpper(name),
+		"package":       pkg,
+		"messages":      len(messages),
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil

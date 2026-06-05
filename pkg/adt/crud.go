@@ -2024,6 +2024,112 @@ func generateLockObjectXML(opts CreateLockObjectOptions) string {
 		paramsSB.String())
 }
 
+// --- Message Class (MSAG/N) ---
+
+// CreateMessageClassOptions defines options for creating an ABAP message class (SE91 MSAG).
+type CreateMessageClassOptions struct {
+	Name        string                `json:"name"`              // Message class name — MUST start with Z (max 20 chars)
+	Description string                `json:"description"`       // Short description
+	Package     string                `json:"package,omitempty"` // Target package (default: $TMP)
+	Language    string                `json:"language,omitempty"` // Master language (default: ES)
+	Messages    []MessageClassMessage `json:"messages,omitempty"` // Initial messages (optional)
+	Transport   string                `json:"transport,omitempty"`
+}
+
+// CreateMessageClass creates a new ABAP message class (SE91 MSAG).
+// Name MUST start with Z. Workflow: POST shell → Lock → PUT messages → Unlock → Activate.
+func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClassOptions) error {
+
+	if err := c.checkSafety(OpCreate, "CreateMessageClass"); err != nil {
+		return err
+	}
+	opts.Name = strings.ToUpper(opts.Name)
+	if !strings.HasPrefix(opts.Name, "Z") {
+		return fmt.Errorf("message class name must start with Z (got %q)", opts.Name)
+	}
+	if len(opts.Name) == 0 || len(opts.Name) > 20 {
+		return fmt.Errorf("message class name must be 1–20 characters")
+	}
+	if opts.Package == "" {
+		opts.Package = "$TMP"
+	}
+	if opts.Language == "" {
+		opts.Language = "ES"
+	}
+	opts.Language = strings.ToUpper(opts.Language)
+
+	// Mutation gate: package + transport policy check
+	objectURL := fmt.Sprintf("/sap/bc/adt/messageclass/%s", strings.ToLower(opts.Name))
+	if err := c.checkMutation(ctx, MutationContext{
+		Op:        OpCreate,
+		OpName:    "CreateMessageClass",
+		ObjectURL: objectURL,
+		Transport: opts.Transport,
+	}); err != nil {
+		return err
+	}
+
+	// 1. POST shell — creates the empty message class
+	shellBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<mc:messageClass xmlns:mc="http://www.sap.com/adt/mc"
+                 xmlns:adtcore="http://www.sap.com/adt/core"
+                 adtcore:name="%s" adtcore:type="MSAG/N"
+                 adtcore:description="%s"
+                 adtcore:language="%s" adtcore:masterLanguage="%s">
+  <adtcore:packageRef adtcore:name="%s"/>
+</mc:messageClass>`, opts.Name, escapeXML(opts.Description), opts.Language, opts.Language, opts.Package)
+
+	q := url.Values{}
+	if opts.Transport != "" {
+		q.Set("corrNr", opts.Transport)
+	}
+	if _, err := c.transport.Request(ctx, "/sap/bc/adt/messageclass", &RequestOptions{
+		Method: http.MethodPost, Query: q,
+		Body: []byte(shellBody), ContentType: "application/*", Accept: "application/*",
+	}); err != nil {
+		return fmt.Errorf("creating message class shell: %w", err)
+	}
+
+	// 2. If initial messages provided: lock → PUT → unlock
+	if len(opts.Messages) > 0 {
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+		if err != nil {
+			return fmt.Errorf("locking for initial messages: %w", err)
+		}
+
+		mc := MessageClass{Name: opts.Name, Messages: opts.Messages}
+		body, err := xml.Marshal(mc)
+		if err != nil {
+			_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			return fmt.Errorf("marshaling messages: %w", err)
+		}
+
+		putParams := url.Values{}
+		putParams.Set("lockHandle", lock.LockHandle)
+		if opts.Transport != "" {
+			putParams.Set("corrNr", opts.Transport)
+		}
+
+		_, putErr := c.transport.Request(ctx, objectURL, &RequestOptions{
+			Method:           http.MethodPut,
+			Query:            putParams,
+			Body:             body,
+			ContentType:      "application/vnd.sap.adt.mc.messageclass+xml",
+			OverrideLanguage: opts.Language,
+		})
+		_ = c.UnlockObject(ctx, objectURL, lock.LockHandle) // best-effort
+		if putErr != nil {
+			return fmt.Errorf("writing initial messages: %w", putErr)
+		}
+	}
+
+	// 3. Activate
+	if _, err := c.Activate(ctx, objectURL, opts.Name); err != nil {
+		return fmt.Errorf("activating message class: %w", err)
+	}
+	return nil
+}
+
 // --- Helpers ---
 
 func boolStr(b bool) string {

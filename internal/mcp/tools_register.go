@@ -1250,6 +1250,32 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 		), s.handleCreateLockObject)
 	}
 
+	if shouldRegister("CreateMessageClass") {
+		s.mcpServer.AddTool(mcp.NewTool("CreateMessageClass",
+			mcp.WithDescription("Create an ABAP message class (SE91 MSAG). Name MUST start with Z — never create without explicit user authorisation. Handles full workflow: POST shell → lock → write messages → unlock → activate."),
+			mcp.WithString("name",
+				mcp.Required(),
+				mcp.Description("Message class name (must start with Z, max 20 chars, e.g. ZEDI_00)"),
+			),
+			mcp.WithString("description",
+				mcp.Required(),
+				mcp.Description("Short description of the message class"),
+			),
+			mcp.WithString("messages",
+				mcp.Description(`JSON array of initial messages (optional): [{"number":"001","text":"Order &1 not found"},{"number":"002","text":"Processing complete"}]`),
+			),
+			mcp.WithString("language",
+				mcp.Description("Master language ISO code (default: ES)"),
+			),
+			mcp.WithString("package",
+				mcp.Description("Target package (default: $TMP)"),
+			),
+			mcp.WithString("transport",
+				mcp.Description("Transport request number (optional for $TMP)"),
+			),
+		), s.handleCreateMessageClass)
+	}
+
 	if shouldRegister("CompareSource") {
 		s.mcpServer.AddTool(mcp.NewTool("CompareSource",
 			mcp.WithDescription("Compare source code of two objects and return unified diff. Supports all object types from GetSource."),
