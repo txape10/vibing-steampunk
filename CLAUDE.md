@@ -63,6 +63,122 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
 - Verified on-prem with real includes that have mutual type dependencies. Commit: `c741c69`.
 - Issue: [#137](https://github.com/oisee/vibing-steampunk/issues/137)
 
+### 2d. Bugs #143/#144 — WriteSource package resolution + transport adoption from lock — FIXED (verified on-prem)
+- **#143**: `WriteSource` update path never resolved the object's package before running the mutation gate,
+  so `AllowedPackages` policy checks failed closed on explicit `Mode: WriteModeUpdate`. Fix: the gate call
+  now passes `ObjectURL` when `opts.Package == ""`, letting `checkMutation` resolve the package via
+  `SearchObject` itself. File: `pkg/adt/workflows_source.go`.
+- **#144**: when the object was already captured in an open transport, SAP returns that `corrNr` on the
+  LOCK response; adopting it (instead of leaving transport empty) avoids a spurious 409
+  `ExceptionResourceLockConflict`. Fix applied at the `WriteProgram`/`WriteInclude`/`WriteClass` call sites.
+- Live-verified against the real SAP system: `ZTESTRCG1` ($TMP, full-source `WriteSource → WriteProgram`
+  path) and `ZREDI_CREATE_IDOC_FILE` (PROG in `ZABAP01`, already captured in an open transport). Both test
+  objects were restored to their original content after verification.
+
+### 2e. Security fix — transport adoption from lock bypassed `--allow-transportable-edits` policy — FIXED (upstream PR #145 gap)
+- Upstream PR #145 (`zooloo303`) fixes #144 too, but additionally re-validates `CheckTransportableEdit`
+  after adopting `lock.CorrNr` — the #144 fix above was missing that re-check, so a transport discovered
+  only *after* Lock (not known yet when the top-level gate first ran) could silently bypass
+  `AllowTransportableEdits`/`AllowedTransports`.
+- Fix: new `resolveWriteTransport(supplied, lockCorrNr, opName string) (string, error)` in `pkg/adt/client.go`
+  — returns the supplied transport unchanged if present, `""` if the object has no lock transport, otherwise
+  re-runs `checkTransportableEdit` before adopting `lockCorrNr`.
+- Applied at all 6 call sites that adopt a transport from a lock result: `WriteProgram`, `WriteInclude`,
+  `WriteClass` (`workflows.go`), `EditSourceWithOptions` (`workflows_edit.go`),
+  `DeleteObjectWithAutoLock` (`crud.go`), `writeClassMethodUpdate` (`workflows_source.go` — found by a
+  code-reviewer CRITICAL finding after the first five sites were fixed).
+- Tests: 5 new unit tests for `resolveWriteTransport` (`mutation_gate_test.go`) + adoption/blocking coverage
+  for all 6 call sites (`workflows_test.go`). Code-reviewed: 0 CRITICAL/HIGH (1 MEDIUM investigated and
+  confirmed a false positive — Go `defer` never registers past an earlier `return`).
+- GitHub: reacted 👍 to upstream PR #145 (no text comment, per user decision — the equivalent fix was
+  built independently in this fork rather than cherry-picked, since this fork's `WriteX` call sites differ
+  from upstream's).
+
+### 2f. Bug — `WriteSource` `objectExists` never computed under explicit Update/Create mode — FIXED
+- The 9-type existence-check switch (PROG/CLAS/INTF/INCL/DDLS/BDEF/SRVD/SRVB/FUNC) in `WriteSource` was
+  gated behind `if opts.Mode == WriteModeUpsert`, so explicit `Mode: WriteModeUpdate` always treated the
+  object as nonexistent (failing every explicit update with "does not exist"), and explicit
+  `Mode: WriteModeCreate` never detected an already-existing object (never blocking accidental
+  re-creation). Fix: removed the `if` guard so the switch always runs regardless of mode.
+  File: `pkg/adt/workflows_source.go`.
+- New tests: `TestClient_WriteSource_Update_ExplicitMode_ObjectNotExists`,
+  `TestClient_WriteSource_Create_ExplicitMode_ObjectAlreadyExists` (the latter had zero prior coverage).
+- Code-reviewed: 0 CRITICAL/HIGH/LOW. 1 MEDIUM (informational, pre-existing, not introduced by this fix):
+  `writeSourceUpdate`'s PROG case doesn't mark `withMutationGateAlreadyRan` before delegating to
+  `WriteProgram`, causing a redundant second `SearchObject` call under `AllowedPackages` — a performance
+  inefficiency, not a correctness/security issue. Not fixed; noted here for a future optimization pass.
+
+### 2g. Text pool (program text elements) — WORKING via WebSocket/ZADT_VSP (REST attempt reverted)
+- **Read AND write already work end-to-end** via the pre-existing `ZADT_VSP` WebSocket service (domain
+  `report`, actions `getTextElements`/`setTextElements`) — no new code was needed. Verified live against
+  the real SAP system (read + a throwaway text-symbol write on `ZTESTRCG1`, approved by the user).
+  - `SAP(action="debug", target="GET_TEXT_ELEMENTS", params={"program": "ZTESTRCG1", "language": "ES"})`
+  - `SAP(action="debug", target="SET_TEXT_ELEMENTS", params={"program": "ZTESTRCG1", "text_symbols": "{\"001\": \"...\"}"})`
+- A separate REST-based attempt (`GetTextPoolInLanguage` at `/sap/bc/adt/programs/programs/{name}/textelements`,
+  routed via `routeI18nAction`) was built this session and found to return HTTP 404 "No suitable resource
+  found" on this SAP system for both a `$TMP` test object and a real production program. Since the
+  WebSocket path already covers the same need, the REST wiring (`routeI18nAction` in
+  `internal/mcp/handlers_i18n.go`, its registration in `internal/mcp/handlers_universal.go`'s route chain,
+  and the `TEXT_POOL` mention in `internal/mcp/handlers_help.go`) was **reverted in full** — it was never
+  committed, so the revert left no trace. `GetTextPoolInLanguage` itself (`pkg/adt/i18n.go`, pre-existing
+  from PR #42) was left untouched since it predates this session and may still be useful for objects where
+  the WebSocket service isn't deployed.
+- ⚠️ **`heading_texts` parameter is non-functional**: `SetTextElements`/`handleSetTextElements` accept and
+  forward a `heading_texts` map to SAP, but the live `ZCL_VSP_REPORT_SERVICE=>handle_set_text_elements`
+  never reads it (only id='S' selection texts and id='I' text symbols are round-tripped through
+  `READ TEXTPOOL`/`INSERT TEXTPOOL`). Always reports `heading_texts_set: 0`, silently. Confirmed against
+  the live ABAP source. Kept as-is (not removed) per user decision, documented via code comments in
+  `pkg/adt/reports.go` (`SetTextElementsParams`) and `internal/mcp/handlers_report.go` (`handleSetTextElements`).
+
+### 2h. RFC domain `SEARCH`/`GET_METADATA` — IMPLEMENTED (2026-07-29)
+- `ZCL_VSP_RFC_SERVICE` (domain `rfc`) already exposes `search` (function module name lookup via
+  `TFDIR`, `*` wildcard) and `getMetadata` (full IMPORT/EXPORT/CHANGING/TABLES signature via
+  `FUNCTION_IMPORT_INTERFACE`) — same as upstream — but neither had Go/MCP wiring on either this fork or
+  upstream `oisee/vibing-steampunk` (confirmed via a byte-for-byte diff of `pkg/adt/websocket_rfc.go`).
+  Checked the two most-diverged forks too (`BurnerPat/vsp-enterprise`, 109 commits ahead — took a
+  different Java/JCo-sidecar RFC architecture instead; `marianfoo/vibing-steampunk`, 38 commits ahead —
+  never ported the Go report/RFC client at all): neither has this either.
+- New Go client methods in `pkg/adt/websocket_rfc.go`, following the existing `CallRFC`/`MoveObject`
+  pattern (`SendRawRequest`, 30s timeout): `Search(ctx, pattern) ([]RFCSearchResult, error)`,
+  `GetMetadata(ctx, function) (*RFCMetadataResult, error)`. Response schemas were read directly from the
+  live-verified ABAP source (`src/zcl_vsp_rfc_service.clas.abap`) rather than guessed: `search` returns a
+  JSON array `[{"name": "..."}]`; `getMetadata` returns `{"function": "...", "parameters": [{"name",
+  "kind": "importing"|"exporting"|"changing"|"tables", "type", "optional"}]}`.
+- New MCP handlers `handleRFCSearch`/`handleRFCGetMetadata` in `internal/mcp/handlers_debugger.go`, routed
+  as `RFC_SEARCH`/`RFC_METADATA` in the existing `routeDebuggerAction` (already in the universal tool's
+  route chain — no change needed there). Help text updated in `internal/mcp/handlers_help.go`.
+  - `SAP(action="debug", target="RFC_SEARCH", params={"pattern": "BAPI_USER*"})`
+  - `SAP(action="debug", target="RFC_METADATA", params={"function": "BAPI_USER_GET_DETAIL"})`
+- No unit tests added — matches existing coverage level for the RFC domain (`CallRFC`/`MoveObject` also
+  have no unit tests; these are thin WebSocket wrapper methods in the same style).
+
+## Known Open Issues (Not Fixed)
+
+### `RUN_REPORT` — hangs on reports with a selection screen; secondary `MISSING_PARAM` bug
+- **Root cause (confirmed)**: matches upstream issue [#113](https://github.com/oisee/vibing-steampunk/issues/113)
+  (open, no fix merged anywhere including this fork and the two most-diverged forks checked). SAP: `SUBMIT
+  ... AND RETURN` is invalid inside a stateful APC WebSocket handler and raises `APC_ILLEGAL_STATEMENT`;
+  the RFC domain's fire-and-forget `runReport` (`RFC_ABAP_INSTALL_AND_RUN ... STARTING NEW TASK`) has no
+  result callback either. Whichever domain the MCP client hits, it can't get a synchronous result.
+  Live-reproduced: `SAP(action="debug", target="RUN_REPORT", params={"report": "ZTESTRCG1"})` (a report
+  with a non-mandatory selection-screen `PARAMETERS`) with no `params`/`variant` timed out (`MCP error
+  -32001`).
+- **Secondary bug (found this session, not reported upstream)**: passing an explicit `params` object to
+  route around the bare `SUBMIT` (`params={"report": "ZTESTRCG1", "params": "{\"PA_IDOC\":\"...\"}"}`)
+  returned `RunReport failed: MISSING_PARAM: Parameter report is required` even though `report` was present
+  in the call — not yet diagnosed (likely a parameter-extraction/serialization mismatch between the Go
+  client's request envelope and ABAP's `extract_param`, separate from the `APC_ILLEGAL_STATEMENT` issue).
+- Also structurally broken regardless of the above: `pkg/adt/reports.go`'s `GetJobStatus`/`GetSpoolOutput`
+  and the job-polling model in `handleRunReport`/`handleRunReportAsync` (`internal/mcp/handlers_report.go`)
+  assume a `getJobStatus`/`getSpoolOutput` action that **does not exist anywhere** in the ABAP source
+  (`grep` for `getJobStatus`/`getSpoolOutput`/`jobname` across `embedded/abap` and `src`: zero matches) —
+  `RunReportResult.JobName`/`JobCount` are never populated by the real backend.
+- **Do not use `RUN_REPORT`/`RUN_REPORT_ASYNC` on reports with mandatory unfilled selection-screen fields**
+  until this is fixed. `GET_VARIANTS`, `GET_TEXT_ELEMENTS`, `SET_TEXT_ELEMENTS` are unaffected (synchronous,
+  no `SUBMIT`, verified working).
+- Status: under investigation, not started on a fix — needs a rewrite matching the synchronous ABAP
+  reality (job-polling model has no server-side counterpart), plus the `MISSING_PARAM` root cause.
+
 ### 3. Nuevos tipos DDIC — IMPLEMENTADOS & VERIFICADOS (2026-06-04)
 
 Cuatro nuevos tipos de objeto SE11 implementados en `pkg/adt/crud.go` y expuestos como herramientas MCP:
@@ -117,6 +233,35 @@ make build-all                          # 9 platforms
 ```
 
 Key flags: `--mode focused|expert|hyperfocused`, `--read-only`, `--allowed-packages "Z*"`, `--disabled-groups 5THD`
+
+### Deploying a local build for live testing (Windows)
+
+The Claude Desktop MCP config (`claude_desktop_config.json`) launches `vsp` from
+`C:\Users\devuser\AppData\Local\VSP\vsp.exe` as a child process. Windows locks a running `.exe` for
+writes — a plain `cp`/overwrite onto that path fails with "Device or resource busy" / access denied
+while any `vsp.exe` process is alive from it. **This is expected and is not a sign anything needs to be
+closed first.**
+
+Confirmed working technique (verified 2026-07-29 with 2 `vsp.exe` processes live at the time):
+
+```bash
+go build -o vsp_new_build.exe ./cmd/vsp
+mv "$LOCALAPPDATA/VSP/vsp.exe" "$LOCALAPPDATA/VSP/vsp.exe.old.$(date +%Y%m%d-%H%M%S)"  # rename, not overwrite
+cp vsp_new_build.exe "$LOCALAPPDATA/VSP/vsp.exe"
+```
+
+- Windows allows **renaming** an executable that's currently running (exe images are opened with
+  share-delete semantics) even though it refuses a direct overwrite. The already-running process(es) keep
+  working fine against the renamed-aside file — confirmed empirically: the swap above left two active
+  `vsp.exe` PIDs completely unaffected, no crash, no need to kill anything.
+  `vsp.exe.old`/`vsp.exe~`/`vsp.exe.old.<timestamp>` sitting in that folder are artifacts of this exact
+  pattern used across many past sessions.
+- The **only remaining step is restarting Claude Desktop** so it spawns a fresh `vsp.exe` process against
+  the new binary — old processes never notice the swap and keep serving stale code until then.
+- A separate "cowork" component can hold its own independent `vsp.exe` child process alive outside the
+  main Claude Desktop window's process tree; if a restart doesn't seem to pick up a change, check for a
+  lingering `vsp.exe` PID (`tasklist /FI "IMAGENAME eq vsp.exe"`) rather than assuming the rename+copy
+  itself failed — it almost certainly didn't.
 
 ---
 

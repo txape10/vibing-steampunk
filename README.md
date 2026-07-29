@@ -1041,6 +1041,11 @@ vsp WriteSource --object_type CLAS --name ZCL_VSP_APC_HANDLER --package '$ZADT_V
 {"id":"1","domain":"rfc","action":"call","params":{"function":"BAPI_USER_GET_DETAIL","USERNAME":"TESTUSER"}}
 ```
 
+The same `rfc` domain also supports function module discovery — `search` (name lookup, `*` wildcard) and
+`getMetadata` (full IMPORT/EXPORT/CHANGING/TABLES signature), exposed in hyperfocused mode as
+`SAP(action="debug", target="RFC_SEARCH", params={"pattern": "BAPI_USER*"})` and
+`SAP(action="debug", target="RFC_METADATA", params={"function": "BAPI_USER_GET_DETAIL"})`.
+
 See [WebSocket Handler Report](reports/2025-12-18-002-websocket-rfc-handler.md) for complete documentation.
 
 ## Documentation

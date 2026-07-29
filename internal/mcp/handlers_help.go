@@ -156,15 +156,17 @@ Session:
 
 RFC:
   SAP(action="debug", target="CALL_RFC", params={"function": "RFC_READ_TABLE", "params": "{\"QUERY_TABLE\": \"T000\"}"})
+  SAP(action="debug", target="RFC_SEARCH", params={"pattern": "BAPI_USER*"})
+  SAP(action="debug", target="RFC_METADATA", params={"function": "BAPI_USER_GET_DETAIL"})
 
 Move object:
   SAP(action="debug", target="MOVE", params={"object_type": "CLAS", "object_name": "ZCL_TEST", "new_package": "$TMP"})
 
 Report execution:
-  SAP(action="debug", target="RUN_REPORT", params={"report": "RSUSR002"})
+  SAP(action="debug", target="RUN_REPORT", params={"report": "RSUSR002"})  ⚠️ known issue with reports that have a selection screen — see CLAUDE.md "Known Open Issues"
   SAP(action="debug", target="GET_VARIANTS", params={"report": "RSUSR002"})
   SAP(action="debug", target="GET_TEXT_ELEMENTS", params={"program": "ZREPORT"})
-  SAP(action="debug", target="SET_TEXT_ELEMENTS", params={"program": "ZREPORT", "selection_texts": "{\"P_USER\": \"Username\"}"})
+  SAP(action="debug", target="SET_TEXT_ELEMENTS", params={"program": "ZREPORT", "selection_texts": "{\"P_USER\": \"Username\"}"})  (heading_texts param is accepted but non-functional server-side)
 
 AMDP debugging:
   SAP(action="debug", target="AMDP_START", params={"cascade_mode": "FULL"})
@@ -389,7 +391,7 @@ func getUnhandledErrorMessage(action, objectType, objectName string) string {
 		sb.WriteString("Supported create targets: OBJECT, DEVC, TABL, STRU, DOMA, DTEL, TTYP, ENQU, MSAG (Z prefix required), CLONE, PROGRAM, CLASS_WITH_TESTS, CLAS_TEST_INCLUDE\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"create\") for examples.")
 	case "debug":
-		sb.WriteString("Supported debug targets: SET_BREAKPOINT, GET_BREAKPOINTS, DELETE_BREAKPOINT, LISTEN, ATTACH, DETACH, STEP, GET_STACK, GET_VARIABLES, CALL_RFC, MOVE, RUN_REPORT, GET_VARIANTS, GET_TEXT_ELEMENTS, SET_TEXT_ELEMENTS, AMDP_*\n")
+		sb.WriteString("Supported debug targets: SET_BREAKPOINT, GET_BREAKPOINTS, DELETE_BREAKPOINT, LISTEN, ATTACH, DETACH, STEP, GET_STACK, GET_VARIABLES, CALL_RFC, RFC_SEARCH, RFC_METADATA, MOVE, RUN_REPORT, GET_VARIANTS, GET_TEXT_ELEMENTS, SET_TEXT_ELEMENTS, AMDP_*\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"debug\") for examples.")
 	default:
 		sb.WriteString("Valid actions: read, edit, create, delete, search, query, grep, test, analyze, debug, system, help\n")

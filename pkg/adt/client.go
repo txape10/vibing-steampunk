@@ -142,6 +142,29 @@ func (c *Client) checkTransportableEdit(transport, opName string) error {
 	return c.config.Safety.CheckTransportableEdit(transport, opName)
 }
 
+// resolveWriteTransport determines the effective transport for a write operation.
+//
+// When the caller supplied a transport, it is used unchanged (already validated by
+// the top-level mutation gate). Otherwise, if the object is already captured in an
+// open transport request, SAP returns it as CorrNr on the LOCK response — reusing it
+// avoids a spurious 409 ExceptionResourceLockConflict (issue #144). That adoption is
+// re-validated against CheckTransportableEdit here: the top-level gate only saw an
+// empty transport (none was known yet at that point), so without this re-check a
+// disabled AllowTransportableEdits policy would be silently bypassed whenever the
+// object happened to already sit in an open request.
+func (c *Client) resolveWriteTransport(supplied, lockCorrNr, opName string) (string, error) {
+	if supplied != "" {
+		return supplied, nil
+	}
+	if lockCorrNr == "" {
+		return "", nil
+	}
+	if err := c.checkTransportableEdit(lockCorrNr, opName); err != nil {
+		return "", err
+	}
+	return lockCorrNr, nil
+}
+
 func (c *Client) getObjectPackage(ctx context.Context, objectURL string) (string, error) {
 	normalized := normalizeObjectURLForPackageCheck(objectURL)
 	objectName, err := objectNameFromURL(normalized)

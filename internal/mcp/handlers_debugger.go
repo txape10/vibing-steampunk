@@ -26,6 +26,10 @@ func (s *Server) routeDebuggerAction(ctx context.Context, action, objectType, ob
 		return s.callHandler(ctx, s.handleDeleteBreakpoint, params)
 	case "CALL_RFC":
 		return s.callHandler(ctx, s.handleCallRFC, params)
+	case "RFC_SEARCH":
+		return s.callHandler(ctx, s.handleRFCSearch, params)
+	case "RFC_METADATA":
+		return s.callHandler(ctx, s.handleRFCGetMetadata, params)
 	case "MOVE":
 		return s.callHandler(ctx, s.handleMoveObject, params)
 	}
@@ -281,4 +285,61 @@ func (s *Server) handleCallRFC(ctx context.Context, request mcp.CallToolRequest)
 	// Format result
 	resultJSON, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(fmt.Sprintf("RFC call completed.\n\nFunction: %s\nSubrc: %d\n\nResult:\n%s", function, result.Subrc, string(resultJSON))), nil
+}
+
+func (s *Server) handleRFCSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	pattern, _ := request.GetArguments()["pattern"].(string)
+
+	if err := s.ensureDebugWSClient(ctx); err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to connect to ZADT_VSP WebSocket: %v. Ensure ZADT_VSP is deployed and SAPC/SICF are configured.", err)), nil
+	}
+
+	results, err := s.debugWSClient.Search(ctx, pattern)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("RFC search failed: %v", err)), nil
+	}
+
+	if len(results) == 0 {
+		return mcp.NewToolResultText(fmt.Sprintf("No function modules found matching pattern: %s", pattern)), nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Function modules matching %q (%d):\n\n", pattern, len(results))
+	for _, r := range results {
+		fmt.Fprintf(&sb, "  %s\n", r.Name)
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+func (s *Server) handleRFCGetMetadata(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	function, ok := request.GetArguments()["function"].(string)
+	if !ok || function == "" {
+		return newToolResultError("function is required"), nil
+	}
+
+	if err := s.ensureDebugWSClient(ctx); err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to connect to ZADT_VSP WebSocket: %v. Ensure ZADT_VSP is deployed and SAPC/SICF are configured.", err)), nil
+	}
+
+	result, err := s.debugWSClient.GetMetadata(ctx, function)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("RFC getMetadata failed: %v", err)), nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Signature for %s:\n\n", result.Function)
+	if len(result.Parameters) == 0 {
+		sb.WriteString("  (no parameters)\n")
+	} else {
+		for _, p := range result.Parameters {
+			opt := ""
+			if p.Optional {
+				opt = " (optional)"
+			}
+			fmt.Fprintf(&sb, "  [%s] %s: %s%s\n", p.Kind, p.Name, p.Type, opt)
+		}
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
 }

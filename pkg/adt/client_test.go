@@ -1,6 +1,7 @@
 package adt
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -20,13 +21,13 @@ func (m *mockTransportClient) Do(req *http.Request) (*http.Response, error) {
 	// Match by path
 	path := req.URL.Path
 	if resp, ok := m.responses[path]; ok {
-		return resp, nil
+		return cloneResponseWithFreshBody(resp), nil
 	}
 
 	// Check for partial matches (for CSRF fetch)
 	for key, resp := range m.responses {
 		if strings.Contains(path, key) {
-			return resp, nil
+			return cloneResponseWithFreshBody(resp), nil
 		}
 	}
 
@@ -35,6 +36,21 @@ func (m *mockTransportClient) Do(req *http.Request) (*http.Response, error) {
 		Body:       io.NopCloser(strings.NewReader("Not found")),
 		Header:     http.Header{},
 	}, nil
+}
+
+// cloneResponseWithFreshBody returns a shallow copy of resp with a body that
+// can be read independently of (and repeatedly across) other requests
+// matching the same mock entry. Without this, a single-read io.Reader body
+// (as constructed by newTestResponse) comes back empty on the second request
+// that matches the same key — e.g. when a workflow's own mutation gate and an
+// inner delegate's mutation gate each call SearchObject against the same
+// mocked "search" endpoint.
+func cloneResponseWithFreshBody(resp *http.Response) *http.Response {
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body = io.NopCloser(bytes.NewReader(data))
+	clone := *resp
+	clone.Body = io.NopCloser(bytes.NewReader(data))
+	return &clone
 }
 
 func newTestResponse(body string) *http.Response {

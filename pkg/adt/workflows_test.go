@@ -2,6 +2,7 @@ package adt
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -17,8 +18,16 @@ type mockWorkflowTransport struct {
 func (m *mockWorkflowTransport) Do(req *http.Request) (*http.Response, error) {
 	m.requests = append(m.requests, req)
 
-	// Match by path
 	path := req.URL.Path
+
+	// "METHOD /path" exact match takes priority — lets a test disambiguate a
+	// GET (e.g. an existence check) from a PUT to the same URL, which a
+	// plain path key cannot express.
+	if resp, ok := m.responses[req.Method+" "+path]; ok {
+		return resp, nil
+	}
+
+	// Match by path
 	if resp, ok := m.responses[path]; ok {
 		return resp, nil
 	}
@@ -159,10 +168,33 @@ WRITE: 'Hello, World!'.`
                      adtcore:name="ZTEST"
                      adtcore:type="PROG/P"
                      adtcore:responsible="USER"/>`),
+			// The pre-create existence check (GetProgram) GETs this exact URL;
+			// it must 404 so objectExists resolves to false and Create is not
+			// rejected as "already exists". The later source PUT falls through
+			// to the plain-path entry below (200 OK).
+			"GET /sap/bc/adt/programs/programs/ZTEST/source/main": {
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("Not found")),
+				Header:     http.Header{},
+			},
 			"/sap/bc/adt/programs/programs/ZTEST/source/main": newWorkflowTestResponse("OK"),
-			"/sap/bc/adt/checkruns": newWorkflowTestResponse("OK"),
-			"/sap/bc/adt/activation": newWorkflowTestResponse("OK"),
-			"discovery": newWorkflowTestResponse("OK"),
+			"/sap/bc/adt/checkruns":                           newWorkflowTestResponse("OK"),
+			// parseActivationResult treats an empty body as a successful activation;
+			// a non-empty non-XML body like "OK" is parsed as an activation error.
+			"/sap/bc/adt/activation": newWorkflowTestResponse(""),
+			// CreateAndActivateProgram checks the target package exists first
+			// (avoids orphaning an ENQUEUE lock on a bad package name). The body
+			// doesn't need to be valid nodestructure XML — packageExists treats
+			// any non-404/"not found" GetPackage error as optimistically existing.
+			"nodestructure": newWorkflowTestResponse("OK"),
+			// Shell-create POST to the collection endpoint (distinct from the
+			// specific object URL used for lock/source/activation above).
+			"POST /sap/bc/adt/programs/programs": newWorkflowTestResponse("OK"),
+			// newWorkflowTestResponse's CSRF header uses a non-canonical map key
+			// ("X-CSRF-Token" vs the "X-Csrf-Token" http.Header.Get looks up), so
+			// a real CSRF-token fetch — now exercised by the full create flow —
+			// needs newDiscoveryOKResponse() instead.
+			"discovery": newDiscoveryOKResponse(),
 		},
 	}
 
@@ -178,9 +210,75 @@ WRITE: 'Hello, World!'.`
 	if err != nil {
 		t.Fatalf("WriteSource failed: %v", err)
 	}
+	if !result.Success {
+		t.Fatalf("expected WriteSource create to succeed, got message: %q", result.Message)
+	}
 
 	if result.ObjectURL == "" {
 		t.Error("WriteSource should return object URL")
+	}
+}
+
+// TestClient_WriteSource_Update_ExplicitMode_ObjectNotExists covers the bug where
+// objectExists was only ever computed for Mode=Upsert — an explicit Mode=Update on
+// a nonexistent object must still be rejected with "does not exist", not silently
+// let through.
+func TestClient_WriteSource_Update_ExplicitMode_ObjectNotExists(t *testing.T) {
+	mock := &mockWorkflowTransport{
+		responses: map[string]*http.Response{
+			"GET /sap/bc/adt/programs/programs/ZTEST/source/main": {
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("Not found")),
+				Header:     http.Header{},
+			},
+			"discovery": newDiscoveryOKResponse(),
+		},
+	}
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	result, err := client.WriteSource(context.Background(), "PROG", "ZTEST", "REPORT ztest.", &WriteSourceOptions{
+		Mode: WriteModeUpdate,
+	})
+	if err != nil {
+		t.Fatalf("WriteSource returned a Go error instead of a rejected result: %v", err)
+	}
+	if result.Success {
+		t.Fatal("expected explicit Update of a nonexistent object to fail")
+	}
+	if !strings.Contains(result.Message, "does not exist") {
+		t.Errorf("expected message to mention the object does not exist, got: %q", result.Message)
+	}
+}
+
+// TestClient_WriteSource_Create_ExplicitMode_ObjectAlreadyExists covers the other
+// half of the same bug: explicit Mode=Create on an object that already exists must
+// be rejected with "already exists" instead of silently proceeding to create it
+// (previously objectExists was never computed for explicit Create either, so this
+// case had zero coverage and zero enforcement).
+func TestClient_WriteSource_Create_ExplicitMode_ObjectAlreadyExists(t *testing.T) {
+	mock := &mockWorkflowTransport{
+		responses: map[string]*http.Response{
+			"GET /sap/bc/adt/programs/programs/ZTEST/source/main": newWorkflowTestResponse("REPORT ztest. \" existing source"),
+			"discovery": newDiscoveryOKResponse(),
+		},
+	}
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	result, err := client.WriteSource(context.Background(), "PROG", "ZTEST", "REPORT ztest.", &WriteSourceOptions{
+		Mode:        WriteModeCreate,
+		Description: "Test program",
+		Package:     "$TMP",
+	})
+	if err != nil {
+		t.Fatalf("WriteSource returned a Go error instead of a rejected result: %v", err)
+	}
+	if result.Success {
+		t.Fatal("expected explicit Create of an already-existing object to fail")
+	}
+	if !strings.Contains(result.Message, "already exists") {
+		t.Errorf("expected message to mention the object already exists, got: %q", result.Message)
 	}
 }
 
@@ -305,7 +403,7 @@ func TestClient_GrepPackages(t *testing.T) {
 
 	mock := &mockWorkflowTransport{
 		responses: map[string]*http.Response{
-			"/sap/bc/adt/packages/$TMP": newWorkflowTestResponse(packageContents),
+			"/sap/bc/adt/packages/$TMP":                        newWorkflowTestResponse(packageContents),
 			"/sap/bc/adt/programs/programs/ZTEST1/source/main": newWorkflowTestResponse(sourceCode),
 			"discovery": newWorkflowTestResponse("OK"),
 		},
@@ -352,8 +450,8 @@ func TestClient_GrepPackages_Recursive(t *testing.T) {
 
 	mock := &mockWorkflowTransport{
 		responses: map[string]*http.Response{
-			"/sap/bc/adt/packages/ZMAIN":       newWorkflowTestResponse(mainPackageContents),
-			"/sap/bc/adt/packages/ZSUB1":       newWorkflowTestResponse(subPackageContents),
+			"/sap/bc/adt/packages/ZMAIN":                          newWorkflowTestResponse(mainPackageContents),
+			"/sap/bc/adt/packages/ZSUB1":                          newWorkflowTestResponse(subPackageContents),
 			"/sap/bc/adt/programs/programs/ZTEST_SUB/source/main": newWorkflowTestResponse(sourceCode),
 			"discovery": newWorkflowTestResponse("OK"),
 		},
@@ -389,8 +487,8 @@ func TestClient_GrepPackages_MultiplePackages(t *testing.T) {
 
 	mock := &mockWorkflowTransport{
 		responses: map[string]*http.Response{
-			"/sap/bc/adt/packages/$TMP":  newWorkflowTestResponse(packageContents),
-			"/sap/bc/adt/packages/$LOCAL": newWorkflowTestResponse(packageContents),
+			"/sap/bc/adt/packages/$TMP":                        newWorkflowTestResponse(packageContents),
+			"/sap/bc/adt/packages/$LOCAL":                      newWorkflowTestResponse(packageContents),
 			"/sap/bc/adt/programs/programs/ZTEST1/source/main": newWorkflowTestResponse(sourceCode),
 			"discovery": newWorkflowTestResponse("OK"),
 		},
@@ -550,5 +648,212 @@ func TestReplaceMatches_LineEndings(t *testing.T) {
 
 	if result != expected {
 		t.Errorf("replaceMatches result = %q, want %q", result, expected)
+	}
+}
+
+// --- Issue #144: WriteProgram/WriteClass must adopt corrNr from lock result ---
+
+// newDiscoveryOKResponse returns a discovery response carrying a CSRF token
+// under its canonical header key. newWorkflowTestResponse's literal
+// "X-CSRF-Token" map key is not the canonical form http.Header.Get looks
+// up ("X-Csrf-Token"), so it never actually satisfies the CSRF fetch —
+// tests relying only on it silently fall through to internal failures
+// instead of exercising the real write path.
+func newDiscoveryOKResponse() *http.Response {
+	h := http.Header{}
+	h.Set("X-Csrf-Token", "test-token")
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("OK")),
+		Header:     h,
+	}
+}
+
+// cleanSyntaxCheckXML is a minimal "no errors" ADT syntax-check response.
+const cleanSyntaxCheckXML = `<?xml version="1.0" encoding="UTF-8"?>
+<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun">
+  <chkrun:checkReport chkrun:status="clean">
+    <chkrun:checkMessageList/>
+  </chkrun:checkReport>
+</chkrun:checkRunReports>`
+
+// findRequestByPath returns the last recorded request whose path contains substr.
+func findRequestByPath(requests []*http.Request, substr string) *http.Request {
+	var found *http.Request
+	for _, req := range requests {
+		if strings.Contains(req.URL.Path, substr) {
+			found = req
+		}
+	}
+	return found
+}
+
+func TestClient_WriteProgram_AdoptsCorrNrFromLock_WhenTransportEmpty(t *testing.T) {
+	mock := &mockWorkflowTransport{
+		responses: map[string]*http.Response{
+			"checkruns":  newWorkflowTestResponse(cleanSyntaxCheckXML),
+			"activation": newWorkflowTestResponse("OK"),
+			"/sap/bc/adt/programs/programs/ZTEST/source/main": newWorkflowTestResponse("OK"),
+			"/sap/bc/adt/programs/programs/ZTEST":             newWorkflowTestResponse(lockResponseXML),
+			"discovery":                                       newDiscoveryOKResponse(),
+		},
+	}
+	// Adoption re-validates against the transportable-edit policy (issue #144
+	// follow-up), so it must be explicitly allowed for the adopted corrNr to
+	// reach UpdateSource.
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass", WithAllowTransportableEdits())
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	if _, err := client.WriteProgram(context.Background(), "ZTEST", "REPORT ztest.", ""); err != nil {
+		t.Fatalf("WriteProgram failed: %v", err)
+	}
+
+	putReq := findRequestByPath(mock.requests, "/source/main")
+	if putReq == nil {
+		t.Fatal("expected a request to the source URL")
+	}
+	if got := putReq.URL.Query().Get("corrNr"); got != "D15K000001" {
+		t.Errorf("expected UpdateSource to adopt corrNr from lock result, got corrNr=%q", got)
+	}
+}
+
+func TestClient_WriteProgram_BlocksCorrNrAdoption_WhenTransportableEditsDisabled(t *testing.T) {
+	mock := &mockWorkflowTransport{
+		responses: map[string]*http.Response{
+			"checkruns":  newWorkflowTestResponse(cleanSyntaxCheckXML),
+			"activation": newWorkflowTestResponse("OK"),
+			"/sap/bc/adt/programs/programs/ZTEST/source/main": newWorkflowTestResponse("OK"),
+			"/sap/bc/adt/programs/programs/ZTEST":             newWorkflowTestResponse(lockResponseXML),
+			"discovery":                                       newDiscoveryOKResponse(),
+		},
+	}
+	// AllowTransportableEdits defaults to false. Even though the lock response
+	// carries a real corrNr (the object is already in an open request), WriteProgram
+	// must not silently adopt it and write — that would bypass the safety gate.
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	result, err := client.WriteProgram(context.Background(), "ZTEST", "REPORT ztest.", "")
+	if err != nil {
+		t.Fatalf("WriteProgram returned a Go error instead of a blocked result: %v", err)
+	}
+	if result.Success {
+		t.Fatal("expected WriteProgram to fail when adopting a transport with transportable edits disabled")
+	}
+	if !strings.Contains(result.Message, "Transportable-edit check failed") {
+		t.Errorf("expected message to mention the blocked policy check, got: %q", result.Message)
+	}
+	if putReq := findRequestByPath(mock.requests, "/source/main"); putReq != nil {
+		t.Error("expected no write request to reach UpdateSource when transport adoption is blocked")
+	}
+}
+
+func TestClient_WriteProgram_KeepsExplicitTransport(t *testing.T) {
+	mock := &mockWorkflowTransport{
+		responses: map[string]*http.Response{
+			"checkruns":  newWorkflowTestResponse(cleanSyntaxCheckXML),
+			"activation": newWorkflowTestResponse("OK"),
+			"/sap/bc/adt/programs/programs/ZTEST/source/main": newWorkflowTestResponse("OK"),
+			"/sap/bc/adt/programs/programs/ZTEST":             newWorkflowTestResponse(lockResponseXML),
+			"discovery":                                       newDiscoveryOKResponse(),
+		},
+	}
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass", WithAllowTransportableEdits())
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	if _, err := client.WriteProgram(context.Background(), "ZTEST", "REPORT ztest.", "D99K123456"); err != nil {
+		t.Fatalf("WriteProgram failed: %v", err)
+	}
+
+	putReq := findRequestByPath(mock.requests, "/source/main")
+	if putReq == nil {
+		t.Fatal("expected a request to the source URL")
+	}
+	if got := putReq.URL.Query().Get("corrNr"); got != "D99K123456" {
+		t.Errorf("expected caller-supplied transport to take precedence, got corrNr=%q", got)
+	}
+}
+
+func TestClient_WriteClass_AdoptsCorrNrFromLock_WhenTransportEmpty(t *testing.T) {
+	mock := &mockWorkflowTransport{
+		responses: map[string]*http.Response{
+			"checkruns":  newWorkflowTestResponse(cleanSyntaxCheckXML),
+			"activation": newWorkflowTestResponse("OK"),
+			"/sap/bc/adt/oo/classes/ZCL_TEST/source/main": newWorkflowTestResponse("OK"),
+			"/sap/bc/adt/oo/classes/ZCL_TEST":             newWorkflowTestResponse(lockResponseXML),
+			"discovery":                                   newDiscoveryOKResponse(),
+		},
+	}
+	// Adoption re-validates against the transportable-edit policy (issue #144
+	// follow-up), so it must be explicitly allowed for the adopted corrNr to
+	// reach UpdateSource.
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass", WithAllowTransportableEdits())
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	if _, err := client.WriteClass(context.Background(), "ZCL_TEST", "CLASS zcl_test DEFINITION.", ""); err != nil {
+		t.Fatalf("WriteClass failed: %v", err)
+	}
+
+	putReq := findRequestByPath(mock.requests, "/source/main")
+	if putReq == nil {
+		t.Fatal("expected a request to the source URL")
+	}
+	if got := putReq.URL.Query().Get("corrNr"); got != "D15K000001" {
+		t.Errorf("expected UpdateSource to adopt corrNr from lock result, got corrNr=%q", got)
+	}
+}
+
+// objectStructureXMLWithMethod builds a minimal class objectstructure response
+// with a single method whose implementation spans the given line range.
+func objectStructureXMLWithMethod(className, methodName string, implStart, implEnd int) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<abapsource:objectStructureElement xmlns:abapsource="http://www.sap.com/adt/abapsource" name="%s" type="CLAS/OC">
+  <abapsource:objectStructureElement name="%s" type="CLAS/OM">
+    <atom:link xmlns:atom="http://www.w3.org/2005/Atom"
+      href="./../%s/source/main#start=%d,2;end=%d,11"
+      rel="http://www.sap.com/adt/relations/source/implementationBlock"/>
+  </abapsource:objectStructureElement>
+</abapsource:objectStructureElement>`, className, methodName, strings.ToLower(className), implStart, implEnd)
+}
+
+// TestClient_WriteClassMethod_BlocksCorrNrAdoption_WhenTransportableEditsDisabled covers
+// the method-level update path (WriteSource with opts.Method), which routes through
+// writeClassMethodUpdate — a 6th call site for the same corrNr-adoption pattern as
+// WriteProgram/WriteClass/WriteInclude/EditSourceWithOptions/DeleteObjectWithAutoLock.
+func TestClient_WriteClassMethod_BlocksCorrNrAdoption_WhenTransportableEditsDisabled(t *testing.T) {
+	const classSource = "CLASS zcl_test IMPLEMENTATION.\nMETHOD get_data.\n  rv_result = 1.\nENDMETHOD.\nENDCLASS.\n"
+
+	mock := &mockWorkflowTransport{
+		responses: map[string]*http.Response{
+			"checkruns":  newWorkflowTestResponse(cleanSyntaxCheckXML),
+			"activation": newWorkflowTestResponse("OK"),
+			"/sap/bc/adt/oo/classes/ZCL_TEST/objectstructure": newWorkflowTestResponse(objectStructureXMLWithMethod("ZCL_TEST", "GET_DATA", 2, 4)),
+			"/sap/bc/adt/oo/classes/ZCL_TEST/source/main":     newWorkflowTestResponse(classSource),
+			// writeClassMethodUpdate locks the lowercased object URL (unlike WriteClass).
+			"/sap/bc/adt/oo/classes/zcl_test": newWorkflowTestResponse(lockResponseXML),
+			"discovery":                       newDiscoveryOKResponse(),
+		},
+	}
+	// AllowTransportableEdits defaults to false. Even though the lock response
+	// carries a real corrNr, writeClassMethodUpdate must not silently adopt it.
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	// Calls writeClassMethodUpdate directly — going through the public WriteSource
+	// dispatcher would additionally exercise its pre-existing (unrelated) Upsert/
+	// objectExists resolution quirks, which are out of scope here.
+	result, err := client.writeClassMethodUpdate(context.Background(), "ZCL_TEST", "GET_DATA", "METHOD get_data.\n  rv_result = 2.\nENDMETHOD.", "")
+	if err != nil {
+		t.Fatalf("writeClassMethodUpdate returned a Go error instead of a blocked result: %v", err)
+	}
+	if result.Success {
+		t.Fatal("expected method-level update to fail when adopting a transport with transportable edits disabled")
+	}
+	if !strings.Contains(result.Message, "Transportable-edit check failed") {
+		t.Errorf("expected message to mention the blocked policy check, got: %q", result.Message)
+	}
+	putReq := findRequestByPath(mock.requests, "/sap/bc/adt/oo/classes/ZCL_TEST/source/main")
+	if putReq != nil && putReq.Method == http.MethodPut {
+		t.Error("expected no PUT to reach UpdateSource when transport adoption is blocked")
 	}
 }

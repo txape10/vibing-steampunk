@@ -10,17 +10,17 @@ import (
 
 // EditSourceResult represents the result of editing source code.
 type EditSourceResult struct {
-	Success        bool                `json:"success"`
-	ObjectURL      string              `json:"objectUrl"`
-	ObjectName     string              `json:"objectName"`
-	MatchCount     int                 `json:"matchCount"`
-	OldString      string              `json:"oldString,omitempty"`
-	NewString      string              `json:"newString,omitempty"`
-	SyntaxErrors   []string            `json:"syntaxErrors,omitempty"`
-	SyntaxWarnings []string            `json:"syntaxWarnings,omitempty"`
-	Activation     *ActivationResult   `json:"activation,omitempty"`
-	Message        string              `json:"message,omitempty"`
-	Method         string              `json:"method,omitempty"` // Method name if method-level edit
+	Success        bool              `json:"success"`
+	ObjectURL      string            `json:"objectUrl"`
+	ObjectName     string            `json:"objectName"`
+	MatchCount     int               `json:"matchCount"`
+	OldString      string            `json:"oldString,omitempty"`
+	NewString      string            `json:"newString,omitempty"`
+	SyntaxErrors   []string          `json:"syntaxErrors,omitempty"`
+	SyntaxWarnings []string          `json:"syntaxWarnings,omitempty"`
+	Activation     *ActivationResult `json:"activation,omitempty"`
+	Message        string            `json:"message,omitempty"`
+	Method         string            `json:"method,omitempty"` // Method name if method-level edit
 }
 
 // EditSourceOptions provides optional parameters for EditSource.
@@ -386,9 +386,10 @@ func (c *Client) EditSourceWithOptions(ctx context.Context, objectURL, oldString
 	// Adopt transport from lock result when caller did not supply one.
 	// SAP returns the active corrNr in the lock response; without it the PUT
 	// fails with ExceptionParameterNotFound for transport-owned objects.
-	effectiveTransport := opts.Transport
-	if effectiveTransport == "" && lockResult.CorrNr != "" {
-		effectiveTransport = lockResult.CorrNr
+	effectiveTransport, err := c.resolveWriteTransport(opts.Transport, lockResult.CorrNr, "EditSourceWithOptions")
+	if err != nil {
+		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		return result, nil
 	}
 
 	// 6. Update source
@@ -436,4 +437,3 @@ func (c *Client) EditSourceWithOptions(ctx context.Context, objectURL, oldString
 	}
 	return result, nil
 }
-

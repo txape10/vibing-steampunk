@@ -432,6 +432,12 @@ func (s *Server) handleSetTextElements(ctx context.Context, request mcp.CallTool
 		params.TextSymbols = textSyms
 	}
 
+	// NOTE: heading_texts is accepted and forwarded to SAP, but the live
+	// ZCL_VSP_REPORT_SERVICE=>handle_set_text_elements never reads it — the
+	// ABAP READ TEXTPOOL/INSERT TEXTPOOL round-trip only touches id='S'
+	// (selection texts) and id='I' (text symbols). result.HeadingTextsSet
+	// will always be 0. Verified against the live ABAP source; not fixed
+	// per user decision (kept for API completeness).
 	if headTextsStr, ok := request.GetArguments()["heading_texts"].(string); ok && headTextsStr != "" {
 		var headTexts map[string]string
 		if err := json.Unmarshal([]byte(headTextsStr), &headTexts); err != nil {

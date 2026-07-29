@@ -59,6 +59,106 @@ func (c *DebugWebSocketClient) CallRFC(ctx context.Context, function string, par
 	return &result, nil
 }
 
+// RFCSearchResult describes a single function module match from Search.
+type RFCSearchResult struct {
+	Name string `json:"name"`
+}
+
+// Search finds function modules by name pattern via WebSocket (rfc domain, search action).
+// pattern uses '*' as a wildcard (translated to SQL LIKE '%' server-side); an empty
+// pattern matches everything. ABAP caps results at 100 rows, ordered by name.
+func (c *DebugWebSocketClient) Search(ctx context.Context, pattern string) ([]RFCSearchResult, error) {
+	if !c.IsConnected() {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	id := c.GenerateID("rfc_search")
+
+	paramsObj := map[string]any{
+		"pattern": pattern,
+	}
+
+	rawMsg := map[string]any{
+		"id":      id,
+		"domain":  "rfc",
+		"action":  "search",
+		"params":  paramsObj,
+		"timeout": 30000,
+	}
+
+	resp, err := c.SendRawRequest(ctx, id, rawMsg, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		if resp.Error != nil {
+			return nil, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return nil, fmt.Errorf("RFC search failed")
+	}
+
+	var result []RFCSearchResult
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// RFCParamInfo describes a single parameter in a function module's signature.
+type RFCParamInfo struct {
+	Name     string `json:"name"`
+	Kind     string `json:"kind"` // importing, exporting, changing, tables
+	Type     string `json:"type"`
+	Optional bool   `json:"optional"`
+}
+
+// RFCMetadataResult contains a function module's full IMPORT/EXPORT/CHANGING/TABLES signature.
+type RFCMetadataResult struct {
+	Function   string         `json:"function"`
+	Parameters []RFCParamInfo `json:"parameters"`
+}
+
+// GetMetadata retrieves a function module's signature via WebSocket (rfc domain, getMetadata action).
+// Introspects FUNCTION_IMPORT_INTERFACE server-side; returns FUNC_NOT_FOUND if the function doesn't exist.
+func (c *DebugWebSocketClient) GetMetadata(ctx context.Context, function string) (*RFCMetadataResult, error) {
+	if !c.IsConnected() {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	id := c.GenerateID("rfc_metadata")
+
+	paramsObj := map[string]any{
+		"function": function,
+	}
+
+	rawMsg := map[string]any{
+		"id":      id,
+		"domain":  "rfc",
+		"action":  "getMetadata",
+		"params":  paramsObj,
+		"timeout": 30000,
+	}
+
+	resp, err := c.SendRawRequest(ctx, id, rawMsg, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		if resp.Error != nil {
+			return nil, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return nil, fmt.Errorf("RFC getMetadata failed")
+	}
+
+	var result RFCMetadataResult
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // RunReport executes a report via background job (RFC domain, runReport action).
 // This schedules the report as a background job, which runs in a separate work process
 // and CAN hit external breakpoints.

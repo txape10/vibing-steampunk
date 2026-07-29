@@ -12,12 +12,12 @@ import (
 
 // WriteProgramResult represents the result of writing a program.
 type WriteProgramResult struct {
-	Success      bool                       `json:"success"`
-	ProgramName  string                     `json:"programName"`
-	ObjectURL    string                     `json:"objectUrl"`
-	SyntaxErrors []SyntaxCheckResult        `json:"syntaxErrors,omitempty"`
-	Activation   *ActivationResult          `json:"activation,omitempty"`
-	Message      string                     `json:"message,omitempty"`
+	Success      bool                `json:"success"`
+	ProgramName  string              `json:"programName"`
+	ObjectURL    string              `json:"objectUrl"`
+	SyntaxErrors []SyntaxCheckResult `json:"syntaxErrors,omitempty"`
+	Activation   *ActivationResult   `json:"activation,omitempty"`
+	Message      string              `json:"message,omitempty"`
 }
 
 // WriteProgram performs Lock -> SyntaxCheck -> UpdateSource -> Unlock -> Activate workflow.
@@ -77,8 +77,16 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 		}
 	}()
 
+	// Adopt transport from lock result when caller did not supply one — the
+	// object may already be captured in an open request (issue #144).
+	effectiveTransport, err := c.resolveWriteTransport(transport, lock.CorrNr, "WriteProgram")
+	if err != nil {
+		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		return result, nil
+	}
+
 	// Step 3: Update source
-	err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport)
+	err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, effectiveTransport)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to update source: %v", err)
 		return result, nil
@@ -170,9 +178,10 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 		}
 	}()
 
-	effectiveTransport := transport
-	if effectiveTransport == "" && lock.CorrNr != "" {
-		effectiveTransport = lock.CorrNr
+	effectiveTransport, err := c.resolveWriteTransport(transport, lock.CorrNr, "WriteInclude")
+	if err != nil {
+		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		return result, nil
 	}
 
 	if err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, effectiveTransport); err != nil {
@@ -206,12 +215,12 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 
 // WriteClassResult represents the result of writing a class.
 type WriteClassResult struct {
-	Success      bool                       `json:"success"`
-	ClassName    string                     `json:"className"`
-	ObjectURL    string                     `json:"objectUrl"`
-	SyntaxErrors []SyntaxCheckResult        `json:"syntaxErrors,omitempty"`
-	Activation   *ActivationResult          `json:"activation,omitempty"`
-	Message      string                     `json:"message,omitempty"`
+	Success      bool                `json:"success"`
+	ClassName    string              `json:"className"`
+	ObjectURL    string              `json:"objectUrl"`
+	SyntaxErrors []SyntaxCheckResult `json:"syntaxErrors,omitempty"`
+	Activation   *ActivationResult   `json:"activation,omitempty"`
+	Message      string              `json:"message,omitempty"`
 }
 
 // WriteClass performs Lock -> SyntaxCheck -> UpdateSource -> Unlock -> Activate workflow for classes.
@@ -268,8 +277,16 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 		}
 	}()
 
+	// Adopt transport from lock result when caller did not supply one — the
+	// object may already be captured in an open request (issue #144).
+	effectiveTransport, err := c.resolveWriteTransport(transport, lock.CorrNr, "WriteClass")
+	if err != nil {
+		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		return result, nil
+	}
+
 	// Step 3: Update source
-	err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport)
+	err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, effectiveTransport)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to update source: %v", err)
 		return result, nil

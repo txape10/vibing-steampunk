@@ -52,6 +52,11 @@ type TextElements struct {
 }
 
 // SetTextElementsParams contains parameters for setting text elements.
+//
+// HeadingTexts is NON-FUNCTIONAL: the live ZCL_VSP_REPORT_SERVICE=>handle_set_text_elements
+// never reads it (only id='S' selection texts and id='I' text symbols are round-tripped
+// through READ TEXTPOOL/INSERT TEXTPOOL). Kept for API completeness; SetTextElementsResult.HeadingTextsSet
+// will always be 0.
 type SetTextElementsParams struct {
 	Program        string            `json:"program"`
 	Language       string            `json:"language,omitempty"`

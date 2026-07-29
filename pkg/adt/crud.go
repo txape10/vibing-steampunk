@@ -908,9 +908,10 @@ func (c *Client) DeleteObjectWithAutoLock(ctx context.Context, objectURL string,
 		}
 	}
 
-	effectiveTransport := transport
-	if effectiveTransport == "" && lock.CorrNr != "" {
-		effectiveTransport = lock.CorrNr
+	effectiveTransport, err := c.resolveWriteTransport(transport, lock.CorrNr, "DeleteObjectWithAutoLock")
+	if err != nil {
+		_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		return err
 	}
 
 	params := url.Values{}
@@ -1191,11 +1192,11 @@ func parsePublishResult(data []byte) (*PublishResult, error) {
 
 // CreateStructureOptions defines options for creating a DDIC structure (SE11 STRU).
 type CreateStructureOptions struct {
-	Name        string       `json:"name"`                  // Structure name (uppercase, max 30 chars, must start with Z/Y)
-	Description string       `json:"description"`           // Short description
-	Package     string       `json:"package,omitempty"`     // Target package (default: $TMP)
-	Fields      []TableField `json:"fields"`                // Field definitions
-	Transport   string       `json:"transport,omitempty"`   // Transport request (optional for $TMP)
+	Name        string       `json:"name"`                // Structure name (uppercase, max 30 chars, must start with Z/Y)
+	Description string       `json:"description"`         // Short description
+	Package     string       `json:"package,omitempty"`   // Target package (default: $TMP)
+	Fields      []TableField `json:"fields"`              // Field definitions
+	Transport   string       `json:"transport,omitempty"` // Transport request (optional for $TMP)
 }
 
 // CreateStructure creates a new DDIC structure from JSON-like options.
@@ -1313,11 +1314,11 @@ func generateStructureDDL(opts CreateStructureOptions) string {
 
 // CreateTableOptions defines options for creating a DDIC table.
 type CreateTableOptions struct {
-	Name          string       `json:"name"`          // Table name (uppercase, max 30 chars, must start with Z/Y)
-	Description   string       `json:"description"`   // Short description
-	Package       string       `json:"package"`       // Target package
-	Fields        []TableField `json:"fields"`        // Field definitions
-	Transport     string       `json:"transport,omitempty"` // Transport request (optional for $TMP)
+	Name          string       `json:"name"`                    // Table name (uppercase, max 30 chars, must start with Z/Y)
+	Description   string       `json:"description"`             // Short description
+	Package       string       `json:"package"`                 // Target package
+	Fields        []TableField `json:"fields"`                  // Field definitions
+	Transport     string       `json:"transport,omitempty"`     // Transport request (optional for $TMP)
 	DeliveryClass string       `json:"deliveryClass,omitempty"` // A=Application, C=Customizing, L=Temp, etc. (default: A)
 	TableCategory string       `json:"tableCategory,omitempty"` // TRANSPARENT (default), STRUCTURE, etc.
 }
@@ -1660,20 +1661,20 @@ func generateDomainXML(opts CreateDomainOptions) string {
 
 // CreateDataElementOptions defines options for creating a DDIC data element (SE11 DTEL).
 type CreateDataElementOptions struct {
-	Name             string `json:"name"`                        // Data element name (max 30, Z/Y prefix)
-	Description      string `json:"description"`                 // Short description
-	Package          string `json:"package,omitempty"`           // Target package (default: $TMP)
-	TypeKind         string `json:"type_kind"`                   // "domain" (default) or "predefinedAbapType"
-	TypeName         string `json:"type_name"`                   // Domain name or ABAP built-in type
-	DataType         string `json:"data_type,omitempty"`         // Underlying ABAP type (CHAR, INT4, DATS…). Required by SAP in PUT.
-	DataTypeLength   int    `json:"data_type_length,omitempty"`  // Underlying type length (0 = SAP default)
+	Name             string `json:"name"`                         // Data element name (max 30, Z/Y prefix)
+	Description      string `json:"description"`                  // Short description
+	Package          string `json:"package,omitempty"`            // Target package (default: $TMP)
+	TypeKind         string `json:"type_kind"`                    // "domain" (default) or "predefinedAbapType"
+	TypeName         string `json:"type_name"`                    // Domain name or ABAP built-in type
+	DataType         string `json:"data_type,omitempty"`          // Underlying ABAP type (CHAR, INT4, DATS…). Required by SAP in PUT.
+	DataTypeLength   int    `json:"data_type_length,omitempty"`   // Underlying type length (0 = SAP default)
 	DataTypeDecimals int    `json:"data_type_decimals,omitempty"` // Underlying type decimals
-	LabelShort       string `json:"label_short"`                 // ≤10 chars
-	LabelMedium      string `json:"label_medium"`                // ≤20 chars
-	LabelLong        string `json:"label_long"`                  // ≤40 chars
-	LabelHeading     string `json:"label_heading"`               // ≤55 chars (column heading)
+	LabelShort       string `json:"label_short"`                  // ≤10 chars
+	LabelMedium      string `json:"label_medium"`                 // ≤20 chars
+	LabelLong        string `json:"label_long"`                   // ≤40 chars
+	LabelHeading     string `json:"label_heading"`                // ≤55 chars (column heading)
 	SearchHelp       string `json:"search_help,omitempty"`
-	ParameterID      string `json:"parameter_id,omitempty"`      // SET/GET parameter
+	ParameterID      string `json:"parameter_id,omitempty"` // SET/GET parameter
 	Transport        string `json:"transport,omitempty"`
 }
 
@@ -1796,14 +1797,14 @@ func generateDataElementXML(opts CreateDataElementOptions) string {
 
 // CreateTableTypeOptions defines options for creating a DDIC table type (SE11 TTYP).
 type CreateTableTypeOptions struct {
-	Name        string `json:"name"`                    // Table type name (max 30, Z/Y prefix)
-	Description string `json:"description"`             // Short description
-	Package     string `json:"package,omitempty"`       // Target package (default: $TMP)
-	RowTypeKind string `json:"row_type_kind,omitempty"` // "dictionaryType" (default) or "predefinedAbapType"
-	RowTypeName string `json:"row_type_name"`           // Structure/table name (e.g. BAPIRET2)
-	AccessType  string `json:"access_type,omitempty"`  // "standard" (default), "sorted", "hashed"
+	Name        string `json:"name"`                     // Table type name (max 30, Z/Y prefix)
+	Description string `json:"description"`              // Short description
+	Package     string `json:"package,omitempty"`        // Target package (default: $TMP)
+	RowTypeKind string `json:"row_type_kind,omitempty"`  // "dictionaryType" (default) or "predefinedAbapType"
+	RowTypeName string `json:"row_type_name"`            // Structure/table name (e.g. BAPIRET2)
+	AccessType  string `json:"access_type,omitempty"`    // "standard" (default), "sorted", "hashed"
 	KeyDef      string `json:"key_definition,omitempty"` // "standard" (default), "rowType", "notSpecified"
-	KeyKind     string `json:"key_kind,omitempty"`      // "nonUnique" (default), "unique"
+	KeyKind     string `json:"key_kind,omitempty"`       // "nonUnique" (default), "unique"
 	Transport   string `json:"transport,omitempty"`
 }
 
@@ -1912,11 +1913,11 @@ type LockObjectParameter struct {
 
 // CreateLockObjectOptions defines options for creating a DDIC lock object (SE11 ENQU).
 type CreateLockObjectOptions struct {
-	Name           string                `json:"name"`                    // Lock object name (convention: E prefix, max 30)
-	Description    string                `json:"description"`             // Short description
-	Package        string                `json:"package,omitempty"`       // Target package (default: $TMP)
-	PrimaryTable   string                `json:"primary_table"`           // Primary table to lock
-	LockMode       string                `json:"lock_mode,omitempty"`     // "E" exclusive (default), "S" shared, "X" excl. non-cumul.
+	Name           string                `json:"name"`                      // Lock object name (convention: E prefix, max 30)
+	Description    string                `json:"description"`               // Short description
+	Package        string                `json:"package,omitempty"`         // Target package (default: $TMP)
+	PrimaryTable   string                `json:"primary_table"`             // Primary table to lock
+	LockMode       string                `json:"lock_mode,omitempty"`       // "E" exclusive (default), "S" shared, "X" excl. non-cumul.
 	LockParameters []LockObjectParameter `json:"lock_parameters,omitempty"` // Key fields to expose
 	AllowRFC       bool                  `json:"allow_rfc,omitempty"`
 	Transport      string                `json:"transport,omitempty"`
@@ -2028,9 +2029,9 @@ func generateLockObjectXML(opts CreateLockObjectOptions) string {
 
 // CreateMessageClassOptions defines options for creating an ABAP message class (SE91 MSAG).
 type CreateMessageClassOptions struct {
-	Name        string                `json:"name"`              // Message class name — MUST start with Z (max 20 chars)
-	Description string                `json:"description"`       // Short description
-	Package     string                `json:"package,omitempty"` // Target package (default: $TMP)
+	Name        string                `json:"name"`               // Message class name — MUST start with Z (max 20 chars)
+	Description string                `json:"description"`        // Short description
+	Package     string                `json:"package,omitempty"`  // Target package (default: $TMP)
 	Language    string                `json:"language,omitempty"` // Master language (default: ES)
 	Messages    []MessageClassMessage `json:"messages,omitempty"` // Initial messages (optional)
 	Transport   string                `json:"transport,omitempty"`
