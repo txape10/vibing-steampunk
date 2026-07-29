@@ -237,7 +237,7 @@ Key flags: `--mode focused|expert|hyperfocused`, `--read-only`, `--allowed-packa
 ### Deploying a local build for live testing (Windows)
 
 The Claude Desktop MCP config (`claude_desktop_config.json`) launches `vsp` from
-`C:\Users\devuser\AppData\Local\VSP\vsp.exe` as a child process. Windows locks a running `.exe` for
+`%LOCALAPPDATA%\VSP\vsp.exe` as a child process. Windows locks a running `.exe` for
 writes — a plain `cp`/overwrite onto that path fails with "Device or resource busy" / access denied
 while any `vsp.exe` process is alive from it. **This is expected and is not a sign anything needs to be
 closed first.**
