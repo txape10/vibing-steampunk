@@ -229,7 +229,7 @@ func parseActivationResult(data []byte) (*ActivationResult, error) {
 	//   Properties: <properties activationExecuted="false"/>
 	//   Errors as direct children: <msg type="E" objDescr="..." line="N">
 
-	// Shared message type used by both formats.
+	// Shared message type used by all formats.
 	type msg struct {
 		ObjDescr       string `xml:"objDescr,attr"`
 		Type           string `xml:"type,attr"`
@@ -241,22 +241,23 @@ func parseActivationResult(data []byte) (*ActivationResult, error) {
 			Txts []string `xml:"txt"`
 		} `xml:"shortText"`
 	}
+	// Shared inactive-object entry type used by all formats.
+	type inactiveRef struct {
+		URI       string `xml:"uri,attr"`
+		Type      string `xml:"type,attr"`
+		Name      string `xml:"name,attr"`
+		ParentURI string `xml:"parentUri,attr"`
+	}
+	type inactiveEntry struct {
+		Object *struct {
+			Ref inactiveRef `xml:"ref"`
+		} `xml:"object"`
+	}
 
 	if strings.Contains(xmlStr, "<activationLog") {
 		// --- Format A: adtcomp:activationLog ---
 		type messages struct {
 			Msgs []msg `xml:"msg"`
-		}
-		type inactiveRef struct {
-			URI       string `xml:"uri,attr"`
-			Type      string `xml:"type,attr"`
-			Name      string `xml:"name,attr"`
-			ParentURI string `xml:"parentUri,attr"`
-		}
-		type inactiveEntry struct {
-			Object *struct {
-				Ref inactiveRef `xml:"ref"`
-			} `xml:"object"`
 		}
 		type inactiveObjects struct {
 			Entries []inactiveEntry `xml:"entry"`
@@ -306,16 +307,24 @@ func parseActivationResult(data []byte) (*ActivationResult, error) {
 		return result, nil
 	}
 
-	// --- Format B: chkl:messages (S/4HANA actual response) ---
-	// Root element is <messages> (after namespace stripping).
-	// <properties activationExecuted="false"/> signals overall failure.
-	// Error messages are direct <msg> children of the root.
+	// --- Format B/C: chkl:messages or ioc:inactiveObjects (S/4HANA actual responses) ---
+	// Root element is either <messages> or <inactiveObjects> (after namespace stripping).
+	// xml.Unmarshal maps the root element onto this struct itself, so the root's
+	// possible children (from either variant) must be declared directly here — a
+	// nested `xml:"messages"`/`xml:"inactiveObjects"` field would look for a child
+	// *inside* the root and silently match nothing (this was the bug: when the root
+	// was <inactiveObjects>, doc.Msgs and doc.Entries both stayed empty and
+	// activation was wrongly reported as successful).
+	// <properties activationExecuted="false"/> signals overall failure for Format B.
+	// Error messages are direct <msg> children of the root; inactive-object entries
+	// are direct <entry> children of the root when the root is <inactiveObjects>.
 	type chklProperties struct {
 		ActivationExecuted bool `xml:"activationExecuted,attr"`
 	}
 	type chklDoc struct {
-		Properties chklProperties `xml:"properties"`
-		Msgs       []msg          `xml:"msg"`
+		Properties chklProperties  `xml:"properties"`
+		Msgs       []msg           `xml:"msg"`
+		Entries    []inactiveEntry `xml:"entry"`
 	}
 
 	var doc chklDoc
@@ -348,6 +357,17 @@ func parseActivationResult(data []byte) (*ActivationResult, error) {
 	// activationExecuted=false is an explicit SAP signal that activation did not complete.
 	if !doc.Properties.ActivationExecuted && len(doc.Msgs) > 0 {
 		result.Success = false
+	}
+	for _, entry := range doc.Entries {
+		if entry.Object != nil {
+			result.Success = false
+			result.Inactive = append(result.Inactive, InactiveObject{
+				URI:       entry.Object.Ref.URI,
+				Type:      entry.Object.Ref.Type,
+				Name:      entry.Object.Ref.Name,
+				ParentURI: entry.Object.Ref.ParentURI,
+			})
+		}
 	}
 
 	return result, nil

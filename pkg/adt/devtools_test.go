@@ -163,6 +163,32 @@ func TestParseActivationResult_ChklMessages_SuccessWhenActivated(t *testing.T) {
 	}
 }
 
+func TestParseActivationResult_InactiveObjectsRoot_DetectsFailure(t *testing.T) {
+	// SAP can return <ioc:inactiveObjects> directly as the response ROOT (no
+	// enclosing <activationLog> and no <chkl:messages> wrapper). Before this fix,
+	// neither Format A (activationLog) nor Format B (chkl:messages) branches
+	// recognized this shape, so doc.Msgs/doc.Entries stayed empty and activation
+	// was wrongly reported as successful.
+	xmlData := `<?xml version="1.0" encoding="utf-8"?><ioc:inactiveObjects xmlns:ioc="http://www.sap.com/abapxml/inactiveCtsObjects" xmlns:adtcore="http://www.sap.com/adt/core"><ioc:entry><ioc:object><ioc:ref adtcore:uri="/sap/bc/adt/programs/programs/ztest" adtcore:type="PROG/P" adtcore:name="ZTEST"/></ioc:object><ioc:transport/></ioc:entry></ioc:inactiveObjects>`
+
+	result, err := parseActivationResult([]byte(xmlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatal("expected Success=false when inactive objects are returned as root")
+	}
+	if len(result.Inactive) != 1 {
+		t.Fatalf("expected 1 inactive object, got %d", len(result.Inactive))
+	}
+	if result.Inactive[0].Name != "ZTEST" {
+		t.Errorf("expected inactive object name ZTEST, got %q", result.Inactive[0].Name)
+	}
+	if result.Inactive[0].Type != "PROG/P" {
+		t.Errorf("expected inactive object type PROG/P, got %q", result.Inactive[0].Type)
+	}
+}
+
 // --- parseSyntaxCheckResults ---
 
 func TestParseSyntaxCheckResults_NamespacedResponse_ParsesErrors(t *testing.T) {
