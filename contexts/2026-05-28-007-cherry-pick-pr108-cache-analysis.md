@@ -3,7 +3,7 @@
 ## Estado al cierre
 
 **Rama activa:** `fix/lock-nomodification-with-transport` en `txape10/vibing-steampunk`  
-**Binario:** `C:\Users\devuser\AppData\Local\VSP\vsp.exe` — commit `1e69ba4` — **EN PRODUCCIÓN**  
+**Binario:** `%LOCALAPPDATA%\VSP\vsp.exe` — commit `1e69ba4` — **EN PRODUCCIÓN**  
 **Todos los tests verdes:** `pkg/adt` ✅ `internal/mcp` ✅
 
 ---
@@ -48,15 +48,15 @@
 
 | Clase | Tokens est. | Latencia |
 |---|---|---|
-| `ZCL_EDI_MAP_INVOIC_ABSTRACT` | 508 | 846ms |
-| `ZCL_TST_STOCK_PARTIDAS` | 2.919 | ~800ms |
-| `ZCL_ALV` | 6.174 | 2.249ms |
-| `ZCL_ABAP_UTILITIES` | 6.266 | 5.184ms |
-| `ZCL_EXPEDICION` | 40.955 | 3.629ms |
-| `ZCL_EM` | 92.449 | 1.890ms |
+| `ZCL_DEMO_SMALL_1` | 508 | 846ms |
+| `ZCL_DEMO_SMALL_2` | 2.919 | ~800ms |
+| `ZCL_DEMO_MEDIUM_1` | 6.174 | 2.249ms |
+| `ZCL_DEMO_MEDIUM_2` | 6.266 | 5.184ms |
+| `ZCL_DEMO_LARGE_1` | 40.955 | 3.629ms |
+| `ZCL_DEMO_LARGE_2` | 92.449 | 1.890ms |
 
 **Conclusión:** Vale muchísimo la pena para clases grandes.
-- 5 lecturas de `ZCL_EM` sin cache = 462.000 tokens en contexto
+- 5 lecturas de `ZCL_DEMO_LARGE_2` sin cache = 462.000 tokens en contexto
 - 5 lecturas con cache (1 real + 4 hits) ≈ 2.000 tokens
 
 **SAP no soporta ETag/Last-Modified.** Estrategia: write-invalidation + TTL 10min.
@@ -78,7 +78,7 @@ Ver análisis completo arriba. Implementar `pkg/adt/source_cache.go`.
 El análisis empírico del cache reveló que los deps ya están comprimidos en `ctxcomp/`.
 Queda medir cuánto peso tienen los deps vs la fuente principal en la salida de `context`.
 Ejemplo `ZCL_TST_STOCK_PARTIDAS`: source=10.449c, context=11.679c → deps solo 1.230c (11.8%).
-Para `ZCL_EM` (92K tokens) casi todo será fuente propia — los deps comprimidos ya son pequeños.
+Para `ZCL_DEMO_LARGE_2` (92K tokens) casi todo será fuente propia — los deps comprimidos ya son pequeños.
 Evaluar si vale la pena vs el coste de implementación.
 
 ### Upstream PRs pendientes
@@ -99,7 +99,7 @@ Evaluar si vale la pena vs el coste de implementación.
     "SAP_CLIENT": "100",
     "SAP_ALLOW_TRANSPORTABLE_EDITS": "true",
     "SAP_ALLOWED_PACKAGES": "Z*,$TMP",
-    "SAP_ALLOWED_TRANSPORTS": "S4DK*",
+    "SAP_ALLOWED_TRANSPORTS": "TR-EXAMPLE*",
     "SAP_ENABLE_TRANSPORTS": "true",
     "SAP_IGNORE_WARNINGS": "true",
     "SAP_MODE": "hyperfocused"

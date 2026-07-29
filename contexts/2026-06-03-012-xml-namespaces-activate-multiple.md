@@ -71,7 +71,7 @@ Nunca activar objetos que no hayan sido modificados en la sesión actual. `Activ
 
 - Rama: `fix/lock-nomodification-with-transport` en `txape10/vibing-steampunk`
 - Commits nuevos en esta sesión: `dedfebc` (XML namespaces), `c741c69` (ActivateMultiple)
-- Binario actualizado: `C:\Users\devuser\AppData\Local\VSP\vsp.exe`
+- Binario actualizado: `%LOCALAPPDATA%\VSP\vsp.exe`
 - Issues abiertos en upstream: #136 (XML namespaces), #137 (ActivateMultiple)
 - Comentario en issue #116: fix INCL write disponible en fork
 

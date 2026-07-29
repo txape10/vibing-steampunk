@@ -58,5 +58,5 @@ En `~/.claude/CLAUDE.md`: nunca borrar objetos SAP sin preguntar antes, explicar
 ## Estado del fork
 
 - Rama: `fix/lock-nomodification-with-transport` en `txape10/vibing-steampunk` — **PUSHED** (6 commits tras sesión anterior)
-- Binario: `C:\Users\devuser\AppData\Local\VSP\vsp.exe` — actualizado
+- Binario: `%LOCALAPPDATA%\VSP\vsp.exe` — actualizado
 - Todos los tests pasan (go test ./pkg/... ./internal/...)

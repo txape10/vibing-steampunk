@@ -3,7 +3,7 @@
 ## Estado al cierre
 
 **Rama activa:** `fix/lock-nomodification-with-transport` en `txape10/vibing-steampunk`  
-**Binario:** `C:\Users\devuser\AppData\Local\VSP\vsp.exe` — commit `8b65774` — **EN PRODUCCIÓN**  
+**Binario:** `%LOCALAPPDATA%\VSP\vsp.exe` — commit `8b65774` — **EN PRODUCCIÓN**  
 **Todos los tests `pkg/adt` verdes** ✅
 
 ---

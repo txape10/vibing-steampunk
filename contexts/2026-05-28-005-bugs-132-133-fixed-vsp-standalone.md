@@ -3,7 +3,7 @@
 ## Estado al cierre
 
 Rama activa: `fix/lock-nomodification-with-transport` en `txape10/vibing-steampunk`  
-Binario instalado: `C:\Users\devuser\AppData\Local\VSP\vsp.exe` (commit `1ffc9cc`)  
+Binario instalado: `%LOCALAPPDATA%\VSP\vsp.exe` (commit `1ffc9cc`)  
 Config Claude Desktop: sin `SAP_SESSION_TYPE`, con `SAP_ENABLE_TRANSPORTS=true`
 
 ---

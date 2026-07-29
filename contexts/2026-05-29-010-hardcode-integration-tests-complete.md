@@ -2,7 +2,7 @@
 
 **Date**: 2026-05-29  
 **Branch**: `fix/lock-nomodification-with-transport` on `txape10/vibing-steampunk`  
-**Binary**: `C:\Users\devuser\AppData\Local\VSP\vsp.exe` — updated and validated
+**Binary**: `%LOCALAPPDATA%\VSP\vsp.exe` — updated and validated
 
 ---
 

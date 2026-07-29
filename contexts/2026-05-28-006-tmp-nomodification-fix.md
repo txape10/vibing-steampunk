@@ -3,7 +3,7 @@
 ## Estado al cierre
 
 Rama activa: `fix/lock-nomodification-with-transport` en `txape10/vibing-steampunk`  
-Binario instalado: `C:\Users\devuser\AppData\Local\VSP\vsp.exe` (commit `4d4adfc`)
+Binario instalado: `%LOCALAPPDATA%\VSP\vsp.exe` (commit `4d4adfc`)
 
 ---
 

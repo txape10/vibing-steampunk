@@ -62,7 +62,7 @@ stateful, y si el `sap-contextid` del lock response se persiste para el write re
 ### Siguiente paso concreto
 
 Interceptar tráfico HTTP de `mcp-abap-abap-adt-api` con mitmproxy:
-- mitmproxy instalado en `C:\Users\devuser\AppData\Local\Programs\Python\Python313\Scripts\`
+- mitmproxy instalado en `%LOCALAPPDATA%\Programs\Python\Python313\Scripts\`
 - Capturar: headers del lock request (esp. `X-sap-adt-sessiontype`), cookies en lock response,
   cookies en write request — ¿son las mismas `sap-contextid`?
 - Comparar con vsp (activar logging de HTTP en `pkg/adt/http.go`)

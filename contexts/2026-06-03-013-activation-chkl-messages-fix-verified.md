@@ -63,7 +63,7 @@ Ambos objetos devolvían `success:true, messages:[]` antes del fix.
 - Rama: `fix/lock-nomodification-with-transport` en `txape10/vibing-steampunk`
 - Commit de esta sesión: `b2f0564` (chkl:messages fix)
 - Todos los tests pasan
-- Binario desplegado: `C:\Users\devuser\AppData\Local\VSP\vsp.exe`
+- Binario desplegado: `%LOCALAPPDATA%\VSP\vsp.exe`
 
 ## Error real del proyecto IDoc
 

@@ -3,7 +3,7 @@
 ## Estado al cierre
 
 - Rama: `fix/lock-nomodification-with-transport` en `txape10/vibing-steampunk`
-- Binario: `C:\Users\devuser\AppData\Local\VSP\vsp.exe` — actualizado con esta sesión
+- Binario: `%LOCALAPPDATA%\VSP\vsp.exe` — actualizado con esta sesión
 
 ## Qué se hizo
 

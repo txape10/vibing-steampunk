@@ -47,7 +47,7 @@ Necesita la misma corrección que `workflows_edit.go`.
 
 El servidor `mcp-abap-abap-adt-api` está **disponible en esta sesión** como tools
 `mcp__mcp-abap-abap-adt-api__*`. Credenciales ya configuradas en
-`C:\Users\devuser\mcp-abap-abap-adt-api\.env` (SAP_URL, SAP_USER, SAP_PASSWORD).
+`%USERPROFILE%\mcp-abap-abap-adt-api\.env` (SAP_URL, SAP_USER, SAP_PASSWORD).
 
 No es necesario hacer `login` — el cliente `abap-adt-api` gestiona la sesión
 automáticamente en la primera llamada.

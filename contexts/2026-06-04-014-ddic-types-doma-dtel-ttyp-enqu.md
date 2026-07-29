@@ -3,7 +3,7 @@
 ## Rama y estado
 
 - Rama: `fix/lock-nomodification-with-transport` en `txape10/vibing-steampunk`
-- Binario: `C:\Users\devuser\AppData\Local\VSP\vsp.exe` — actualizado (2026-06-04)
+- Binario: `%LOCALAPPDATA%\VSP\vsp.exe` — actualizado (2026-06-04)
 - Todos los tests pasan: `go test ./pkg/... ./internal/...`
 
 ## Qué se hizo
