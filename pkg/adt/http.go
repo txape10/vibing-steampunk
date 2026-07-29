@@ -409,10 +409,14 @@ func (t *Transport) fetchCSRFToken(ctx context.Context) error {
 	// Use the HEAD response by default; fall back to GET when HEAD returns no usable token.
 	// Some SAP systems (on-premise, S/4HANA cloud) reject HEAD or return no token —
 	// CL_ADT_WB_RES_APP may not implement HEAD. GET is what Eclipse ADT uses.
-	// Do NOT fall back on 401/403: those are auth failures, not missing-HEAD signals.
+	// 403 on HEAD is not always an auth failure: on some systems (S/4HANA public
+	// cloud, on-prem 2023 FPS03+) it just means HEAD isn't implemented for this
+	// ICF handler, while the same user works fine via GET (confirmed against
+	// real systems, see upstream issue #104). Only 401 is treated as a genuine
+	// auth failure that should skip the GET retry.
 	resp := headResp
 	headToken := headResp.Header.Get("X-CSRF-Token")
-	headIsAuthFailure := headResp.StatusCode == http.StatusUnauthorized || headResp.StatusCode == http.StatusForbidden
+	headIsAuthFailure := headResp.StatusCode == http.StatusUnauthorized
 	if (headToken == "" || headToken == "Required") && !headIsAuthFailure {
 		reqGet, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {

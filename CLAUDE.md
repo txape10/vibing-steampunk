@@ -152,6 +152,59 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
 - No unit tests added — matches existing coverage level for the RFC domain (`CallRFC`/`MoveObject` also
   have no unit tests; these are thin WebSocket wrapper methods in the same style).
 
+### 2i. CSRF token fetch — HEAD 403 wrongly treated as auth failure, blocked GET fallback — FIXED (2026-07-29)
+- Root cause: `fetchCSRFToken` (`pkg/adt/http.go`) excluded both 401 and 403 from the HEAD→GET fallback,
+  assuming both meant "bad credentials". Upstream issue [#104](https://github.com/oisee/vibing-steampunk/issues/104)
+  documents (with `curl` repro + two independent user confirmations) that on some systems — **S/4HANA
+  public cloud, and on-prem 2023 FPS03+, which is this project's own connected system** — the ICF handler
+  `CL_ADT_WB_RES_APP` simply doesn't implement HEAD and returns 403 with no CSRF token, while the same user
+  works fine via GET (what Eclipse ADT uses). Only 401 is a genuine auth failure.
+- Fix: `headIsAuthFailure` now checks only `http.StatusUnauthorized`; 403 falls through to the existing GET
+  fallback. File: `pkg/adt/http.go`.
+- Tests: `TestFetchCSRFToken_Head403_FallbackToGet`, `TestFetchCSRFToken_Head401_NoFallback` (`http_test.go`).
+- Ported from upstream #104's community-verified fix rather than invented independently — see the issue for
+  the original diagnosis and diff this fork's fix follows.
+
+### 2j. `InstallZADTVSP` reported "✓ Deployed" even when the write failed — FIXED (2026-07-29)
+- Root cause: the deploy loop in `handleInstallZADTVSP` (`internal/mcp/handlers_install.go`) called
+  `WriteSource` without `Description` and discarded the result (`_, err :=`), checking only `err`. A
+  `WriteSource` failure that returns `(result{Success:false}, nil)` — the normal way this codebase reports
+  failures — was silently printed as "✓ Deployed", potentially leaving empty/broken object shells while
+  reporting success. Matches upstream issue [#138](https://github.com/oisee/vibing-steampunk/issues/138)
+  exactly (verified there against a live S/4HANA 2025 install).
+- Fix: pass `Description: obj.Description`; capture `result, err :=` and treat `!result.Success` as a
+  failure too (reporting `result.Message`). File: `internal/mcp/handlers_install.go`.
+- Not ported: #138 also proposes marking `ZCL_VSP_AMDP_SERVICE` optional (its `if_amdp_dbg_*` dependency is
+  absent on S/4HANA 2025) — out of scope here since this fork targets S/4HANA 2023 FPS03, left for a future
+  session if AMDP install failures are seen on newer releases.
+
+### 2k. `GetCallGraph` sent generic Content-Type, 415 on systems with CAI enabled — FIXED (2026-07-29)
+- Root cause: `GetCallGraph` (`pkg/adt/client.go`) POSTed to `/sap/bc/adt/cai/callgraph` with
+  `ContentType: "application/xml"` (generic). SAP's Code Analytics Infrastructure (CAI) endpoint requires
+  the specific media type `application/vnd.sap.adt.cai.callgraphconfig.v1+xml` and returns 415 otherwise.
+  Matches upstream issue [#142](https://github.com/oisee/vibing-steampunk/issues/142).
+- Fix: one-line `ContentType` change. Also fixes `GetCallersOf`/`GetCalleesOf`, which are thin wrappers
+  around `GetCallGraph`. File: `pkg/adt/client.go`.
+- Test: `TestClient_GetCallGraph_ContentType` (`client_test.go`) asserts the header sent to the mock
+  transport. Along the way, fixed an unrelated latent bug in the shared test helper `newTestResponse`
+  (constructed `http.Header{"X-CSRF-Token": ...}` via a non-canonical map literal, which `Header.Get`
+  can't find since it canonicalizes the lookup key to `X-Csrf-Token` — invisible until a test actually
+  needed a real mutating call to complete, which none did before this one).
+
+### 2l. Flaky `TestListRecordings` — recording ID collision on coarse Windows clock resolution — FIXED (2026-07-29)
+- Root cause: `generateRecordingID()` (`pkg/adt/recorder.go`) formatted `time.Now()` down to nanoseconds
+  for uniqueness, but the underlying OS clock resolution (notably on Windows) can be coarser than a
+  nanosecond — two recordings created in a tight loop could get the identical ID string, and `SaveRecording`
+  uses the ID both as the filename and as the index's unique key, so a collision silently overwrote the
+  earlier entry. Found via test flakiness (`TestListRecordings` failing ~2/6 runs), confirmed unrelated to
+  any other change in the same commit (0/6 failures on `git stash`, reproducible only with the collision
+  mechanism present).
+- Fix: added a package-level `atomic.AddUint64` counter suffixed onto the timestamp, guaranteeing
+  uniqueness regardless of clock resolution. File: `pkg/adt/recorder.go`.
+- Verified: 15/15 passes after the fix (previously flaky). Nothing else in the codebase parses the ID's
+  internal structure (grep-confirmed) — it's treated as an opaque string everywhere (filenames, map keys,
+  JSON), so the added suffix is safe.
+
 ## Known Open Issues (Not Fixed)
 
 ### `RUN_REPORT` — hangs on reports with a selection screen; secondary `MISSING_PARAM` bug

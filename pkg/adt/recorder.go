@@ -4,7 +4,9 @@ package adt
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -100,10 +102,17 @@ func NewExecutionRecorder(sessionID, program string) *ExecutionRecorder {
 	}
 }
 
+var recordingIDSeq uint64
+
 // generateRecordingID creates a unique recording ID.
 func generateRecordingID() string {
-	// Include nanoseconds for uniqueness in rapid succession
-	return time.Now().Format("20060102-150405.000000000")
+	// The nanosecond-formatted timestamp alone is not guaranteed unique in
+	// rapid succession — the OS clock's actual resolution (e.g. on Windows)
+	// can be coarser than a nanosecond, letting two recordings created in the
+	// same tight loop collide and silently overwrite each other's index entry.
+	// An atomic counter suffix guarantees uniqueness regardless of clock resolution.
+	seq := atomic.AddUint64(&recordingIDSeq, 1)
+	return fmt.Sprintf("%s-%06d", time.Now().Format("20060102-150405.000000000"), seq)
 }
 
 // RecordFrame adds a new execution frame to the recording.

@@ -1564,7 +1564,7 @@ func (c *Client) GetCallGraph(ctx context.Context, objectURI string, opts *CallG
 		Method:      http.MethodPost,
 		Query:       params,
 		Accept:      "application/xml",
-		ContentType: "application/xml",
+		ContentType: "application/vnd.sap.adt.cai.callgraphconfig.v1+xml",
 		Body:        []byte(body),
 	})
 	if err != nil {

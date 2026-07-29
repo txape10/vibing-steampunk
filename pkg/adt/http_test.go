@@ -186,6 +186,58 @@ func TestTransport_Request_CSRFRefreshOn403(t *testing.T) {
 	}
 }
 
+func TestFetchCSRFToken_Head403_FallbackToGet(t *testing.T) {
+	mock := &mockHTTPClient{
+		responses: []*http.Response{
+			// HEAD: some ICF handlers (S/4HANA public cloud, on-prem 2023 FPS03+)
+			// don't implement HEAD and return 403 with no token — not an auth failure.
+			newMockResponse(403, "Forbidden", nil),
+			// GET fallback succeeds with a valid token.
+			newMockResponse(200, "OK", map[string]string{"X-CSRF-Token": "fallback-token"}),
+		},
+	}
+
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	transport := NewTransportWithClient(cfg, mock)
+
+	if err := transport.fetchCSRFToken(context.Background()); err != nil {
+		t.Fatalf("fetchCSRFToken failed: %v", err)
+	}
+
+	if len(mock.requests) != 2 {
+		t.Fatalf("Expected 2 requests (HEAD + GET fallback), got %d", len(mock.requests))
+	}
+	if mock.requests[0].Method != http.MethodHead {
+		t.Errorf("First request method = %v, want HEAD", mock.requests[0].Method)
+	}
+	if mock.requests[1].Method != http.MethodGet {
+		t.Errorf("Second request method = %v, want GET", mock.requests[1].Method)
+	}
+	if got := transport.getCSRFToken(); got != "fallback-token" {
+		t.Errorf("CSRF token = %v, want fallback-token", got)
+	}
+}
+
+func TestFetchCSRFToken_Head401_NoFallback(t *testing.T) {
+	mock := &mockHTTPClient{
+		responses: []*http.Response{
+			// 401 is a genuine auth failure — must not retry with GET.
+			newMockResponse(401, "Unauthorized", nil),
+		},
+	}
+
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	transport := NewTransportWithClient(cfg, mock)
+
+	err := transport.fetchCSRFToken(context.Background())
+	if err == nil {
+		t.Fatal("Expected error for 401, got nil")
+	}
+	if len(mock.requests) != 1 {
+		t.Fatalf("Expected 1 request (no GET fallback on 401), got %d", len(mock.requests))
+	}
+}
+
 func TestTransport_Request_RetryOn401(t *testing.T) {
 	mock := &mockHTTPClient{
 		responses: []*http.Response{

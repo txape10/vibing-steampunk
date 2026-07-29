@@ -54,10 +54,12 @@ func cloneResponseWithFreshBody(resp *http.Response) *http.Response {
 }
 
 func newTestResponse(body string) *http.Response {
+	h := http.Header{}
+	h.Set("X-CSRF-Token", "test-token")
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     http.Header{"X-CSRF-Token": []string{"test-token"}},
+		Header:     h,
 	}
 }
 
@@ -432,6 +434,44 @@ ENDCLASS.`
 
 	if !strings.Contains(mainSource, "CLASS zcl_test") {
 		t.Errorf("Source should contain CLASS statement")
+	}
+}
+
+func TestClient_GetCallGraph_ContentType(t *testing.T) {
+	callGraphXML := `<?xml version="1.0" encoding="UTF-8"?>
+<callGraph>
+  <node uri="/sap/bc/adt/programs/programs/ZTEST" name="ZTEST" type="PROG/P"/>
+</callGraph>`
+
+	mock := &mockTransportClient{
+		responses: map[string]*http.Response{
+			"/sap/bc/adt/cai/callgraph": newTestResponse(callGraphXML),
+			"discovery":                 newTestResponse("OK"),
+		},
+	}
+
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	transport := NewTransportWithClient(cfg, mock)
+	client := NewClientWithTransport(cfg, transport)
+
+	_, err := client.GetCallGraph(context.Background(), "/sap/bc/adt/programs/programs/ZTEST", nil)
+	if err != nil {
+		t.Fatalf("GetCallGraph failed: %v", err)
+	}
+
+	var callGraphReq *http.Request
+	for _, req := range mock.requests {
+		if strings.Contains(req.URL.Path, "/sap/bc/adt/cai/callgraph") {
+			callGraphReq = req
+		}
+	}
+	if callGraphReq == nil {
+		t.Fatal("No request made to /sap/bc/adt/cai/callgraph")
+	}
+
+	const wantContentType = "application/vnd.sap.adt.cai.callgraphconfig.v1+xml"
+	if got := callGraphReq.Header.Get("Content-Type"); got != wantContentType {
+		t.Errorf("Content-Type = %v, want %v", got, wantContentType)
 	}
 }
 
