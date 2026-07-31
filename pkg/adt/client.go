@@ -1117,6 +1117,7 @@ func (c *Client) GetTableContents(ctx context.Context, tableName string, maxRows
 	params.Set("ddicEntityName", tableName)
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/datapreview/ddic", &RequestOptions{
+		Method: http.MethodPost,
 		Query:  params,
 		Accept: "application/*",
 	})

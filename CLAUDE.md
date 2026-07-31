@@ -205,6 +205,26 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
   internal structure (grep-confirmed) — it's treated as an opaque string everywhere (filenames, map keys,
   JSON), so the added suffix is safe.
 
+### 2n. `GetTableContents` — DDIC endpoint sent as GET instead of POST, 400 "Tabla/Vista no existe" on every table — FIXED (2026-07-31)
+- Root cause: a self-inflicted regression in this fork's own commit `4d731ca` (2026-06-02, "INCL write
+  support + DELETE auto-lock + RunQuery/tableContents fixes"). That refactor added the sqlFilter→freestyle
+  routing branch to `GetTableContents` and, in the process, dropped the `Method: http.MethodPost` that the
+  no-filter branch's `RequestOptions{}` literal used to have — leaving `Transport.Request` to apply its
+  default `http.MethodGet` (`pkg/adt/http.go:177`). SAP's `/sap/bc/adt/datapreview/ddic` endpoint only
+  accepts POST (documented in `docs/adt-api-reference.md:304`; upstream `oisee/vibing-steampunk` still has
+  `Method: http.MethodPost` there, and this file's own `runFreestyleQuery` sibling already had it correctly)
+  — so every unfiltered table-contents read failed with a generic 400 `ExceptionDataPreviewGeneral`
+  ("Tabla/Vista no existe") regardless of whether the table existed. No upstream issue or PR mentions this;
+  confirmed fork-specific via a GitHub search across `oisee/vibing-steampunk` issues/PRs (zero hits) and a
+  diff against upstream's current `client.go`.
+- Fix: restore `Method: http.MethodPost` in that one `RequestOptions{}` literal. File: `pkg/adt/client.go`.
+- Verified live against the real SAP system: `T001` (standard table) and `ZTSU_SOC_AFE` (customer table)
+  both returned 400 before the fix and correct data — including full column metadata (Spanish descriptions,
+  lengths) — after rebuilding and redeploying the binary.
+- No unit tests existed for `GetTableContents` (only `pkg/adt/integration_test.go`, which doesn't pin the
+  HTTP method), so there was no regression risk from the fix itself. Code-reviewed: 0
+  CRITICAL/HIGH/MEDIUM/LOW.
+
 ## Known Open Issues (Not Fixed)
 
 ### `RUN_REPORT` — hangs on reports with a selection screen; secondary `MISSING_PARAM` bug
