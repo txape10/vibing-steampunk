@@ -278,7 +278,22 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
     DATA lv_lang TYPE sy-langu.
     IF lv_language IS NOT INITIAL.
-      lv_lang = lv_language(1).
+      CALL FUNCTION 'CONVERSION_EXIT_ISOLA_INPUT'
+        EXPORTING
+          input            = lv_language
+        IMPORTING
+          output           = lv_lang
+        EXCEPTIONS
+          unknown_language = 1
+          OTHERS           = 2.
+      IF sy-subrc <> 0.
+        rs_response = build_error(
+          iv_id      = is_message-id
+          iv_code    = 'INVALID_LANGUAGE'
+          iv_message = |Unknown language code: { lv_language }|
+        ).
+        RETURN.
+      ENDIF.
     ELSE.
       lv_lang = sy-langu.
     ENDIF.
@@ -344,7 +359,22 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
     DATA lv_lang TYPE sy-langu.
     IF lv_language IS NOT INITIAL.
-      lv_lang = lv_language(1).
+      CALL FUNCTION 'CONVERSION_EXIT_ISOLA_INPUT'
+        EXPORTING
+          input            = lv_language
+        IMPORTING
+          output           = lv_lang
+        EXCEPTIONS
+          unknown_language = 1
+          OTHERS           = 2.
+      IF sy-subrc <> 0.
+        rs_response = build_error(
+          iv_id      = is_message-id
+          iv_code    = 'INVALID_LANGUAGE'
+          iv_message = |Unknown language code: { lv_language }|
+        ).
+        RETURN.
+      ENDIF.
     ELSE.
       lv_lang = sy-langu.
     ENDIF.
@@ -367,13 +397,17 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
           DATA lv_textkey TYPE textpoolky.
           lv_textkey = lv_key.
-          " Selection text entry must be: 8-char key prefix + text value
-          DATA(lv_entry) = |{ lv_textkey WIDTH = 8 }{ lv_val }|.
-          READ TABLE lt_textpool ASSIGNING FIELD-SYMBOL(<fs>) WITH KEY id = 'S' key = lv_textkey.
-          IF sy-subrc = 0.
-            <fs>-entry = lv_entry.
+          IF lv_val IS INITIAL.
+            DELETE lt_textpool WHERE id = 'S' AND key = lv_textkey.
           ELSE.
-            APPEND VALUE textpool( id = 'S' key = lv_textkey entry = lv_entry ) TO lt_textpool.
+            " Selection text entry must be: 8-char key prefix + text value
+            DATA(lv_entry) = |{ lv_textkey WIDTH = 8 }{ lv_val }|.
+            READ TABLE lt_textpool ASSIGNING FIELD-SYMBOL(<fs>) WITH KEY id = 'S' key = lv_textkey.
+            IF sy-subrc = 0.
+              <fs>-entry = lv_entry.
+            ELSE.
+              APPEND VALUE textpool( id = 'S' key = lv_textkey entry = lv_entry ) TO lt_textpool.
+            ENDIF.
           ENDIF.
           lv_sel_count = lv_sel_count + 1.
 
@@ -400,11 +434,15 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
           REPLACE ALL OCCURRENCES OF '\\' IN lv_val WITH '\'.
 
           lv_textkey = lv_key.
-          READ TABLE lt_textpool ASSIGNING <fs> WITH KEY id = 'I' key = lv_textkey.
-          IF sy-subrc = 0.
-            <fs>-entry = lv_val.
+          IF lv_val IS INITIAL.
+            DELETE lt_textpool WHERE id = 'I' AND key = lv_textkey.
           ELSE.
-            APPEND VALUE textpool( id = 'I' key = lv_textkey entry = lv_val ) TO lt_textpool.
+            READ TABLE lt_textpool ASSIGNING <fs> WITH KEY id = 'I' key = lv_textkey.
+            IF sy-subrc = 0.
+              <fs>-entry = lv_val.
+            ELSE.
+              APPEND VALUE textpool( id = 'I' key = lv_textkey entry = lv_val ) TO lt_textpool.
+            ENDIF.
           ENDIF.
           lv_sym_count = lv_sym_count + 1.
 

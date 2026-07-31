@@ -205,6 +205,32 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
   internal structure (grep-confirmed) — it's treated as an opaque string everywhere (filenames, map keys,
   JSON), so the added suffix is safe.
 
+### 2m. `GET_TEXT_ELEMENTS`/`SET_TEXT_ELEMENTS` — language param mishandled + phantom empty entries on delete — FIXED (2026-07-30)
+- **Bug 1 — language code**: `ZCL_VSP_REPORT_SERVICE`'s `HANDLE_GET_TEXT_ELEMENTS`/`HANDLE_SET_TEXT_ELEMENTS`
+  accept a `language` param that can arrive as either a 1-char SAP code (`"S"`) or a 2-char ISO code
+  (`"ES"`). The old code (`lv_lang = lv_language(1)`) just truncated to 1 char, which is wrong whenever the
+  ISO code's first letter doesn't match the SAP code (Spain: ISO `"ES"` → SAP `"S"`, not `"E"`). Fix: use
+  the standard SAP conversion exit `CONVERSION_EXIT_ISOLA_INPUT`; on `unknown_language`/`OTHERS`, return a
+  proper `INVALID_LANGUAGE` error instead of silently continuing with a wrong code. Files:
+  `src/zcl_vsp_report_service.clas.abap`, `embedded/abap/zcl_vsp_report_service.clas.abap`.
+- **Bug 2 — phantom entries on delete**: calling `SET_TEXT_ELEMENTS` with an empty value (`""`) for an
+  existing key always wrote an (empty) row back into `lt_textpool` instead of removing it — leaving
+  "phantom" empty-value entries in the real SAP text pool after `INSERT TEXTPOOL`. Fix: `IF lv_val IS
+  INITIAL. DELETE lt_textpool WHERE id = ... AND key = ... .` for both selection texts (`id = 'S'`) and text
+  symbols (`id = 'I'`).
+- **Documentation gap (not fixed, stated as-is)**: the language param's real semantics (1-char SAP vs.
+  2-char ISO, conversion exit involved) were not documented anywhere — neither in `SAP(action="help")` nor
+  in code comments — only a bare example value existed in `sap-mcp-servers.md`. Left undocumented in the
+  tool's own help text; noted here instead.
+- Verified live against the real SAP system (S/4HANA on-prem 2023 FPS03): rewrote and then genuinely
+  deleted a selection text (`PA_TOLER`) on a production program (`ZRPP_VOLCADOS_VS_FLEJADOS`), confirmed via
+  `GET_TEXT_ELEMENTS` after each step (rewritten text appeared correctly; deleted key showed `(none)`
+  instead of a phantom empty entry).
+- Code-reviewed: 1 MEDIUM raised (confirm the `DELETE lt_textpool` isn't inside a `LOOP AT lt_textpool`,
+  which would be undefined behavior) — verified false positive: the enclosing loop is `WHILE lv_work CS
+  '"'`, a manual JSON parser advancing a string offset (`lv_work`), not a `LOOP AT lt_textpool`; the DELETE
+  targets a separate internal table it never iterates over. 0 CRITICAL/HIGH remained.
+
 ### 2n. `GetTableContents` — DDIC endpoint sent as GET instead of POST, 400 "Tabla/Vista no existe" on every table — FIXED (2026-07-31)
 - Root cause: a self-inflicted regression in this fork's own commit `4d731ca` (2026-06-02, "INCL write
   support + DELETE auto-lock + RunQuery/tableContents fixes"). That refactor added the sqlFilter→freestyle
