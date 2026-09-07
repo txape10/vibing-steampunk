@@ -1390,7 +1390,7 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 			mcp.WithDescription("Get all transport requests for a user (requires --enable-transports flag). Returns both workbench and customizing requests grouped by target system."),
 			mcp.WithString("user_name",
 				mcp.Required(),
-				mcp.Description("SAP user name (will be converted to uppercase)"),
+				mcp.Description("SAP user name (will be converted to uppercase), or '*' for every user"),
 			),
 		), s.handleGetUserTransports)
 	}

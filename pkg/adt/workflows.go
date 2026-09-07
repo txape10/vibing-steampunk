@@ -27,19 +27,18 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 	objectURL := fmt.Sprintf("/sap/bc/adt/programs/programs/%s", url.PathEscape(programName))
 	sourceURL := objectURL + "/source/main"
 
-	// Unified mutation policy gate (op type + package + transport).
-	// Marking the context skips the inner gate in UpdateSource so the
-	// stateful Lock → PUT block is not interrupted by a stateless
-	// SearchObject hop (see mutationGateSkipKey for full rationale).
-	if err := c.checkMutation(ctx, MutationContext{
+	// Unified mutation policy gate (op type + package + transport). The
+	// returned context carries the mark that stops UpdateSource resolving
+	// the same package again from inside the lock window (issue #91).
+	ctx, err := c.gateAndMark(ctx, MutationContext{
 		Op:        OpWorkflow,
 		OpName:    "WriteProgram",
 		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
-	ctx = withMutationGateAlreadyRan(ctx)
 
 	result := &WriteProgramResult{
 		ProgramName: programName,
@@ -70,10 +69,17 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 		return result, nil
 	}
 
-	// Ensure we unlock on any error
+	// Ensure we unlock on any error. Tracked explicitly rather than keyed off
+	// result.Success: activation can still fail after a successful Step 4
+	// unlock below, and result.Success only flips to true at the very end —
+	// without this flag the defer would fire a second, spurious UNLOCK on a
+	// handle already released.
+	unlocked := false
 	defer func() {
-		if !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		if !unlocked {
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -94,6 +100,7 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 
 	// Step 4: Unlock before activation (SAP requirement)
 	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+	unlocked = true
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
@@ -136,15 +143,18 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 	objectURL := fmt.Sprintf("/sap/bc/adt/programs/includes/%s", url.PathEscape(strings.ToLower(includeName)))
 	sourceURL := objectURL + "/source/main"
 
-	if err := c.checkMutation(ctx, MutationContext{
+	// Unified mutation policy gate (op type + package + transport). The
+	// returned context carries the mark that stops UpdateSource resolving
+	// the same package again from inside the lock window (issue #91).
+	ctx, err := c.gateAndMark(ctx, MutationContext{
 		Op:        OpWorkflow,
 		OpName:    "WriteInclude",
 		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
-	ctx = withMutationGateAlreadyRan(ctx)
 
 	result := &WriteIncludeResult{
 		IncludeName: includeName,
@@ -174,7 +184,9 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 	unlocked := false
 	defer func() {
 		if !unlocked {
-			_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -229,18 +241,18 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 	objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(className))
 	sourceURL := objectURL + "/source/main"
 
-	// Unified mutation policy gate (op type + package + transport).
-	// Mark the context to skip the inner gate in UpdateSource — see
-	// mutationGateSkipKey for the session-affinity rationale.
-	if err := c.checkMutation(ctx, MutationContext{
+	// Unified mutation policy gate (op type + package + transport). The
+	// returned context carries the mark that stops UpdateSource resolving
+	// the same package again from inside the lock window (issue #91).
+	ctx, err := c.gateAndMark(ctx, MutationContext{
 		Op:        OpWorkflow,
 		OpName:    "WriteClass",
 		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
-	ctx = withMutationGateAlreadyRan(ctx)
 
 	result := &WriteClassResult{
 		ClassName: className,
@@ -271,9 +283,14 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 		return result, nil
 	}
 
+	// Tracked explicitly rather than keyed off result.Success — see the
+	// identical comment in WriteProgram above.
+	unlocked := false
 	defer func() {
-		if !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		if !unlocked {
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -294,6 +311,7 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 
 	// Step 4: Unlock
 	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+	unlocked = true
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
@@ -335,9 +353,10 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 	packageName = strings.ToUpper(packageName)
 
 	// Unified mutation policy gate (op type + package + transport).
-	// Mark the context to skip the inner gate in CreateObject and
-	// UpdateSource — see mutationGateSkipKey for the session-affinity
-	// rationale.
+	// CreateObject below runs its own gate against packageName again before
+	// asking SAP to create the object there — that second check is cheap
+	// (no ObjectURL to resolve), so it is left in place rather than marked
+	// away.
 	if err := c.checkMutation(ctx, MutationContext{
 		Op:        OpWorkflow,
 		OpName:    "CreateAndActivateProgram",
@@ -346,7 +365,6 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 	}); err != nil {
 		return nil, err
 	}
-	ctx = withMutationGateAlreadyRan(ctx)
 
 	objectURL := fmt.Sprintf("/sap/bc/adt/programs/programs/%s", url.PathEscape(programName))
 	sourceURL := objectURL + "/source/main"
@@ -369,6 +387,13 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 		return result, nil
 	}
 
+	// The gate above accepted packageName, and CreateObject gated it a
+	// second time before asking SAP to put the program there — so the
+	// program's package is a package the whitelist allows. Record that for
+	// the object, or UpdateSource resolves it again from inside the lock
+	// (issue #91).
+	ctx = withMutationPackageChecked(ctx, objectURL)
+
 	// Step 2: Lock
 	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
 	if err != nil {
@@ -376,9 +401,14 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 		return result, nil
 	}
 
+	// Tracked explicitly rather than keyed off result.Success — see the
+	// identical comment in WriteProgram above.
+	unlocked := false
 	defer func() {
-		if !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		if !unlocked {
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -391,6 +421,7 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 
 	// Step 4: Unlock
 	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+	unlocked = true
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
@@ -432,9 +463,8 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 	packageName = strings.ToUpper(packageName)
 
 	// Unified mutation policy gate (op type + package + transport).
-	// Mark the context to skip the inner gate in CreateObject,
-	// UpdateSource, CreateTestInclude and UpdateClassInclude — see
-	// mutationGateSkipKey for the session-affinity rationale.
+	// CreateObject below runs its own gate against packageName again before
+	// asking SAP to create the class there.
 	if err := c.checkMutation(ctx, MutationContext{
 		Op:        OpWorkflow,
 		OpName:    "CreateClassWithTests",
@@ -443,7 +473,6 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 	}); err != nil {
 		return nil, err
 	}
-	ctx = withMutationGateAlreadyRan(ctx)
 
 	objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(className))
 	sourceURL := objectURL + "/source/main"
@@ -466,6 +495,13 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 		return result, nil
 	}
 
+	// Same reasoning as CreateAndActivateProgram: packageName passed the
+	// gate twice and the class was created there, so the three mutators
+	// that run under the single lock below (UpdateSource, CreateTestInclude,
+	// UpdateClassInclude — all of which resolve to this class URL) need not
+	// each resolve the package again mid-window (issue #91).
+	ctx = withMutationPackageChecked(ctx, objectURL)
+
 	// Step 2: Lock
 	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
 	if err != nil {
@@ -473,9 +509,14 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 		return result, nil
 	}
 
+	// Tracked explicitly rather than keyed off result.Success — see the
+	// identical comment in WriteProgram above.
+	unlocked := false
 	defer func() {
-		if !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		if !unlocked {
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -502,6 +543,7 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 
 	// Step 6: Unlock
 	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+	unlocked = true
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil

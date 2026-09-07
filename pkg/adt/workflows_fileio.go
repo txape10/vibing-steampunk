@@ -37,17 +37,23 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		return nil, err
 	}
 
-	// Unified mutation policy gate for the old object being deleted.
-	if err := c.checkMutation(ctx, MutationContext{
+	// Unified mutation policy gate for the old object being deleted. The mark
+	// on the returned context covers exactly the object this gate resolved,
+	// so the DeleteObject at the end does not resolve it again while holding
+	// the lock it is about to use (issue #91).
+	ctx, err = c.gateAndMark(ctx, MutationContext{
 		Op:        OpDelete,
 		OpName:    "RenameObject",
 		ObjectURL: oldURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 
 	// If a target package is supplied, gate the create side as well.
+	// CreateObject below checks it again, so this is not marked away — the
+	// new object's URL is marked separately once it exists (see below).
 	if packageName != "" {
 		if err := c.checkMutation(ctx, MutationContext{
 			Op:        OpCreate,
@@ -58,12 +64,6 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 			return nil, err
 		}
 	}
-
-	// Both gates have run; mark the context so inner CreateObject /
-	// UpdateSource / DeleteObject skip their redundant gates and do not
-	// inject a stateless SearchObject hop between Lock and PUT/DELETE
-	// (mutationGateSkipKey).
-	ctx = withMutationGateAlreadyRan(ctx)
 
 	// 1. Get old object source
 	resp, err := c.transport.Request(ctx, oldURL+"/source/main", &RequestOptions{
@@ -95,14 +95,31 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 
 	// 4. Write source to new object
 	newURL, _ := c.buildObjectURL(objType, newName)
+	// The new object was created in packageName, which the create-side gate
+	// above accepted (and CreateObject checked again). Only mark when a
+	// package was actually supplied and therefore actually checked: with
+	// packageName empty there is no approved package to stand behind, and
+	// leaving the mark off makes UpdateSource fall back to the full gate.
+	if packageName != "" {
+		ctx = withMutationPackageChecked(ctx, newURL)
+	}
+
 	lockResult, err := c.LockObject(ctx, newURL, "MODIFY")
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to lock new object: %v", err))
 		return result, nil
 	}
 
+	// Track the release explicitly. The old form was an unconditional defer
+	// plus an inline unlock on the happy path, so every successful rename
+	// sent a second UNLOCK for a handle that was already gone.
+	newUnlocked := false
 	defer func() {
-		_ = c.UnlockObject(ctx, newURL, lockResult.LockHandle)
+		if !newUnlocked {
+			if unlockErr := c.releaseLockAfterFailure(ctx, newURL, lockResult.LockHandle); unlockErr != nil {
+				result.Errors = append(result.Errors, strandedLockAdvice(newURL, unlockErr))
+			}
+		}
 	}()
 
 	err = c.UpdateSource(ctx, newURL, newSource, lockResult.LockHandle, transport)
@@ -111,7 +128,11 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		return result, nil
 	}
 
-	_ = c.UnlockObject(ctx, newURL, lockResult.LockHandle)
+	unlockErr := c.UnlockObject(ctx, newURL, lockResult.LockHandle)
+	newUnlocked = true
+	if unlockErr != nil {
+		result.Errors = append(result.Errors, strandedLockAdvice(newURL, unlockErr))
+	}
 
 	// 5. Activate new object
 	_, err = c.Activate(ctx, newURL, newName)
@@ -128,12 +149,27 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		return result, nil
 	}
 
+	// A successful DELETE consumes the lock with the object; anything else
+	// leaves the ENQUEUE on an object the user has just been told to delete
+	// by hand — which is precisely what would make the manual delete fail.
+	// This branch had no defer at all, so the failure path returned
+	// Success=true with the lock still held and nothing said about it.
+	oldReleased := false
+	defer func() {
+		if !oldReleased {
+			if unlockErr := c.releaseLockAfterFailure(ctx, oldURL, oldLockResult.LockHandle); unlockErr != nil {
+				result.Errors = append(result.Errors, strandedLockAdvice(oldURL, unlockErr))
+			}
+		}
+	}()
+
 	err = c.DeleteObject(ctx, oldURL, oldLockResult.LockHandle, transport)
 	if err != nil {
 		result.Message = fmt.Sprintf("New object %s created successfully, but failed to delete old object %s: %v. Please delete manually.", newName, oldName, err)
 		result.Success = true
 		return result, nil
 	}
+	oldReleased = true
 
 	result.Success = true
 	result.Message = fmt.Sprintf("Successfully renamed %s to %s", oldName, newName)

@@ -69,10 +69,10 @@ type ExecuteABAPOptions struct {
 // Security: This is gated by OpWorkflow safety check.
 func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAPOptions) (*ExecuteABAPResult, error) {
 	// Unified mutation policy gate — temp programs always live in $TMP.
-	// Mark the context so the inner CreateObject + UpdateSource +
-	// DeleteObject (cleanup) skip their redundant gates and do not inject
-	// a stateless SearchObject hop between Lock and PUT/DELETE
-	// (mutationGateSkipKey).
+	// CreateObject below gates "$TMP" a second time before asking SAP to
+	// create the program there; once that succeeds, the object's own URL is
+	// marked (see below) so UpdateSource and the cleanup DeleteObject do not
+	// each resolve the package again from inside a lock window (issue #91).
 	if err := c.checkMutation(ctx, MutationContext{
 		Op:      OpWorkflow,
 		OpName:  "ExecuteABAP",
@@ -80,7 +80,6 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 	}); err != nil {
 		return nil, err
 	}
-	ctx = withMutationGateAlreadyRan(ctx)
 
 	if opts == nil {
 		opts = &ExecuteABAPOptions{}
@@ -152,14 +151,31 @@ ENDCLASS.
 		return result, nil
 	}
 
+	// The temp program lives in $TMP, and CreateObject only got that far
+	// because "$TMP" passed the package whitelist. Record it so neither the
+	// UpdateSource below nor the DeleteObject in the cleanup defer resolves
+	// the package again while holding a lock (issue #91). The defer reads
+	// this variable when it runs, so it sees the marked context too.
+	ctx = withMutationPackageChecked(ctx, objectURL)
+
 	// Ensure cleanup on any error (unless KeepProgram is set)
 	defer func() {
 		if !opts.KeepProgram {
 			// Try to delete the program
 			lock, lockErr := c.LockObject(ctx, objectURL, "MODIFY")
 			if lockErr == nil {
-				_ = c.DeleteObject(ctx, objectURL, lock.LockHandle, "")
-				result.CleanedUp = true
+				if delErr := c.DeleteObject(ctx, objectURL, lock.LockHandle, ""); delErr != nil {
+					// The lock this defer just took was never released: not
+					// a compensating unlock reusing a dead ctx (issue #91's
+					// usual shape), but a bare absence of one. Detached
+					// release, same as everywhere else in this file.
+					if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+						result.Message = fmt.Sprintf("%s (cleanup also failed: %v — %s)",
+							result.Message, delErr, strandedLockAdvice(objectURL, unlockErr))
+					}
+				} else {
+					result.CleanedUp = true
+				}
 			}
 		}
 	}()
@@ -174,8 +190,11 @@ ENDCLASS.
 	sourceURL := objectURL + "/source/main"
 	err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, "")
 	if err != nil {
-		_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-		result.Message = fmt.Sprintf("Failed to update source: %v", err)
+		if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+			result.Message = fmt.Sprintf("Failed to update source: %v — %s", err, strandedLockAdvice(objectURL, unlockErr))
+		} else {
+			result.Message = fmt.Sprintf("Failed to update source: %v", err)
+		}
 		return result, nil
 	}
 

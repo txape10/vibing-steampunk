@@ -303,36 +303,209 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
   corrected in `internal/mcp/tools_register.go`), 1 LOW (pre-existing, unrelated `fmt.Sscanf` error-ignoring
   pattern in the SAT hitlist parser — not blocking). Verdict: approve after the HIGH fix.
 
-### 2r. `GetUserTransports` — returned empty despite user having real modifiable transports — FIXED (2026-09-07)
-- Matches upstream issue [#111](https://github.com/oisee/vibing-steampunk/issues/111) (open, unfixed,
-  follow-up of closed #9). Symptom: `get_user_transports` reported no requests for a user that
-  demonstrably had one (`S4DK928661`, confirmed via `get_transport` and `list_transports`).
+### 2r. `GetUserTransports` — returned empty despite user having real modifiable transports — FIXED then SUPERSEDED (2026-09-07, see 2s)
+- Matches upstream issue [#111](https://github.com/oisee/vibing-steampunk/issues/111). Symptom:
+  `get_user_transports` reported no requests for a user that demonstrably had one (`S4DK928661`, confirmed
+  via `get_transport` and `list_transports`).
 - **Root cause (confirmed live via `VSP_HTTP_TRACE=1` raw XML capture, not guessed)**: `GetUserTransports`
   calls `/sap/bc/adt/cts/transportrequests?user=...&targets=true`. On this system, with `targets=true`,
   SAP genuinely returns a bare, childless `<tm:root/>` (300 bytes) — not a parsing bug, SAP itself gives
   nothing. Ruled out the `<tm:project>`-wrapping theory from
-  [abap-adt-api#46](https://github.com/marcellourbani/abap-adt-api/issues/46) (the origin TS library this
-  project's README cites as reference): no such wrapper appears anywhere in the response.
-  Cross-checked: the same query **without** `targets=true` (what `ListTransports` sends) returns a real,
-  18KB+ populated tree — but in a shape (`<tm:workbench><tm:released><tm:request>`, no `<tm:target>` layer)
-  that `parseTransportList` doesn't handle either, so it also parses to empty and silently falls through to
-  `ListTransports`'s existing `listTransportsViaSQL` (E070/E07T) fallback — which is what actually produces
-  `list_transports`' correct results on this system today, not the ADT tree.
-- Fix: `GetUserTransports` now falls back to the same `listTransportsViaSQL` when `parseUserTransports`
-  returns both `Workbench` and `Customizing` empty, converting the flat `[]TransportSummary` result to the
-  hierarchical `*UserTransports` shape via new `convertTransportSummaryToUserTransports` (K→workbench,
-  W→customizing). Transports sourced this way have no `Tasks`/`Objects` detail (E070/E07T doesn't carry
-  it) — same known limitation `ListTransports` already has. File: `pkg/adt/transport.go`.
-- Tests: `TestConvertTransportSummaryToUserTransports_Mixed/EmptyInput/IgnoresUnknownType`
-  (`pkg/adt/transport_test.go`).
-- Verified live: `get_user_transports` for the real user now lists `S4DK928661` and 74 other requests,
-  matching `list_transports`.
-- Code-reviewed: 0 CRITICAL/HIGH. 1 MEDIUM (pre-existing, not introduced here — `listTransportsViaSQL`
-  builds its E070/E07T WHERE clause via unescaped string concatenation of the `user` param; this fix adds
-  a second MCP entry point (`get_user_transports`) into that same already-vulnerable helper, and makes the
-  fallback path common rather than rare — flagged as a follow-up to parameterize `listTransportsViaSQL`
-  itself, not fixed in this change). 1 LOW (fixed same session — new test fixtures used the real SAP
-  username instead of `TESTUSER` per this file's own sanitize policy; corrected).
+  [abap-adt-api#46](https://github.com/marcellourbani/abap-adt-api/issues/46): no such wrapper appears
+  anywhere in the response. Cross-checked: the same query **without** `targets=true` (what `ListTransports`
+  sends) returns a real, 18KB+ populated tree — but in a shape (`<tm:workbench><tm:released><tm:request>`,
+  no `<tm:target>` layer) that `parseTransportList` doesn't handle either, so it also parsed to empty and
+  silently fell through to `ListTransports`'s `listTransportsViaSQL` (E070/E07T) fallback.
+- **Original fix (this entry, now replaced)**: a narrow SQL fallback with a one-off converter
+  (`convertTransportSummaryToUserTransports`). Verified live at the time: `get_user_transports` listed
+  `S4DK928661` and 74 other requests, matching `list_transports`.
+- **Superseded same day by 2s**: upstream merged [PR #173](https://github.com/oisee/vibing-steampunk/pull/173)
+  (closes the same #111) with a strictly more general fix — a shape-tolerant tree parser instead of a
+  fallback-on-empty — plus an independent wildcard-user bug (#140) this entry never touched. Ported
+  in full; `convertTransportSummaryToUserTransports` no longer exists. See 2s for the current state.
+
+### 2s. Ported upstream PR #173 — shape-tolerant CTS transport parser, replacing 2r's narrower fix (2026-09-07)
+- Upstream's [#173](https://github.com/oisee/vibing-steampunk/pull/173) (merged) rewrites transport parsing
+  entirely instead of falling back to SQL when the tree looks empty: `/sap/bc/adt/cts/transportrequests`
+  answers with a `tm:root` whose depth depends on the system — `workbench>target>modifiable>request` with
+  transport targets configured, the same without the `target` level, or a flat `tm:request` straight under
+  `tm:root` for a single-request document. The two old hand-written parsers each hardcoded one shape;
+  `encoding/xml` answers a non-matching path with an empty struct and a nil error, so the mismatch read as
+  "no transports" rather than a parse failure.
+- **Fix**: new `pkg/adt/transport_tree.go` — `parseCTSRequests` walks the document namespace-agnostically
+  (`ctsNode`/`ctsRequest`/`ctsObject`/`ctsScope`) instead of asserting a path, collecting every `tm:request`
+  wherever it sits and remembering the section/target/bucket it was nested in. `parseUserTransports` and
+  `parseTransportList` in `transport.go` now delegate to it. `GetUserTransports` keeps a fallback to
+  `userTransportsViaSQL` (replaces 2r's `convertTransportSummaryToUserTransports`) only when the tree
+  parses to genuinely empty.
+- **Bonus fix, not in 2r**: `as4userPredicate()` fixes upstream issue
+  [#140](https://github.com/oisee/vibing-steampunk/issues/140) — `listTransportsViaSQL` compared
+  `AS4USER = '*'` literally, so asking for every user's transports (`user="*"`, the wildcard Eclipse ADT
+  uses) matched no row and looked like an empty system. `'*'` now drops the predicate; a `*` inside a name
+  becomes a `LIKE` prefix. The same function also closes the MEDIUM finding 2r's review left open
+  (unescaped string concatenation of `user` into SQL): it validates the name against a character whitelist
+  (letters, digits, `_ - . / *`) before interpolating — refuses anything that could close the SQL literal
+  instead of quoting it. **The standalone follow-up task flagged for that MEDIUM (`task_c207b70e`,
+  "Parametrizar user en listTransportsViaSQL") is now moot and was withdrawn.**
+- One upstream identifier (`firstNonEmpty`) was referenced by the ported diff without being defined in it
+  (must already exist elsewhere in upstream's codebase) — added locally at the bottom of
+  `transport_tree.go` since this fork had no equivalent.
+- Ported `pkg/adt/transport_tree_test.go` (12 tests, `httptest`-based, no live SAP needed) verbatim — already
+  sanitized upstream (`TESTUSER`, `TR-EXAMPLE-*`, `/ZDEMO/`). Removed 2r's 3 tests for the now-deleted
+  `convertTransportSummaryToUserTransports`; existing `TestParseUserTransports`/`TestParseUserTransportsEmpty`
+  needed no changes and still pass. One-line doc tweaks in `cmd/vsp/devops.go` and
+  `internal/mcp/tools_register.go` (mention `'*'` for every user).
+- Files: `pkg/adt/transport_tree.go` (new), `pkg/adt/transport_tree_test.go` (new), `pkg/adt/transport.go`,
+  `pkg/adt/transport_test.go`, `cmd/vsp/devops.go`, `internal/mcp/tools_register.go`.
+- `go build ./...` clean, `go test ./pkg/... ./internal/...` (minus the always-failing `pkg/cache` CGO
+  case) green. Code-reviewed: 0 CRITICAL/HIGH. 1 MEDIUM (informational — `firstNonEmpty` is a generic-purpose
+  helper placed in a transport-specific file; not a correctness issue). 2 LOW (informational — the SQL
+  fallback path no longer explicitly drops an unreachable "unknown transport type" case the old code did,
+  but that branch is provably unreachable given `listTransportsViaSQL`'s own `WHERE ... IN ('K','W')`; and
+  `_` acts as a single-character SQL wildcard when a user name mixes `_` and `*`, a low-probability
+  functional nuance, not a security issue).
+- **Verified live** (same session, after deploying the rebuilt binary): `get_user_transports` and
+  `list_transports` now return the identical set (53 workbench + 19 customizing requests, including
+  `S4DK928661`) on the real system — previously they disagreed, which was #111's exact symptom.
+
+### 2t. Ported upstream PR #167 — the rest of issue #91 (session affinity beyond #132/#133) (2026-09-07)
+- Our own #132/#133 fixes (see "1." above) closed *a* stateless-hop-between-lock-and-write bug — the
+  `getObjectPackage → SearchObject` hop inside `UpdateSource`'s mutation gate — using a boolean
+  `mutationGateSkipKey` that made an outer workflow's gate skip *all three* of the inner gate's checks
+  (op-type, package, transport) as a unit. Upstream's [PR #167](https://github.com/oisee/vibing-steampunk/pull/167)
+  (merged, closes the live leg of upstream #91) diagnosed the same root cause independently and fixed it
+  more precisely, plus found three more mutations with the identical defect that #132/#133 never touched.
+  Ported in full, migrating away from our own boolean mechanism in the process.
+- **The security-relevant part**: our old `mutationGateSkipKeyT` skipped the *entire* gate — op-type and
+  transport checks included — whenever an outer workflow had run its own gate with a possibly-different
+  `Op`. A workflow gated as `OpWorkflow` delegating to an inner mutator that should itself be gated as
+  `OpUpdate` meant `--disallowed-ops U` (or `--allow-transportable-edits`) never got enforced on that inner
+  call — a real, live policy hole, not just an architectural nicety. Fixed by replacing the boolean with a
+  **per-object** marker (`pkg/adt/mutation_gate_marker.go`: `withMutationPackageChecked`/
+  `mutationPackageAlreadyChecked`, keyed by `canonicalizeObjectURL`) that skips *only* the networked
+  package-lookup step of `checkMutation` (`pkg/adt/mutation_gate.go`), and only for the exact object an
+  outer gate already resolved and approved. Steps 1 (op-type) and 3 (transport) now run unconditionally,
+  every time. New helper `gateAndMark`/`PrepareSourceUpdate` for the common "gate above the lock, mark the
+  context, pass it down" pattern.
+- **Two more mutations were themselves stateless, unconditionally, on any configuration** (not just with
+  `--allowed-packages` set): `CreateTable`'s source PUT (`pkg/adt/crud.go`) — previously a hand-rolled
+  `transport.Request` with no `Stateful` field, so creating a DDIC table 423'd every single time,
+  independent of any policy flag — and `WriteMessageClassTexts`' PUT (`pkg/adt/i18n.go`), missing the same
+  `Stateful: true`. `CreateTable` also gained the package-ownership check it never had (`checkSafety` alone
+  before, no `AllowedPackages` enforcement at all) — a behavior change confirmed inert on this project's own
+  config (`--allowed-packages` is not set for the `abap-adt` MCP server here, verified by reading
+  `claude_desktop_config.json`'s `args` directly, no secrets involved).
+- **A CSRF-refetch hop no configuration gated**: `pkg/adt/http.go`'s token-refresh logic (triggered by no
+  cached token, a 403, a session-expiry retry, or a 401) only ever consulted the client-wide
+  `SessionType` default, never the statefulness of the in-flight request that triggered it. A stateful write
+  whose CSRF probe landed mid-window could retire its own lock's session. This fork's `fetchCSRFToken` has a
+  materially different shape from upstream's (no separate `probeCSRFToken`/`fetchCSRFTokenWithReauth` split,
+  and it already carries its own HEAD→GET 403 fallback from fix 2i) — so this was **not a mechanical port**,
+  it was reimplemented against this fork's actual structure: `fetchCSRFToken(ctx)` is now a thin wrapper over
+  new `fetchCSRFTokenFor(ctx, stateful bool)`, and the 4 internal refresh call sites in `Request()` now pass
+  `opts.Stateful` instead of relying only on the global default. The keep-alive ping (`Ping()` →
+  `fetchCSRFToken` → `fetchCSRFTokenFor(ctx, false)`) is deliberately left non-stateful, unchanged — an
+  explicitly-stateful keep-alive would hold a server-side session slot on a timer, a separate tradeoff
+  (upstream's own #168, not fixed here either).
+- **`RenameObject`** (`pkg/adt/workflows_fileio.go`) had two independent defects beyond the marker
+  migration: an unconditional `defer UnlockObject` *plus* an inline `UnlockObject` on the happy path sent a
+  second UNLOCK for a handle already released on every successful rename; and the old object's lock, taken
+  to DELETE it, had no `defer` at all — a failed DELETE (reported to the user as "delete manually") left the
+  ENQUEUE stranded with nothing said about it. Fixed with explicit `newUnlocked`/`oldReleased` bool flags
+  gating each `defer`, both routed through the new `releaseLockAfterFailure`/`strandedLockAdvice` (below).
+- **New `pkg/adt/lock_release.go`**: `releaseLockAfterFailure(ctx, objectURL, lockHandle) error` runs the
+  compensating UNLOCK on `context.WithoutCancel(ctx)` with its own 30s timeout — every compensating unlock
+  in the package used to reuse the caller's `ctx`, so a mutation that failed *because* that context was
+  cancelled (an MCP client timeout, Ctrl-C, an HTTP deadline) never sent the UNLOCK at all: it died inside
+  `http.NewRequestWithContext` before a byte went out, stranding the ENQUEUE until SAP's own session reaper
+  cleared it (~60 min) or someone found it in SM12. `strandedLockAdvice(objectURL, unlockErr) string` turns
+  a failed release into an actionable message (own user, not a colleague; SM12 or wait ~60 min; the next
+  edit fails with "is currently editing" naming the user themselves).
+- **Scope note — Fase C (the "enqueue leak") only partially applied**: `releaseLockAfterFailure`/
+  `strandedLockAdvice` were wired into 3 reference sites (`crud.go`'s `CreateTable` and
+  `DeleteObjectWithAutoLock`, `workflows_fileio.go`'s `RenameObject`). This fork has **more** such sites than
+  upstream's ~14 (roughly 20 remain unmigrated) because of the DDIC-type creators upstream doesn't have
+  (`CreateStructure`/`CreateDomain`/`CreateDataElement`/`CreateTableType`/`CreateLockObject` in `crud.go`)
+  plus the extra `WriteSource` branches in `workflows_source.go`. Deliberately deferred as a separate,
+  mechanical, independently-reviewable follow-up (`task_f620aae2`) rather than done in the same sitting as
+  the security-relevant marker migration — not an oversight.
+- Files: `pkg/adt/mutation_gate_marker.go` (new), `pkg/adt/lock_release.go` (new),
+  `pkg/adt/session_affinity_test.go` (new, 14 of upstream's 15 tests ported —
+  `TestSetFunctionModuleProcessingType_HonoursAllowedPackages` omitted, no equivalent standalone function in
+  this fork's `WriteSource`/FUNC branch), `pkg/adt/mutation_gate.go`, `pkg/adt/mutation_gate_skip_test.go`
+  (old mechanism's 2 unit tests removed, 1 still-valid regression test kept), `pkg/adt/crud.go`,
+  `pkg/adt/i18n.go`, `pkg/adt/http.go`, `pkg/adt/workflows.go`, `pkg/adt/workflows_deploy.go`,
+  `pkg/adt/workflows_edit.go`, `pkg/adt/workflows_execute.go`, `pkg/adt/workflows_fileio.go`,
+  `pkg/adt/workflows_source.go`.
+- `go build ./...` clean, full suite green (all 14 ported tests pass, including the one that specifically
+  detects the CSRF/statefulness bug fixed in `http.go`). Code-reviewed: 0 CRITICAL/HIGH. 1 MEDIUM — matches
+  upstream's own deliberate tradeoff exactly (`RenameObject` with `packageName=""` leaves the new object
+  unmarked, so `UpdateSource` re-resolves its package inside the lock window rather than silently skipping
+  a check that was never actually run for it; not reachable via the MCP tool, which requires `packageName`).
+  1 LOW (fixed same session — a comment in `mutation_gate_skip_test.go` still named the retired
+  `mutationGateSkipKey` mechanism).
+- **Verified live** (same session, after deploying the rebuilt binary): `EditSource` (`ZTESTRCG1`, a
+  full Lock→SyntaxCheck→PUT→Unlock→Activate cycle, change applied then reverted) and `CreateTable` (new
+  throwaway table `ZVSP_TST_SESSAFF` in `$TMP`, the exact mutation that used to 423 on every attempt
+  regardless of configuration) both succeeded with no 423, confirmed by reading the created table back,
+  then deleted. The remaining ~20 unmigrated compensating-unlock sites (`task_f620aae2`, closed by 2u
+  below) were not exercised live this session — only the marker migration and the two
+  previously-broken-on-every-attempt mutations were.
+
+### 2u. Follow-up `task_f620aae2` closed — the rest of the "enqueue leak" compensating unlocks (2026-09-07)
+- Finished what 2t deliberately deferred: migrated the remaining ~19 compensating-unlock sites (unlocks
+  that only run on a failure branch or a `defer` conditioned on `!success`, never the ones that run on
+  every path) from a bare `_ = c.UnlockObject(ctx, ...)` to `releaseLockAfterFailure` +
+  `strandedLockAdvice`, same as the 3 reference sites 2t already covered.
+- **A real defer-vs-`result.Success` bug found along the way, in 10 of those sites** (`workflows.go`
+  ×4: `WriteProgram`, `WriteInclude`, `WriteClass`, `CreateAndActivateProgram`, `CreateClassWithTests`;
+  `workflows_source.go` ×6): the compensating `defer` was keyed off `!result.Success`, and
+  `result.Success` only flips to `true` at the very end of the function, after activation. If activation
+  failed *after* the happy-path unlock had already succeeded, the defer still fired and sent a second,
+  spurious UNLOCK for a handle already released. Harmless against SAP (an UNLOCK on an already-released
+  handle just errors and is ignored) but would have made `strandedLockAdvice`'s new user-facing message
+  say "left LOCKED" on an object that was in fact released cleanly. Fixed by introducing an explicit
+  `unlocked bool` (the pattern `WriteInclude`/`EditSourceWithOptions`/`RenameObject` already used),
+  flipped to `true` immediately after the happy-path unlock call, before checking its error.
+- **`workflows_deploy.go`'s `CreateFromFile`/`UpdateFromFile` had no `result` for the defer to write
+  into at all** — both returned `&DeployResult{...}` literals on every path, not a shared/named variable.
+  Refactored both to named returns (`func (...) (result *DeployResult, err error)`); a bare
+  `return &DeployResult{...}, nil` still works identically (Go assigns the named returns before running
+  deferred functions), so no other line needed to change. One `return nil, err` between the lock and the
+  end of each function needed a `result != nil` guard in the defer to avoid a nil dereference when that
+  path fires — code-reviewed, confirmed no other `return` in either function clobbers an already-built
+  `result`.
+- **Two more bugs of the same root cause found and fixed opportunistically while editing adjacent code**,
+  neither in the original follow-up's site list:
+  - `CreateMessageClass`'s (`crud.go`) PUT of initial messages was missing `Stateful: true` — the exact
+    same defect already fixed in `WriteMessageClassTexts` (2t) and `CreateTable` (2t), just never noticed
+    in this sibling function. Fixed alongside its compensating-unlock migration.
+  - `ExecuteABAP`'s (`workflows_execute.go`) cleanup `defer` locked the temp program then called
+    `DeleteObject`, but if `DeleteObject` itself failed, the lock the defer had just taken was never
+    released — no unlock at all, compensatory or otherwise. Fixed with `releaseLockAfterFailure` in that
+    failure branch.
+- Code-reviewed: 0 CRITICAL/HIGH. 1 MEDIUM (fixed same session — `CreateTable`'s unlock-before-activation
+  error path passed the same `err` to both `%w` and `strandedLockAdvice`, duplicating the error text in
+  the message; dropped the redundant `%w`). 2 LOW (fixed same session — `DeleteObjectWithAutoLock`'s
+  compensating-unlock-also-failed branch was missing the `"deleting object: "` prefix its sibling branch
+  has; `RenameObject`'s `newUnlocked = true` was set *before* the `UnlockObject` call instead of after,
+  inconsistent with every other site's ordering though not a functional bug). 1 LOW noted, not fixed
+  (informational — a near-unreachable gap where `buildSourceURL` failing between the lock and the end of
+  `CreateFromFile`/`UpdateFromFile` returns `nil` for the named `result`, so a `strandedLockAdvice`
+  message computed in that exact window has nowhere to attach; the only way `buildSourceURL` fails there
+  is `ObjectTypeFunctionMod` with an empty parent name, a case earlier code already rejects first).
+- Deliberately excluded from this pass, unchanged from 2t: `crud.go`'s `CreateStructure` (sibling of
+  `CreateTable`, out of scope by the user's own earlier decision), and every unlock confirmed to run on
+  every path regardless of success (`writeXMLObject`, `CreateMessageClass`'s own final unlock,
+  `workflows_source.go`'s CLAS test-source block) — none of those have the cancelled-context leak this
+  pass exists to close.
+- `go build ./...` clean, full suite green after every file and again at the end.
+- **Verified live** (same session, after deploying the rebuilt binary): `EditSource` on `ZTESTRCG1` again
+  (change applied then reverted) and a second throwaway `CreateTable` (`ZVSP_TST_SESS2` in `$TMP` — table
+  names cap at 16 characters, discovered live when the first attempt at a longer name was rejected by SAP
+  with a clear error, not a vsp bug) both succeeded, confirmed by reading the table back, then deleted.
+  These exercise the exact code paths this pass touched (`crud.go`'s `CreateTable` unlock-before-activation
+  fix, `workflows_edit.go`'s already-covered path) end-to-end on the real system.
 
 ## Known Open Issues (Not Fixed)
 
@@ -421,7 +594,15 @@ Sequence: unify existing dep logic → SQL/ADT adapters → impact/path queries.
 Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_ADT_RES_APP`. Design: [001](reports/2026-04-05-001-gui-debugger-design.md)
 
 ### 6. Open Issues
-- **#88** Lock handle bug (EditSource/WriteSource) — same root cause as #132 (session affinity)
+- **#88** Lock handle bug (EditSource/WriteSource) — same root cause as #132 (session affinity). **Resolved**
+  by the #91 port (see 2t/2u above) — the marker migration and enqueue-leak fixes close this on this fork.
+  Upstream's own PR #167 lists #88 among the issues it closes.
+- **#168** Keep-alive ping has no session affinity, can retire the context inside any lock window — genuinely
+  open on this fork too (upstream tracks it separately from #91/#167, deliberately not fixed there either;
+  fixing it is a tradeoff, since a stateful keep-alive holds a server-side session slot on a timer).
+- **#169** MCP cross-tool-call window: a lock handle spans separate tool calls, and any read the agent does
+  between LOCK and the write that consumes it is a stateless hop — no in-process fix closes this, it needs
+  an MCP-level design change (upstream is exploring this per PR #183, not ported here).
 - **#55** RunReport in APC — architectural limit
 - **#46** / **#45** Sync script flags — closed upstream (script never existed in public repo)
 

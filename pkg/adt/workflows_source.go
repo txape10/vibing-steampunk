@@ -458,9 +458,8 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		result.ObjectURL = objectURL
 
 		// Run the unified gate up front (with the explicit Package the caller
-		// supplied) and mark the context so the inner CreateObject and
-		// UpdateSource skip their redundant gates — preventing the
-		// SearchObject hop between Lock and PUT (mutationGateSkipKey).
+		// supplied). CreateObject below checks it again before asking SAP to
+		// create the interface there.
 		if err := c.checkMutation(ctx, MutationContext{
 			Op:        OpCreate,
 			OpName:    "WriteSource(INTF,create)",
@@ -470,7 +469,6 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed mutation gate: %v", err)
 			return result, nil
 		}
-		ctx := withMutationGateAlreadyRan(ctx)
 
 		// Create object
 		err := c.CreateObject(ctx, CreateObjectOptions{
@@ -484,6 +482,12 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed to create interface: %v", err)
 			return result, nil
 		}
+
+		// The gate above accepted opts.Package, and CreateObject checked it a
+		// second time before creating the interface there — so UpdateSource
+		// below need not resolve the package again from inside the lock
+		// (issue #91).
+		ctx = withMutationPackageChecked(ctx, objectURL)
 
 		// Write source (using WriteProgram logic for interface)
 		sourceURL := objectURL + "/source/main"
@@ -512,9 +516,15 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			return result, nil
 		}
 
+		// Tracked explicitly rather than keyed off result.Success — activation
+		// can still fail after a successful unlock below, and result.Success
+		// only flips to true at the very end.
+		unlocked := false
 		defer func() {
-			if !result.Success {
-				c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if !unlocked {
+				if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+					result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+				}
 			}
 		}()
 
@@ -527,6 +537,7 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 
 		// Unlock
 		err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		unlocked = true
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 			return result, nil
@@ -591,9 +602,8 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		result.ObjectURL = objectURL
 		sourceURL := objectURL + "/source/main"
 
-		// Run the unified gate up front and mark the context so the inner
-		// CreateObject + UpdateSource skip their redundant gates
-		// (mutationGateSkipKey).
+		// Run the unified gate up front. CreateObject below checks
+		// opts.Package again before asking SAP to create the object there.
 		if err := c.checkMutation(ctx, MutationContext{
 			Op:        OpCreate,
 			OpName:    fmt.Sprintf("WriteSource(%s,create)", objectType),
@@ -603,7 +613,6 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed mutation gate: %v", err)
 			return result, nil
 		}
-		ctx := withMutationGateAlreadyRan(ctx)
 
 		// Create object first
 		// For BDEF, include source in creation (ADT API requirement)
@@ -623,6 +632,12 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			return result, nil
 		}
 
+		// The gate above accepted opts.Package, and CreateObject checked it a
+		// second time before creating the object there — so UpdateSource
+		// below need not resolve the package again from inside the lock
+		// (issue #91).
+		ctx = withMutationPackageChecked(ctx, objectURL)
+
 		// For BDEF, creation creates empty shell, then update source
 		if objectType == "BDEF" {
 			sourceURL := objectURL + "/source/main"
@@ -637,9 +652,12 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			// Update source
 			err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, opts.Transport)
 			if err != nil {
-				// Unlock on failure
-				_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-				result.Message = fmt.Sprintf("Failed to update BDEF source: %v", err)
+				// Unlock on failure, detached from ctx's cancellation (issue #91).
+				if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+					result.Message = fmt.Sprintf("Failed to update BDEF source: %v — %s", err, strandedLockAdvice(objectURL, unlockErr))
+				} else {
+					result.Message = fmt.Sprintf("Failed to update BDEF source: %v", err)
+				}
 				return result, nil
 			}
 
@@ -691,9 +709,15 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			return result, nil
 		}
 
+		// Tracked explicitly rather than keyed off result.Success — activation
+		// can still fail after a successful unlock below, and result.Success
+		// only flips to true at the very end.
+		unlocked := false
 		defer func() {
-			if !result.Success {
-				c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if !unlocked {
+				if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+					result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+				}
 			}
 		}()
 
@@ -706,6 +730,7 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 
 		// Unlock
 		err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		unlocked = true
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 			return result, nil
@@ -809,7 +834,6 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed mutation gate: %v", err)
 			return result, nil
 		}
-		ctx := withMutationGateAlreadyRan(ctx)
 
 		// Create FM shell inside the function group
 		err := c.CreateObject(ctx, CreateObjectOptions{
@@ -825,6 +849,11 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			return result, nil
 		}
 
+		// The gate above accepted opts.Package, and CreateObject checked it a
+		// second time before creating the FM there — so UpdateSource below
+		// need not resolve the package again from inside the lock (issue #91).
+		ctx = withMutationPackageChecked(ctx, objectURL)
+
 		// Write source into the newly created FM
 		sourceURL := objectURL + "/source/main"
 		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
@@ -835,8 +864,11 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 
 		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, opts.Transport)
 		if err != nil {
-			_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-			result.Message = fmt.Sprintf("FM created but failed to write source: %v", err)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = fmt.Sprintf("FM created but failed to write source: %v — %s", err, strandedLockAdvice(objectURL, unlockErr))
+			} else {
+				result.Message = fmt.Sprintf("FM created but failed to write source: %v", err)
+			}
 			return result, nil
 		}
 
@@ -983,21 +1015,21 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		sourceURL := objectURL + "/source/main"
 		result.ObjectURL = objectURL
 
-		// Resolve and check the package up front, then mark the context so
-		// the inner UpdateSource skips its redundant gate. Doing the
-		// SearchObject hop AFTER Lock would retire SAP's stateful session
-		// (ICMENOSESSION) and invalidate the lock handle. See
-		// mutationGateSkipKey for the full rationale.
-		if err := c.checkMutation(ctx, MutationContext{
+		// Resolve and check the package up front. The mark on the returned
+		// context stops UpdateSource resolving it again from inside the
+		// lock window, where the lookup's stateless hop would retire SAP's
+		// stateful session (ICMENOSESSION) and invalidate the lock handle
+		// (issue #91).
+		ctx, err := c.gateAndMark(ctx, MutationContext{
 			Op:        OpUpdate,
 			OpName:    "WriteSource(INTF)",
 			ObjectURL: objectURL,
 			Transport: opts.Transport,
-		}); err != nil {
+		})
+		if err != nil {
 			result.Message = fmt.Sprintf("Failed mutation gate: %v", err)
 			return result, nil
 		}
-		ctx := withMutationGateAlreadyRan(ctx)
 
 		// Syntax check
 		syntaxErrors, err := c.SyntaxCheck(ctx, objectURL, source)
@@ -1022,9 +1054,15 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			return result, nil
 		}
 
+		// Tracked explicitly rather than keyed off result.Success — activation
+		// can still fail after a successful unlock below, and result.Success
+		// only flips to true at the very end.
+		unlocked := false
 		defer func() {
-			if !result.Success {
-				c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if !unlocked {
+				if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+					result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+				}
 			}
 		}()
 
@@ -1037,6 +1075,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 
 		// Unlock
 		err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		unlocked = true
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 			return result, nil
@@ -1074,19 +1113,19 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		result.ObjectURL = objectURL
 		sourceURL := objectURL + "/source/main"
 
-		// Resolve and check the package up front, then mark the context so
-		// the inner UpdateSource skips its redundant gate. See
-		// mutationGateSkipKey for rationale.
-		if err := c.checkMutation(ctx, MutationContext{
+		// Resolve and check the package up front. The mark on the returned
+		// context stops UpdateSource resolving it again from inside the
+		// lock window (issue #91).
+		ctx, err := c.gateAndMark(ctx, MutationContext{
 			Op:        OpUpdate,
 			OpName:    fmt.Sprintf("WriteSource(%s)", objectType),
 			ObjectURL: objectURL,
 			Transport: opts.Transport,
-		}); err != nil {
+		})
+		if err != nil {
 			result.Message = fmt.Sprintf("Failed mutation gate: %v", err)
 			return result, nil
 		}
-		ctx := withMutationGateAlreadyRan(ctx)
 
 		// Syntax check
 		syntaxErrors, err := c.SyntaxCheck(ctx, objectURL, source)
@@ -1111,9 +1150,15 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			return result, nil
 		}
 
+		// Tracked explicitly rather than keyed off result.Success — activation
+		// can still fail after a successful unlock below, and result.Success
+		// only flips to true at the very end.
+		unlocked := false
 		defer func() {
-			if !result.Success {
-				c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if !unlocked {
+				if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+					result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+				}
 			}
 		}()
 
@@ -1126,6 +1171,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 
 		// Unlock
 		err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		unlocked = true
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 			return result, nil
@@ -1154,16 +1200,18 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		sourceURL := objectURL + "/source/main"
 		result.ObjectURL = objectURL
 
-		if err := c.checkMutation(ctx, MutationContext{
+		// The mark on the returned context stops UpdateSource resolving the
+		// package again from inside the lock window (issue #91).
+		ctx, err := c.gateAndMark(ctx, MutationContext{
 			Op:        OpUpdate,
 			OpName:    "WriteSource(FUNC)",
 			ObjectURL: objectURL,
 			Transport: opts.Transport,
-		}); err != nil {
+		})
+		if err != nil {
 			result.Message = fmt.Sprintf("Failed mutation gate: %v", err)
 			return result, nil
 		}
-		ctx := withMutationGateAlreadyRan(ctx)
 
 		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
 		if err != nil {
@@ -1171,9 +1219,15 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			return result, nil
 		}
 
+		// Tracked explicitly rather than keyed off result.Success — activation
+		// can still fail after a successful unlock below, and result.Success
+		// only flips to true at the very end.
+		unlocked := false
 		defer func() {
-			if !result.Success {
-				c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if !unlocked {
+				if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+					result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+				}
 			}
 		}()
 
@@ -1184,6 +1238,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		}
 
 		err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		unlocked = true
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to unlock function module: %v", err)
 			return result, nil
@@ -1225,19 +1280,19 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 	objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(strings.ToLower(className)))
 	result.ObjectURL = objectURL
 
-	// Resolve and check the package up front, then mark the context so
-	// the inner UpdateSource skips its redundant gate. See
-	// mutationGateSkipKey for rationale.
-	if err := c.checkMutation(ctx, MutationContext{
+	// Resolve and check the package up front. The mark on the returned
+	// context stops UpdateSource resolving it again from inside the lock
+	// window (issue #91).
+	ctx, err := c.gateAndMark(ctx, MutationContext{
 		Op:        OpUpdate,
 		OpName:    "WriteClassMethod",
 		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		result.Message = fmt.Sprintf("Failed mutation gate: %v", err)
 		return result, nil
 	}
-	ctx = withMutationGateAlreadyRan(ctx)
 
 	// Get method boundaries
 	methods, err := c.GetClassMethods(ctx, className)
@@ -1312,14 +1367,23 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 	writeLockHandle := lock.LockHandle
 	writeTransport, err := c.resolveWriteTransport(transport, lock.CorrNr, "WriteClassMethodUpdate")
 	if err != nil {
-		_ = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+			result.Message = fmt.Sprintf("Transportable-edit check failed: %v — %s", err, strandedLockAdvice(objectURL, unlockErr))
+		} else {
+			result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		}
 		return result, nil
 	}
 
+	// Tracked explicitly rather than keyed off result.Success — activation
+	// can still fail after a successful unlock below, and result.Success
+	// only flips to true at the very end.
+	unlocked := false
 	defer func() {
-		if !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+		if !unlocked {
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -1332,6 +1396,7 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 
 	// Unlock
 	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
+	unlocked = true
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to unlock class: %v", err)
 		return result, nil

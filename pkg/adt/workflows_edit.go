@@ -149,22 +149,21 @@ func (c *Client) EditSourceWithOptions(ctx context.Context, objectURL, oldString
 		opts = &EditSourceOptions{SyntaxCheck: true}
 	}
 
-	// Unified mutation policy gate (op type + package + transport).
-	// We resolve the package here, BEFORE LockObject, so the inner
-	// UpdateSource / UpdateClassInclude do not repeat the resolution
-	// between the stateful Lock and the stateful PUT. Repeating it would
-	// inject a stateless SearchObject hop that retires SAP's stateful ICM
-	// session and invalidates the lock handle (HTTP 423). Same bug class
-	// as commit 8cb45a5 (SyntaxCheck before Lock), different call site.
-	if err := c.checkMutation(ctx, MutationContext{
+	// Unified mutation policy gate (op type + package + transport). The mark
+	// on the returned context stops the identical package resolve running a
+	// second time from inside the lock window, where it would retire the
+	// session the lock handle lives in (issue #91). A class include marks
+	// the same key as its parent class, which is the object ADT resolves
+	// the package from either way.
+	ctx, err := c.gateAndMark(ctx, MutationContext{
 		Op:        OpUpdate,
 		OpName:    "EditSource",
 		ObjectURL: objectURL,
 		Transport: opts.Transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
-	ctx = withMutationGateAlreadyRan(ctx)
 	// SyntaxCheck defaults to true if not explicitly set (zero value is false, so we need to handle this)
 	// Note: caller should explicitly set SyntaxCheck=false if they don't want it
 
@@ -375,11 +374,15 @@ func (c *Client) EditSourceWithOptions(ctx context.Context, objectURL, oldString
 		return result, nil
 	}
 
-	// Ensure unlock
+	// Ensure unlock. Detached from ctx's cancellation and given its own
+	// deadline (issue #91) — a failure that cancelled ctx would otherwise
+	// never send the compensating UNLOCK at all.
 	unlocked := false
 	defer func() {
 		if !unlocked {
-			_ = c.UnlockObject(ctx, lockURL, lockResult.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, lockURL, lockResult.LockHandle); unlockErr != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(lockURL, unlockErr))
+			}
 		}
 	}()
 

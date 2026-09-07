@@ -32,12 +32,14 @@ type DeployResult struct {
 //
 // Example:
 //   result, err := client.CreateFromFile(ctx, "/path/to/zcl_test.clas.abap", "$TMP", "")
-func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, transport string) (*DeployResult, error) {
-	// Unified mutation policy gate (op type + package + transport).
-	// Run with the explicit Package the caller supplied, then mark the
-	// context so the inner CreateObject + UpdateSource skip their
-	// redundant gates — preventing the SearchObject hop between Lock and
-	// PUT (mutationGateSkipKey).
+// Named returns (result, err) so the deferred unlock below — which can fire
+// well after any of the early `return &DeployResult{...}, nil` statements —
+// has somewhere to attach strandedLockAdvice when the compensating unlock
+// itself fails (issue #91).
+func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, transport string) (result *DeployResult, err error) {
+	// Unified mutation policy gate (op type + package + transport). Run with
+	// the explicit Package the caller supplied; CreateObject below gates it
+	// a second time before asking SAP to create the object there.
 	if err := c.checkMutation(ctx, MutationContext{
 		Op:        OpCreate,
 		OpName:    "CreateFromFile",
@@ -46,7 +48,6 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 	}); err != nil {
 		return nil, err
 	}
-	ctx = withMutationGateAlreadyRan(ctx)
 
 	// 1. Parse file to detect type and name
 	info, err := ParseABAPFile(filePath)
@@ -86,6 +87,12 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 	if err != nil {
 		return nil, err
 	}
+
+	// CreateObject accepted packageName against the whitelist and SAP put
+	// the object there, so UpdateSource below need not resolve the same
+	// package again — which it would do from inside the lock, ending the
+	// session the lock handle belongs to (issue #91).
+	ctx = withMutationPackageChecked(ctx, objectURL)
 
 	// 5. Syntax check BEFORE lock — SyntaxCheck runs stateless and would
 	// break stateful session affinity if placed between Lock and UpdateSource,
@@ -135,11 +142,15 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 		}, nil
 	}
 
-	// Ensure unlock on any error
+	// Ensure unlock on any error. Detached from ctx's cancellation and given
+	// its own deadline (issue #91) — a failure that cancelled ctx would
+	// otherwise never send the compensating UNLOCK at all.
 	unlocked := false
 	defer func() {
 		if !unlocked {
-			_ = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lockResult.LockHandle); unlockErr != nil && result != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -207,7 +218,8 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 //
 // Example:
 //   result, err := client.UpdateFromFile(ctx, "/path/to/zcl_test.clas.abap", "")
-func (c *Client) UpdateFromFile(ctx context.Context, filePath, transport string) (*DeployResult, error) {
+// Named returns for the same reason as CreateFromFile above.
+func (c *Client) UpdateFromFile(ctx context.Context, filePath, transport string) (result *DeployResult, err error) {
 	// 1. Parse file to detect type and name
 	info, err := ParseABAPFile(filePath)
 	if err != nil {
@@ -232,20 +244,19 @@ func (c *Client) UpdateFromFile(ctx context.Context, filePath, transport string)
 		return nil, err
 	}
 
-	// Unified mutation policy gate (op type + package + transport).
-	// Resolve and check the package up front, then mark the context so
-	// the inner UpdateSource / UpdateClassInclude / CreateTestInclude
-	// skip their redundant gates — preventing the SearchObject hop
-	// between Lock and PUT (mutationGateSkipKey).
-	if err := c.checkMutation(ctx, MutationContext{
+	// Unified mutation policy gate (op type + package + transport). The
+	// returned context carries the mark that stops UpdateSource /
+	// UpdateClassInclude / CreateTestInclude resolving the same package
+	// again from inside the lock window (issue #91).
+	ctx, err = c.gateAndMark(ctx, MutationContext{
 		Op:        OpUpdate,
 		OpName:    "UpdateFromFile",
 		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
-	ctx = withMutationGateAlreadyRan(ctx)
 
 	// 4. Syntax check BEFORE lock (skip for class includes - will check after update).
 	// SyntaxCheck runs stateless and would break stateful session affinity if
@@ -297,11 +308,15 @@ func (c *Client) UpdateFromFile(ctx context.Context, filePath, transport string)
 		}, nil
 	}
 
-	// Ensure unlock on any error
+	// Ensure unlock on any error. Detached from ctx's cancellation and given
+	// its own deadline (issue #91) — a failure that cancelled ctx would
+	// otherwise never send the compensating UNLOCK at all.
 	unlocked := false
 	defer func() {
 		if !unlocked {
-			_ = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lockResult.LockHandle); unlockErr != nil && result != nil {
+				result.Message = fmt.Sprintf("%s — %s", result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 

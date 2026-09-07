@@ -514,7 +514,7 @@ func init() {
 	deployCmd.Flags().String("transport", "", "Transport request number")
 
 	// Transport list flags
-	transportListCmd.Flags().String("user", "", "Filter by user (default: current user)")
+	transportListCmd.Flags().String("user", "", "Filter by user (default: current user, '*' for every user)")
 
 	// Install flags
 	installZadtVspCmd.Flags().String("package", "$ZADT_VSP", "Target package for ZADT_VSP objects")

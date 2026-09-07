@@ -19,11 +19,12 @@ import (
 // hop (Sap-Err-Id: ICMENOSESSION), and the lock handle bound to that
 // dead session was then rejected by the PUT.
 //
-// The fix marks the context with mutationGateSkipKey after the outer
-// EditSourceWithOptions gate completes; the inner UpdateSource sees
-// the flag and skips its own getObjectPackage call. This test pins
-// the absence of any informationsystem/search request between LOCK
-// and PUT in the call sequence.
+// The fix marks the context (via gateAndMark/withMutationPackageChecked, see
+// mutation_gate_marker.go) after the outer EditSourceWithOptions gate
+// completes; the inner UpdateSource sees the object is already marked and
+// skips its own getObjectPackage call. This test pins the absence of any
+// informationsystem/search request between LOCK and PUT in the call
+// sequence.
 func TestMutationGateSkip_EditSourceNoSearchBetweenLockAndPut(t *testing.T) {
 	const sourceBody = "REPORT ztest.\nWRITE / 'hello'.\n"
 	const newSourceBody = "REPORT ztest.\nWRITE / 'world'.\n"
@@ -107,65 +108,9 @@ func TestMutationGateSkip_EditSourceNoSearchBetweenLockAndPut(t *testing.T) {
 	}
 }
 
-// TestMutationGateSkip_FlagSkipsInnerCheck unit-tests the
-// withMutationGateAlreadyRan / mutationGateAlreadyRan plumbing in
-// isolation: even with a deliberately invalid MutationContext that
-// would normally fail closed under AllowedPackages (no ObjectURL
-// AND no Package), checkMutation must short-circuit and return nil
-// when the context has been marked.
-func TestMutationGateSkip_FlagSkipsInnerCheck(t *testing.T) {
-	cfg := NewConfig("https://sap.example.com:44300", "user", "pass",
-		WithAllowedPackages("$TMP"),
-	)
-	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, &mockTransportClient{
-		responses: map[string]*http.Response{"discovery": newTestResponse("OK")},
-	}))
-
-	// Without the flag this MutationContext fails closed (line 107 of
-	// mutation_gate.go: "requires either ObjectURL or Package when
-	// AllowedPackages is configured").
-	unmarkedErr := client.checkMutation(context.Background(), MutationContext{
-		Op:     OpUpdate,
-		OpName: "TestOp",
-	})
-	if unmarkedErr == nil {
-		t.Fatal("baseline: expected failure when neither ObjectURL nor Package is set under AllowedPackages")
-	}
-
-	// With the flag set, the inner gate must short-circuit.
-	markedCtx := withMutationGateAlreadyRan(context.Background())
-	if !mutationGateAlreadyRan(markedCtx) {
-		t.Fatal("mutationGateAlreadyRan should report true for a marked context")
-	}
-	markedErr := client.checkMutation(markedCtx, MutationContext{
-		Op:     OpUpdate,
-		OpName: "TestOp",
-	})
-	if markedErr != nil {
-		t.Fatalf("marked context should bypass the inner gate, got error: %v", markedErr)
-	}
-}
-
-// TestMutationGateSkip_FlagDoesNotLeakAcrossContexts verifies that the
-// skip flag is scoped to a single context derivation chain — a sibling
-// context derived from the same parent must NOT inherit the flag, so
-// unrelated callers in the same goroutine cannot accidentally bypass
-// the gate.
-func TestMutationGateSkip_FlagDoesNotLeakAcrossContexts(t *testing.T) {
-	parent := context.Background()
-	marked := withMutationGateAlreadyRan(parent)
-
-	if mutationGateAlreadyRan(parent) {
-		t.Error("parent context should not be retroactively marked")
-	}
-	if !mutationGateAlreadyRan(marked) {
-		t.Error("derived context should be marked")
-	}
-
-	// A sibling derived from the parent (not the marked context) must
-	// be clean.
-	sibling := context.WithValue(parent, struct{ k string }{k: "x"}, 1)
-	if mutationGateAlreadyRan(sibling) {
-		t.Error("sibling context derived from parent must not be marked")
-	}
-}
+// The old mutationGateSkipKey boolean (all 3 checks skipped as a unit) and
+// its two unit tests (TestMutationGateSkip_FlagSkipsInnerCheck,
+// TestMutationGateSkip_FlagDoesNotLeakAcrossContexts) were retired when the
+// gate moved to the per-object marker in mutation_gate_marker.go — see
+// TestMutationMarker_* in session_affinity_test.go for the marker's
+// equivalent (and stricter — policy-preserving) coverage.

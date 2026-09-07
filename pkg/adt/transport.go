@@ -83,156 +83,100 @@ func (c *Client) GetUserTransports(ctx context.Context, userName string) (*UserT
 		return nil, fmt.Errorf("get user transports failed: %w", err)
 	}
 
-	result, err := parseUserTransports(resp.Body)
+	transports, err := parseUserTransports(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	// Some systems return a genuinely empty tree for this query (confirmed live:
-	// SAP returns a bare, childless <tm:root/> for ?targets=true on this system,
-	// even though the same user has real modifiable transports). Fall back to the
-	// same E070/E07T SQL query ListTransports already uses in that situation.
-	if len(result.Workbench) == 0 && len(result.Customizing) == 0 {
-		summaries, sqlErr := c.listTransportsViaSQL(ctx, userName)
-		if sqlErr == nil {
-			result = convertTransportSummaryToUserTransports(summaries)
+	if len(transports.Workbench) > 0 || len(transports.Customizing) > 0 {
+		return transports, nil
+	}
+
+	// Fallback: the same E070/E07T query ListTransports already drops to.
+	// Without it, the two tools disagreed on the same system and the same
+	// user — one answered with transports and this one with a well-formed,
+	// plausible "none", which reads as "nothing to release" rather than as
+	// a failure (#111).
+	return c.userTransportsViaSQL(ctx, userName)
+}
+
+// userTransportsViaSQL groups the E070/E07T fallback rows the way the ADT
+// tree would have. A failing query is already swallowed inside
+// listTransportsViaSQL; what comes back as an error here is a caller
+// mistake — no user name at all, or one that is not a user name — and that
+// is worth saying out loud rather than answering with an empty list a
+// second time.
+func (c *Client) userTransportsViaSQL(ctx context.Context, user string) (*UserTransports, error) {
+	rows, err := c.listTransportsViaSQL(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &UserTransports{}
+	for _, row := range rows {
+		tr := TransportRequest{
+			Number:      row.Number,
+			Owner:       row.Owner,
+			Description: row.Description,
+			Status:      row.Status,
+			Target:      row.Target,
+		}
+		if row.Type == "W" {
+			tr.Type = "customizing"
+			result.Customizing = append(result.Customizing, tr)
+		} else {
+			tr.Type = "workbench"
+			result.Workbench = append(result.Workbench, tr)
 		}
 	}
 
 	return result, nil
 }
 
-// convertTransportSummaryToUserTransports maps the flat TransportSummary list
-// returned by listTransportsViaSQL into the hierarchical UserTransports shape.
-// Transports sourced this way have no Tasks/Objects detail - E070/E07T only
-// carries header-level data, not the task/object breakdown the ADT tree gives.
-func convertTransportSummaryToUserTransports(summaries []TransportSummary) *UserTransports {
+func parseUserTransports(data []byte) (*UserTransports, error) {
+	requests, err := parseCTSRequests(data)
+	if err != nil {
+		return nil, err
+	}
+
 	result := &UserTransports{}
-	for _, s := range summaries {
+	for _, r := range requests {
+		r.fillFromStructure()
+
 		tr := TransportRequest{
-			Number:      s.Number,
-			Owner:       s.Owner,
-			Description: s.Description,
-			Status:      s.Status,
-			Target:      s.Target,
+			Number:      r.Number,
+			Owner:       r.Owner,
+			Description: r.Desc,
+			Status:      r.Status,
+			Target:      r.Target,
 		}
-		switch s.Type {
-		case "K":
-			tr.Type = "workbench"
-			result.Workbench = append(result.Workbench, tr)
-		case "W":
+		for _, t := range r.Tasks {
+			task := TransportTask{
+				Number:      t.Number,
+				Owner:       t.Owner,
+				Description: t.Desc,
+				Status:      t.Status,
+			}
+			for _, o := range t.Objects {
+				task.Objects = append(task.Objects, TransportObject{
+					PGMID:   o.PgmID,
+					Type:    o.Type,
+					Name:    o.Name,
+					ObjInfo: o.Info,
+				})
+			}
+			tr.Tasks = append(tr.Tasks, task)
+		}
+
+		// A document that separates workbench from customizing says so
+		// structurally; one that does not carries it in tm:type (K/W).
+		if r.Section == "customizing" || (r.Section == "" && r.Type == "W") {
 			tr.Type = "customizing"
 			result.Customizing = append(result.Customizing, tr)
+		} else {
+			tr.Type = "workbench"
+			result.Workbench = append(result.Workbench, tr)
 		}
-	}
-	return result
-}
-
-func parseUserTransports(data []byte) (*UserTransports, error) {
-	// Strip namespace prefixes
-	xmlStr := string(data)
-	xmlStr = strings.ReplaceAll(xmlStr, "tm:", "")
-	xmlStr = strings.ReplaceAll(xmlStr, "atom:", "")
-
-	type transportObject struct {
-		PGMID   string `xml:"pgmid,attr"`
-		Type    string `xml:"type,attr"`
-		Name    string `xml:"name,attr"`
-		ObjInfo string `xml:"obj_info,attr"`
-	}
-	type task struct {
-		Number  string            `xml:"number,attr"`
-		Owner   string            `xml:"owner,attr"`
-		Desc    string            `xml:"desc,attr"`
-		Status  string            `xml:"status,attr"`
-		Objects []transportObject `xml:"abap_object"`
-	}
-	type request struct {
-		Number string `xml:"number,attr"`
-		Owner  string `xml:"owner,attr"`
-		Desc   string `xml:"desc,attr"`
-		Status string `xml:"status,attr"`
-		Tasks  []task `xml:"task"`
-	}
-	type target struct {
-		Name      string    `xml:"name,attr"`
-		Modifiable struct {
-			Requests []request `xml:"request"`
-		} `xml:"modifiable"`
-		Released struct {
-			Requests []request `xml:"request"`
-		} `xml:"released"`
-	}
-	type root struct {
-		Workbench struct {
-			Targets []target `xml:"target"`
-		} `xml:"workbench"`
-		Customizing struct {
-			Targets []target `xml:"target"`
-		} `xml:"customizing"`
-	}
-
-	var resp root
-	if err := xml.Unmarshal([]byte(xmlStr), &resp); err != nil {
-		return nil, fmt.Errorf("parsing transport list: %w", err)
-	}
-
-	convertRequests := func(reqs []request, targetName string) []TransportRequest {
-		var result []TransportRequest
-		for _, r := range reqs {
-			tr := TransportRequest{
-				Number:      r.Number,
-				Owner:       r.Owner,
-				Description: r.Desc,
-				Status:      r.Status,
-				Target:      targetName,
-			}
-			for _, t := range r.Tasks {
-				task := TransportTask{
-					Number:      t.Number,
-					Owner:       t.Owner,
-					Description: t.Desc,
-					Status:      t.Status,
-				}
-				for _, o := range t.Objects {
-					task.Objects = append(task.Objects, TransportObject{
-						PGMID:   o.PGMID,
-						Type:    o.Type,
-						Name:    o.Name,
-						ObjInfo: o.ObjInfo,
-					})
-				}
-				tr.Tasks = append(tr.Tasks, task)
-			}
-			result = append(result, tr)
-		}
-		return result
-	}
-
-	result := &UserTransports{}
-
-	// Process workbench targets
-	for _, t := range resp.Workbench.Targets {
-		reqs := convertRequests(t.Modifiable.Requests, t.Name)
-		for i := range reqs {
-			reqs[i].Type = "workbench"
-		}
-		result.Workbench = append(result.Workbench, reqs...)
-
-		releasedReqs := convertRequests(t.Released.Requests, t.Name)
-		for i := range releasedReqs {
-			releasedReqs[i].Type = "workbench"
-		}
-		result.Workbench = append(result.Workbench, releasedReqs...)
-	}
-
-	// Process customizing targets
-	for _, t := range resp.Customizing.Targets {
-		reqs := convertRequests(t.Modifiable.Requests, t.Name)
-		for i := range reqs {
-			reqs[i].Type = "customizing"
-		}
-		result.Customizing = append(result.Customizing, reqs...)
 	}
 
 	return result, nil
@@ -499,19 +443,73 @@ func (c *Client) ListTransports(ctx context.Context, user string) ([]TransportSu
 	return c.listTransportsViaSQL(ctx, user)
 }
 
+// as4userPredicate builds the E070~AS4USER condition for the fallback query,
+// or "" when every user is wanted.
+//
+// Eclipse ADT spells "all users" as '*', and so does this tool's own
+// parameter documentation. It reached the query as a literal, and
+// AS4USER = '*' matches no row, so a wildcard listing looked like an empty
+// system (#140). A '*' now drops the predicate entirely, and a '*' inside a
+// name becomes a LIKE prefix the way ADT treats it.
+//
+// The name is interpolated into SQL, so it is also the one place a caller's
+// string reaches the database: anything that is not a plausible SAP user
+// name is refused rather than quoted, since a name that could close the
+// literal has no legitimate reading.
+func as4userPredicate(user string) (string, error) {
+	name := strings.ToUpper(strings.TrimSpace(user))
+
+	if name == "" {
+		return "", fmt.Errorf("no user to list transports for: pass a user name, " +
+			"or '*' for every user (the connection does not carry one — a browser " +
+			"SSO session has no configured user name)")
+	}
+
+	if name == "*" {
+		return "", nil
+	}
+
+	for _, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_', r == '-', r == '.', r == '/', r == '*':
+		default:
+			return "", fmt.Errorf("invalid SAP user name %q: expected letters, digits, "+
+				"and _ - . / or '*' for every user", user)
+		}
+	}
+
+	if strings.Contains(name, "*") {
+		return "e070~AS4USER LIKE '" + strings.ReplaceAll(name, "*", "%") + "'", nil
+	}
+
+	return "e070~AS4USER = '" + name + "'", nil
+}
+
 // listTransportsViaSQL queries E070/E07T tables to get modifiable transports.
 // Used as fallback when ADT API returns empty (common on sandbox systems).
 func (c *Client) listTransportsViaSQL(ctx context.Context, user string) ([]TransportSummary, error) {
+	// '*' is the wildcard Eclipse ADT uses for "every user". It was being
+	// compared literally (AS4USER = '*'), which no row matches, so the
+	// wildcard answered "no transports found" instead of everyone's (#140).
+	predicate, err := as4userPredicate(user)
+	if err != nil {
+		return nil, err
+	}
+
 	// Query modifiable workbench requests (K) for the user
 	// TRFUNCTION: K=Workbench request, W=Customizing request, S=Task
 	// TRSTATUS: D=Modifiable, R=Released, N=Released (import started)
+	conditions := []string{"e070~TRSTATUS = 'D'", "e070~TRFUNCTION IN ('K', 'W')"}
+	if predicate != "" {
+		conditions = append([]string{predicate}, conditions...)
+	}
+
 	query := `SELECT e070~TRKORR, e070~TRFUNCTION, e070~TRSTATUS, e070~TARSYSTEM,
 		e070~AS4USER, e070~AS4DATE, e070~AS4TIME, e07t~AS4TEXT
 		FROM E070 AS e070
 		LEFT OUTER JOIN E07T AS e07t ON e070~TRKORR = e07t~TRKORR AND e07t~LANGU = 'E'
-		WHERE e070~AS4USER = '` + strings.ToUpper(user) + `'
-		AND e070~TRSTATUS = 'D'
-		AND e070~TRFUNCTION IN ('K', 'W')
+		WHERE ` + strings.Join(conditions, "\n\t\tAND ") + `
 		ORDER BY e070~TRKORR DESCENDING`
 
 	result, err := c.RunQuery(ctx, query, 100)
@@ -574,45 +572,36 @@ func getString(row map[string]interface{}, key string) string {
 	return ""
 }
 
+// parseTransportList extracts the transport summaries from a CTS listing.
+//
+// Requests the server placed in a released bucket are skipped: ListTransports
+// is documented to return modifiable requests, and the E070 fallback below
+// filters TRSTATUS = 'D'. A flat document, which carries no bucket, is
+// returned whole.
 func parseTransportList(data []byte) ([]TransportSummary, error) {
-	// Strip namespace prefixes
-	xmlStr := string(data)
-	xmlStr = strings.ReplaceAll(xmlStr, "tm:", "")
-
-	type request struct {
-		Number      string `xml:"number,attr"`
-		Owner       string `xml:"owner,attr"`
-		Desc        string `xml:"desc,attr"`
-		Type        string `xml:"type,attr"`
-		Status      string `xml:"status,attr"`
-		StatusText  string `xml:"status_text,attr"`
-		Target      string `xml:"target,attr"`
-		TargetDesc  string `xml:"target_desc,attr"`
-		LastChanged string `xml:"lastchanged_timestamp,attr"`
-		Client      string `xml:"source_client,attr"`
-	}
-	type root struct {
-		Requests []request `xml:"request"`
-	}
-
-	var resp root
-	if err := xml.Unmarshal([]byte(xmlStr), &resp); err != nil {
-		return nil, fmt.Errorf("parsing transport list: %w", err)
+	requests, err := parseCTSRequests(data)
+	if err != nil {
+		return nil, err
 	}
 
 	var transports []TransportSummary
-	for _, req := range resp.Requests {
+	for _, r := range requests {
+		if r.isReleased() {
+			continue
+		}
+		r.fillFromStructure()
+
 		transports = append(transports, TransportSummary{
-			Number:      req.Number,
-			Owner:       req.Owner,
-			Description: req.Desc,
-			Type:        req.Type,
-			Status:      req.Status,
-			StatusText:  req.StatusText,
-			Target:      req.Target,
-			TargetDesc:  req.TargetDesc,
-			ChangedAt:   req.LastChanged,
-			Client:      req.Client,
+			Number:      r.Number,
+			Owner:       r.Owner,
+			Description: r.Desc,
+			Type:        r.Type,
+			Status:      r.Status,
+			StatusText:  r.StatusText,
+			Target:      r.Target,
+			TargetDesc:  r.TargetDesc,
+			ChangedAt:   r.LastChanged,
+			Client:      r.Client,
 		})
 	}
 

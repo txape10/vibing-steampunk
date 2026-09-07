@@ -158,6 +158,11 @@ func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, 
 		Body:             body,
 		ContentType:      "application/vnd.sap.adt.mc.messageclass+xml",
 		OverrideLanguage: lang,
+		// The lockHandle in the query above came from a stateful LOCK and is
+		// bound to that session. Without this the PUT that consumes it went
+		// out explicitly stateless and could never match its own lock — the
+		// same defect as CreateTable's source PUT (issue #91).
+		Stateful: true,
 	})
 	if err != nil {
 		return fmt.Errorf("write message class texts: %w", err)
