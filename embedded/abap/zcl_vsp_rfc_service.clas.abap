@@ -20,6 +20,8 @@ CLASS zcl_vsp_rfc_service DEFINITION
       END OF ty_param_info,
       tt_param_info TYPE STANDARD TABLE OF ty_param_info WITH KEY parameter.
 
+    TYPES ty_char1 TYPE c LENGTH 1.
+
     METHODS handle_call
       IMPORTING is_message         TYPE zif_vsp_service=>ty_message
       RETURNING VALUE(rs_response) TYPE zif_vsp_service=>ty_response.
@@ -78,8 +80,8 @@ CLASS zcl_vsp_rfc_service DEFINITION
     METHODS find_balanced_json
       IMPORTING iv_params       TYPE string
                 iv_name         TYPE string
-                iv_open_char    TYPE c LENGTH 1
-                iv_close_char   TYPE c LENGTH 1
+                iv_open_char    TYPE ty_char1
+                iv_close_char   TYPE ty_char1
       RETURNING VALUE(rv_value) TYPE string.
 
     METHODS escape_json
