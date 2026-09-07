@@ -24,7 +24,9 @@ This fork (`txape10/vibing-steampunk`) ships a set of fixes required to work rel
 | **DELETE auto-lock** — `DeleteObjectWithAutoLock` does lock+delete atomically; no dangling lock on failure | `da499ff` | — |
 | **$TMP objects** — `NoModification+corrNr=""` guard wrongly rejected local-package objects | `4d4adfc` | — |
 | **Global `SAP_IGNORE_WARNINGS`** — warnings no longer block edits system-wide without per-call flag | `d938fa6` | [#131](https://github.com/oisee/vibing-steampunk/issues/131) |
-| **Lock 423 on-prem** — stateless hop between Lock and PUT invalidated the session; eliminated via `mutationGateSkipKey` | `c40b1bf` | [#132](https://github.com/oisee/vibing-steampunk/issues/132) |
+| **Lock 423 on-prem** — stateless hop between Lock and PUT invalidated the session; eliminated via `mutationGateSkipKey` (superseded by the per-object marker below) | `c40b1bf` | [#132](https://github.com/oisee/vibing-steampunk/issues/132) |
+| **Session affinity, full pass** — `mutationGateSkipKey` replaced with a per-object marker (closes a policy hole the boolean version had); `CreateTable`/`WriteMessageClassTexts` were themselves unconditionally stateless; CSRF refetch now inherits statefulness from the in-flight request; compensating unlocks run on `context.WithoutCancel` so a cancelled request doesn't strand the SAP-side lock | `4e84e35` | [#91](https://github.com/oisee/vibing-steampunk/issues/91) |
+| **Transport listing agrees with itself** — `GetUserTransports`/`ListTransports` used two different hand-written parsers, each matching only one CTS XML shape; replaced with one shape-tolerant parser; fixes the `user='*'` wildcard too | `4e84e35` | [#111](https://github.com/oisee/vibing-steampunk/issues/111), [#140](https://github.com/oisee/vibing-steampunk/issues/140) |
 
 ### ActivateMultiple (MCP)
 
