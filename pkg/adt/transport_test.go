@@ -130,6 +130,58 @@ func TestParseUserTransportsEmpty(t *testing.T) {
 	}
 }
 
+func TestConvertTransportSummaryToUserTransports_Mixed(t *testing.T) {
+	summaries := []TransportSummary{
+		{Number: "S4DK000001", Owner: "TESTUSER", Description: "WB one", Type: "K", Status: "D", Target: "S4Q"},
+		{Number: "S4DK000002", Owner: "TESTUSER", Description: "CU one", Type: "W", Status: "D", Target: "S4Q"},
+		{Number: "S4DK000003", Owner: "TESTUSER", Description: "WB two", Type: "K", Status: "D", Target: "S4Q"},
+	}
+
+	result := convertTransportSummaryToUserTransports(summaries)
+
+	if len(result.Workbench) != 2 {
+		t.Fatalf("expected 2 workbench requests, got %d", len(result.Workbench))
+	}
+	if len(result.Customizing) != 1 {
+		t.Fatalf("expected 1 customizing request, got %d", len(result.Customizing))
+	}
+
+	wb := result.Workbench[0]
+	if wb.Number != "S4DK000001" || wb.Owner != "TESTUSER" || wb.Description != "WB one" ||
+		wb.Status != "D" || wb.Target != "S4Q" || wb.Type != "workbench" {
+		t.Errorf("unexpected workbench mapping: %+v", wb)
+	}
+
+	cu := result.Customizing[0]
+	if cu.Number != "S4DK000002" || cu.Type != "customizing" {
+		t.Errorf("unexpected customizing mapping: %+v", cu)
+	}
+}
+
+func TestConvertTransportSummaryToUserTransports_EmptyInput(t *testing.T) {
+	result := convertTransportSummaryToUserTransports(nil)
+
+	if len(result.Workbench) != 0 {
+		t.Errorf("expected 0 workbench requests, got %d", len(result.Workbench))
+	}
+	if len(result.Customizing) != 0 {
+		t.Errorf("expected 0 customizing requests, got %d", len(result.Customizing))
+	}
+}
+
+func TestConvertTransportSummaryToUserTransports_IgnoresUnknownType(t *testing.T) {
+	summaries := []TransportSummary{
+		{Number: "S4DK000009", Owner: "TESTUSER", Type: "S", Status: "D"}, // task, not a request type
+	}
+
+	result := convertTransportSummaryToUserTransports(summaries)
+
+	if len(result.Workbench) != 0 || len(result.Customizing) != 0 {
+		t.Errorf("expected unknown type to be ignored, got workbench=%d customizing=%d",
+			len(result.Workbench), len(result.Customizing))
+	}
+}
+
 func TestParseTransportInfo(t *testing.T) {
 	xmlData := `<?xml version="1.0" encoding="utf-8"?>
 <asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">

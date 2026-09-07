@@ -251,7 +251,113 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
   HTTP method), so there was no regression risk from the fix itself. Code-reviewed: 0
   CRITICAL/HIGH/MEDIUM/LOW.
 
+### 2o. `GetTrace` (SAT/ATRA hitlist) — trace_id URI not normalized + wrong XML schema assumed — FIXED (2026-08-12)
+- **Bug 1 — trace_id**: `list_traces` returns each trace's `id` as the full ADT URI
+  (`/sap/bc/adt/runtime/traces/abaptraces/<GUID>`), but `GetTrace` concatenated that straight into the
+  hitlist endpoint path without stripping the prefix, producing a doubled path and a 404 whenever a caller
+  passed the `id` as returned instead of the bare GUID. Fix: `normalizeTraceID()` strips the known prefix if
+  present, passes bare GUIDs through unchanged.
+- **Bug 2 — XML schema**: `parseTraceAnalysis` assumed flat attributes on `<entry>` (`program`, `event`,
+  `line`, `grossTime`, `netTime`, `calls`, `percentage`) that don't exist in the real ADT response — every
+  hitlist read silently returned empty `{}` entries regardless of trace_id correctness. The real schema
+  (captured live) nests `hitCount`/`description` as attributes and `callingProgram`/`grossTime`/
+  `traceEventNetTime` as sub-elements. Confirmed no reference implementation had this either —
+  `marcellourbani/abap-adt-api` (`build/api/traces.js`, the library this fork's own backup MCP server
+  depends on) implements `tracesList`/`tracesHitList`/`tracesDbAccess`/`tracesStatements`, so its TS parser
+  schema was cross-checked, then the exact shape was verified against a real S/4HANA response before writing
+  the fix — not inferred from the TS types alone. `statements`/`dbAccesses` tool types remain intentionally
+  unimplemented (`parseTraceAnalysis` returns empty entries, no schema guessed) — not live-verified.
+- Files: `pkg/adt/client.go` (`normalizeTraceID`, `GetTrace`, `parseTraceAnalysis`, `hitlistXML` types).
+- Verified live against the real SAP system: read two real SAT traces (modes "OLD" vs "NEW" of the same
+  report, ZSU0088) end-to-end through the MCP tool, both fully populated (4.891 and 4.756 entries), used to
+  do an actual before/after performance comparison (2.341ms → 50.36ms).
+- Tests: `pkg/adt/trace_test.go` — `TestNormalizeTraceID`, `TestParseTraceAnalysis_Hitlist` (real 2-entry
+  fixture captured live), `TestParseTraceAnalysis_UnverifiedToolTypesReturnEmpty`.
+- Code-reviewed: 0 CRITICAL/HIGH/MEDIUM, 1 LOW (optional — `normalizeTraceID` doesn't explicitly guard
+  empty-string input; SAP would return a clear error anyway, left as-is). Verdict: approve.
+- **Deploy gotcha (cost real time)**: the binary Claude Desktop actually loads is
+  `C:\Users\rchapado\AppData\Local\VSP\vsp.exe` — building with `go build -o .../vsp` (no `.exe` extension)
+  produces a file Windows `CreateProcess` cannot resolve via bare-command PATH lookup (PATHEXT resolution
+  only applies to bare command names, not explicit paths, and only for names ending in a known extension),
+  so the MCP server silently failed to start after the first deploy. Always build/copy to `vsp.exe`
+  explicitly.
+
+### 2p. `GetSQLTraceState` (ST05) — 406 (wrong Accept header) + wrong XML schema assumed — FIXED (2026-08-12)
+- **Bug 1 — Accept header**: sent `application/xml`; SAP's `/sap/bc/adt/st05/trace/state` only accepts
+  `application/vnd.sap.adt.perf.trace.state.v1+xml` (SAP's own 406 error body states the required
+  media type explicitly — no guessing needed).
+- **Bug 2 — XML schema**: after fixing the Accept header, the real body is a per-application-server-instance
+  table (`<traceStateInstanceTable><traceStateInstance>...</traceStateInstance>...</traceStateInstanceTable>`,
+  one instance per app server, each with `instance`/`host`/`isLocal`/`isSelected`/`modificationUser`/
+  `modificationDateTime`/`traceTypes` (`sqlOn`/`bufOn`/`enqOn`/`rfcOn`/`httpOn`/`apcOn`/`amcOn`/`authOn`) —
+  not the flat `<traceState active="..." user="..." .../>` the old parser assumed (which doesn't exist).
+  `marcellourbani/abap-adt-api` has **zero** ST05 support (grep-confirmed, `build/api/traces.js` only
+  implements `abaptraces`/SAT) — there is no reference implementation for ST05 anywhere; today's live
+  capture is the only evidence this schema is based on.
+- Files: `pkg/adt/client.go` (`SQLTraceState`, `SQLTraceInstanceState`, `SQLTraceTypes`, `parseSQLTraceState`).
+- Verified live: real system returned one instance (`srvdevsaps4d_S4D_00`), all trace types off (expected —
+  captured right after the user manually deactivated their SQL trace).
+- Tests: `pkg/adt/trace_test.go` — `TestParseSQLTraceState` (real fixture captured live 2026-08-12).
+- Code-reviewed together with 2q below: 0 CRITICAL/MEDIUM, 1 HIGH (fixed same session — `ListSQLTraces`'s
+  MCP tool registration still advertised now-removed `user`/`max_results` params and a stale description;
+  corrected in `internal/mcp/tools_register.go`), 1 LOW (pre-existing, unrelated `fmt.Sscanf` error-ignoring
+  pattern in the SAT hitlist parser — not blocking). Verdict: approve after the HIGH fix.
+
+### 2r. `GetUserTransports` — returned empty despite user having real modifiable transports — FIXED (2026-09-07)
+- Matches upstream issue [#111](https://github.com/oisee/vibing-steampunk/issues/111) (open, unfixed,
+  follow-up of closed #9). Symptom: `get_user_transports` reported no requests for a user that
+  demonstrably had one (`S4DK928661`, confirmed via `get_transport` and `list_transports`).
+- **Root cause (confirmed live via `VSP_HTTP_TRACE=1` raw XML capture, not guessed)**: `GetUserTransports`
+  calls `/sap/bc/adt/cts/transportrequests?user=...&targets=true`. On this system, with `targets=true`,
+  SAP genuinely returns a bare, childless `<tm:root/>` (300 bytes) — not a parsing bug, SAP itself gives
+  nothing. Ruled out the `<tm:project>`-wrapping theory from
+  [abap-adt-api#46](https://github.com/marcellourbani/abap-adt-api/issues/46) (the origin TS library this
+  project's README cites as reference): no such wrapper appears anywhere in the response.
+  Cross-checked: the same query **without** `targets=true` (what `ListTransports` sends) returns a real,
+  18KB+ populated tree — but in a shape (`<tm:workbench><tm:released><tm:request>`, no `<tm:target>` layer)
+  that `parseTransportList` doesn't handle either, so it also parses to empty and silently falls through to
+  `ListTransports`'s existing `listTransportsViaSQL` (E070/E07T) fallback — which is what actually produces
+  `list_transports`' correct results on this system today, not the ADT tree.
+- Fix: `GetUserTransports` now falls back to the same `listTransportsViaSQL` when `parseUserTransports`
+  returns both `Workbench` and `Customizing` empty, converting the flat `[]TransportSummary` result to the
+  hierarchical `*UserTransports` shape via new `convertTransportSummaryToUserTransports` (K→workbench,
+  W→customizing). Transports sourced this way have no `Tasks`/`Objects` detail (E070/E07T doesn't carry
+  it) — same known limitation `ListTransports` already has. File: `pkg/adt/transport.go`.
+- Tests: `TestConvertTransportSummaryToUserTransports_Mixed/EmptyInput/IgnoresUnknownType`
+  (`pkg/adt/transport_test.go`).
+- Verified live: `get_user_transports` for the real user now lists `S4DK928661` and 74 other requests,
+  matching `list_transports`.
+- Code-reviewed: 0 CRITICAL/HIGH. 1 MEDIUM (pre-existing, not introduced here — `listTransportsViaSQL`
+  builds its E070/E07T WHERE clause via unescaped string concatenation of the `user` param; this fix adds
+  a second MCP entry point (`get_user_transports`) into that same already-vulnerable helper, and makes the
+  fallback path common rather than rare — flagged as a follow-up to parameterize `listTransportsViaSQL`
+  itself, not fixed in this change). 1 LOW (fixed same session — new test fixtures used the real SAP
+  username instead of `TESTUSER` per this file's own sanitize policy; corrected).
+
 ## Known Open Issues (Not Fixed)
+
+### `ListSQLTraces` (ST05 trace directory) — not implementable via ADT as originally designed — intentionally stubbed (2026-08-12)
+- **Root cause**: `/sap/bc/adt/st05/trace/directory` (with the correct Accept header,
+  `application/vnd.sap.adt.perf.trace.directory.v1+xml`, see 2p above) does **not** return a list of trace
+  records. The real body is `<traceDirectory><uri>...</uri></traceDirectory>` — a single link to the Fiori
+  `SQL_TRACE_ANALYSIS` UI app, not machine-readable data. There is no other documented ADT endpoint for
+  reading individual SQL trace entries (statement, duration, table) — confirmed no reference implementation
+  has this (see 2p).
+- The returned Fiori URI itself resolves to the application server's **internal** hostname
+  (`http://<internal-instance-host>:8000/sap/bc/stmc/ui5/...`), which gave a 403 when the user tried it from
+  outside the corporate network — likely an `icm/host_name_full` profile mismatch between the internal
+  instance hostname and the externally-published reverse-proxy hostname used for everything else (ADT
+  itself works fine through `sapdev.launioncorp.com`). Not something fixable in vsp — a Basis-side SAP
+  profile question.
+- **Decision (user, 2026-08-12)**: rather than exposing a misleading partial capability (a link that may not
+  even be reachable), `ListSQLTraces` now fails immediately with an explanatory error and makes **no** call
+  to SAP at all (`pkg/adt/client.go`) — the MCP tool description was updated to say so explicitly
+  (`internal/mcp/tools_register.go`, `ListSQLTraces`).
+- **Status**: on hold. The user's Basis contact is on vacation until September 2026 — revisit once they
+  confirm whether the internal-hostname 403 is fixable (correct `icm/host_name_full`, reverse-proxy rule, or
+  similar) and, if so, whether the Fiori UI's own backend network calls (would need inspecting via browser
+  DevTools) expose a data endpoint that could be wrapped instead of just linking out.
+- Test: `pkg/adt/trace_test.go` — `TestListSQLTraces_FailsWithoutCallingSAP`.
 
 ### `RUN_REPORT` — hangs on reports with a selection screen; secondary `MISSING_PARAM` bug
 - **Root cause (confirmed)**: matches upstream issue [#113](https://github.com/oisee/vibing-steampunk/issues/113)

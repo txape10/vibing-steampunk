@@ -2403,14 +2403,25 @@ func (c *Client) ListTraces(ctx context.Context, opts *TraceQueryOptions) ([]ABA
 	return parseTracesFeed(resp.Body)
 }
 
+// traceAbapTracesPrefix is the base ADT collection path for ABAP profiler traces.
+const traceAbapTracesPrefix = "/sap/bc/adt/runtime/traces/abaptraces/"
+
+// normalizeTraceID accepts either a bare trace GUID or the full ADT URI
+// returned by ListTraces (ABAPTrace.ID) and returns the bare GUID, since
+// GetTrace builds the request endpoint from the base path itself.
+func normalizeTraceID(id string) string {
+	return strings.TrimPrefix(id, traceAbapTracesPrefix)
+}
+
 // GetTrace retrieves analysis of a specific trace.
 // toolType can be: "hitlist", "statements", "dbAccesses"
 func (c *Client) GetTrace(ctx context.Context, traceID string, toolType string) (*TraceAnalysis, error) {
 	if toolType == "" {
 		toolType = "hitlist"
 	}
+	traceID = normalizeTraceID(traceID)
 
-	endpoint := fmt.Sprintf("/sap/bc/adt/runtime/traces/abaptraces/%s/%s", traceID, toolType)
+	endpoint := fmt.Sprintf("%s%s/%s", traceAbapTracesPrefix, traceID, toolType)
 
 	resp, err := c.transport.Request(ctx, endpoint, &RequestOptions{
 		Method: http.MethodGet,
@@ -2485,7 +2496,39 @@ func parseTracesFeed(data []byte) ([]ABAPTrace, error) {
 	return result, nil
 }
 
+// traceTimeXML is a <grossTime>/<traceEventNetTime>/<proceduralNetTime> child element.
+type traceTimeXML struct {
+	Time       string `xml:"time,attr"`
+	Percentage string `xml:"percentage,attr"`
+}
+
+// traceProgramRefXML is a <callingProgram>/<calledProgram> child element.
+// SAP puts these attributes in the adtcore namespace, but encoding/xml
+// matches struct tags without a namespace by local name regardless of prefix.
+type traceProgramRefXML struct {
+	Context string `xml:"context,attr"`
+}
+
+// hitlistXML mirrors the real ADT response for GET .../abaptraces/{id}/hitlist,
+// verified against a live S/4HANA system on 2026-08-11 (trace
+// 022F8D0E956911F1807502000A14930A). Earlier code assumed a flat-attribute
+// shape (program/event/line/grossTime/netTime/calls) that does not exist in
+// the actual response, so every entry unmarshaled to zero values.
+type hitlistXML struct {
+	XMLName xml.Name `xml:"hitlist"`
+	Entries []struct {
+		HitCount          string             `xml:"hitCount,attr"`
+		Description       string             `xml:"description,attr"`
+		CallingProgram    traceProgramRefXML `xml:"callingProgram"`
+		GrossTime         traceTimeXML       `xml:"grossTime"`
+		TraceEventNetTime traceTimeXML       `xml:"traceEventNetTime"`
+	} `xml:"entry"`
+}
+
 // parseTraceAnalysis parses trace analysis XML response.
+// Only "hitlist" is implemented — the "statements" and "dbAccesses" tool
+// types have not been verified against a live system, so they intentionally
+// return an empty analysis rather than guess at their schema.
 func parseTraceAnalysis(data []byte, traceID, toolType string) (*TraceAnalysis, error) {
 	analysis := &TraceAnalysis{
 		TraceID:  traceID,
@@ -2493,50 +2536,34 @@ func parseTraceAnalysis(data []byte, traceID, toolType string) (*TraceAnalysis, 
 		Summary:  make(map[string]string),
 	}
 
-	// The XML structure varies by tool type
-	// For now, we extract basic information
-	type hitlistXML struct {
-		XMLName   xml.Name `xml:"hitlist"`
-		TotalTime string   `xml:"totalTime,attr"`
-		Entries   []struct {
-			Program    string `xml:"program,attr"`
-			Event      string `xml:"event,attr"`
-			Line       string `xml:"line,attr"`
-			GrossTime  string `xml:"grossTime,attr"`
-			NetTime    string `xml:"netTime,attr"`
-			Calls      string `xml:"calls,attr"`
-			Percentage string `xml:"percentage,attr"`
-		} `xml:"entry"`
+	if toolType != "hitlist" {
+		return analysis, nil
 	}
 
 	var hitlist hitlistXML
-	if err := xml.Unmarshal(data, &hitlist); err == nil && hitlist.XMLName.Local == "hitlist" {
-		if hitlist.TotalTime != "" {
-			fmt.Sscanf(hitlist.TotalTime, "%d", &analysis.TotalTime)
-		}
+	if err := xml.Unmarshal(data, &hitlist); err != nil || hitlist.XMLName.Local != "hitlist" {
+		return analysis, nil
+	}
 
-		for _, e := range hitlist.Entries {
-			var line, calls int
-			var grossTime, netTime int64
-			var percentage float64
+	for _, e := range hitlist.Entries {
+		var hitCount int
+		var grossTime, netTime int64
+		var percentage float64
 
-			fmt.Sscanf(e.Line, "%d", &line)
-			fmt.Sscanf(e.Calls, "%d", &calls)
-			fmt.Sscanf(e.GrossTime, "%d", &grossTime)
-			fmt.Sscanf(e.NetTime, "%d", &netTime)
-			fmt.Sscanf(e.Percentage, "%f", &percentage)
+		fmt.Sscanf(e.HitCount, "%d", &hitCount)
+		fmt.Sscanf(e.GrossTime.Time, "%d", &grossTime)
+		fmt.Sscanf(e.TraceEventNetTime.Time, "%d", &netTime)
+		fmt.Sscanf(e.GrossTime.Percentage, "%f", &percentage)
 
-			analysis.Entries = append(analysis.Entries, TraceEntry{
-				Program:    e.Program,
-				Event:      e.Event,
-				Line:       line,
-				GrossTime:  grossTime,
-				NetTime:    netTime,
-				Calls:      calls,
-				Percentage: percentage,
-			})
-			analysis.TotalCalls += calls
-		}
+		analysis.Entries = append(analysis.Entries, TraceEntry{
+			Program:    e.CallingProgram.Context,
+			Event:      e.Description,
+			GrossTime:  grossTime,
+			NetTime:    netTime,
+			Calls:      hitCount,
+			Percentage: percentage,
+		})
+		analysis.TotalCalls += hitCount
 	}
 
 	return analysis, nil
@@ -2544,33 +2571,43 @@ func parseTraceAnalysis(data []byte, traceID, toolType string) (*TraceAnalysis, 
 
 // --- SQL Trace (ST05) Operations ---
 
-// SQLTraceState represents the current state of SQL tracing.
+// SQLTraceState represents the current SQL trace configuration across
+// application server instances, as returned by ST05's ADT state endpoint.
 type SQLTraceState struct {
-	Active     bool   `json:"active"`
-	User       string `json:"user,omitempty"`
-	TraceType  string `json:"traceType,omitempty"`
-	StartTime  string `json:"startTime,omitempty"`
-	MaxRecords int    `json:"maxRecords,omitempty"`
-	TraceFile  string `json:"traceFile,omitempty"`
+	Instances []SQLTraceInstanceState `json:"instances"`
 }
 
-// SQLTraceEntry represents a trace file in the directory.
-type SQLTraceEntry struct {
-	ID          string `json:"id"`
-	User        string `json:"user"`
-	StartTime   string `json:"startTime"`
-	EndTime     string `json:"endTime,omitempty"`
-	TraceType   string `json:"traceType"`
-	RecordCount int    `json:"recordCount"`
-	Size        int64  `json:"size,omitempty"`
-	URI         string `json:"uri"`
+// SQLTraceInstanceState is the trace configuration for one application
+// server instance.
+type SQLTraceInstanceState struct {
+	Instance             string        `json:"instance"`
+	Host                 string        `json:"host"`
+	IsLocal              bool          `json:"isLocal"`
+	IsSelected           bool          `json:"isSelected"`
+	Active               bool          `json:"active"`
+	ModificationUser     string        `json:"modificationUser,omitempty"`
+	ModificationDateTime string        `json:"modificationDateTime,omitempty"`
+	TraceTypes           SQLTraceTypes `json:"traceTypes"`
 }
 
-// GetSQLTraceState checks if SQL trace is currently active.
+// SQLTraceTypes are the individual trace categories ST05 can capture,
+// each independently switchable per instance.
+type SQLTraceTypes struct {
+	SQLOn  bool `json:"sqlOn"`
+	BufOn  bool `json:"bufOn"`
+	EnqOn  bool `json:"enqOn"`
+	RfcOn  bool `json:"rfcOn"`
+	HTTPOn bool `json:"httpOn"`
+	ApcOn  bool `json:"apcOn"`
+	AmcOn  bool `json:"amcOn"`
+	AuthOn bool `json:"authOn"`
+}
+
+// GetSQLTraceState checks the current SQL trace configuration.
 func (c *Client) GetSQLTraceState(ctx context.Context) (*SQLTraceState, error) {
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/st05/trace/state", &RequestOptions{
 		Method: http.MethodGet,
-		Accept: "application/xml",
+		Accept: "application/vnd.sap.adt.perf.trace.state.v1+xml",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("getting SQL trace state: %w", err)
@@ -2579,123 +2616,75 @@ func (c *Client) GetSQLTraceState(ctx context.Context) (*SQLTraceState, error) {
 	return parseSQLTraceState(resp.Body)
 }
 
-// ListSQLTraces retrieves a list of SQL trace files.
-func (c *Client) ListSQLTraces(ctx context.Context, user string, maxResults int) ([]SQLTraceEntry, error) {
-	params := url.Values{}
-	if user != "" {
-		params.Set("user", user)
-	}
-	if maxResults > 0 {
-		params.Set("$top", fmt.Sprintf("%d", maxResults))
-	}
-
-	endpoint := "/sap/bc/adt/st05/trace/directory"
-	if len(params) > 0 {
-		endpoint = endpoint + "?" + params.Encode()
-	}
-
-	resp, err := c.transport.Request(ctx, endpoint, &RequestOptions{
-		Method: http.MethodGet,
-		Accept: "application/atom+xml",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing SQL traces: %w", err)
-	}
-
-	return parseSQLTraceDirectory(resp.Body)
+// ListSQLTraces is intentionally unimplemented: ADT's ST05 directory
+// endpoint (/sap/bc/adt/st05/trace/directory) does not return a
+// machine-readable list of trace records — it returns a single link to
+// the Fiori SQL_TRACE_ANALYSIS UI app instead (verified live 2026-08-12).
+// That link resolves to the application server's internal hostname, which
+// returned 403 from outside the corporate network; pending Basis review
+// of external access before this can be revisited (see project docs).
+// No SAP call is made — failing fast here avoids a round-trip that can
+// never produce trace data.
+func (c *Client) ListSQLTraces(ctx context.Context) error {
+	return fmt.Errorf("SQL trace listing is not available via ADT: SAP only returns a link to the Fiori SQL_TRACE_ANALYSIS UI, not machine-readable trace data (pending Basis review of the UI link's internal-hostname access, see project docs)")
 }
 
-// parseSQLTraceState parses the SQL trace state XML.
+// parseSQLTraceState parses the SQL trace state XML
+// (<traceStateInstanceTable> with one <traceStateInstance> per app server).
 func parseSQLTraceState(data []byte) (*SQLTraceState, error) {
-	type stateXML struct {
-		XMLName    xml.Name `xml:"traceState"`
-		Active     string   `xml:"active,attr"`
-		User       string   `xml:"user,attr"`
-		TraceType  string   `xml:"traceType,attr"`
-		StartTime  string   `xml:"startTime,attr"`
-		MaxRecords string   `xml:"maxRecords,attr"`
-		TraceFile  string   `xml:"traceFile,attr"`
+	type traceTypesXML struct {
+		SQLOn  string `xml:"sqlOn"`
+		BufOn  string `xml:"bufOn"`
+		EnqOn  string `xml:"enqOn"`
+		RfcOn  string `xml:"rfcOn"`
+		HTTPOn string `xml:"httpOn"`
+		ApcOn  string `xml:"apcOn"`
+		AmcOn  string `xml:"amcOn"`
+		AuthOn string `xml:"authOn"`
+	}
+	type instanceXML struct {
+		Instance             string        `xml:"instance"`
+		Host                 string        `xml:"host"`
+		IsLocal              string        `xml:"isLocal"`
+		IsSelected           string        `xml:"isSelected"`
+		ModificationUser     string        `xml:"modificationUser"`
+		ModificationDateTime string        `xml:"modificationDateTime"`
+		TraceTypes           traceTypesXML `xml:"traceTypes"`
+	}
+	type tableXML struct {
+		XMLName   xml.Name      `xml:"traceStateInstanceTable"`
+		Instances []instanceXML `xml:"traceStateInstance"`
 	}
 
-	var state stateXML
-	if err := xml.Unmarshal(data, &state); err != nil {
+	var table tableXML
+	if err := xml.Unmarshal(data, &table); err != nil {
 		return nil, fmt.Errorf("parsing SQL trace state: %w", err)
 	}
 
-	var maxRecords int
-	if state.MaxRecords != "" {
-		fmt.Sscanf(state.MaxRecords, "%d", &maxRecords)
-	}
-
-	return &SQLTraceState{
-		Active:     state.Active == "true" || state.Active == "X",
-		User:       state.User,
-		TraceType:  state.TraceType,
-		StartTime:  state.StartTime,
-		MaxRecords: maxRecords,
-		TraceFile:  state.TraceFile,
-	}, nil
-}
-
-// sqlTraceEntryXML is used for parsing SQL trace directory.
-type sqlTraceEntryXML struct {
-	ID      string `xml:"id"`
-	Title   string `xml:"title"`
-	Updated string `xml:"updated"`
-	Link    struct {
-		Href string `xml:"href,attr"`
-	} `xml:"link"`
-	Author struct {
-		Name string `xml:"name"`
-	} `xml:"author"`
-	Content struct {
-		Trace struct {
-			TraceType   string `xml:"traceType,attr"`
-			StartTime   string `xml:"startTime,attr"`
-			EndTime     string `xml:"endTime,attr"`
-			RecordCount string `xml:"recordCount,attr"`
-			Size        string `xml:"size,attr"`
-		} `xml:"trace"`
-	} `xml:"content"`
-}
-
-// parseSQLTraceDirectory parses the SQL trace directory feed.
-func parseSQLTraceDirectory(data []byte) ([]SQLTraceEntry, error) {
-	type feedXML struct {
-		XMLName xml.Name           `xml:"feed"`
-		Entries []sqlTraceEntryXML `xml:"entry"`
-	}
-
-	var feed feedXML
-	if err := xml.Unmarshal(data, &feed); err != nil {
-		return nil, fmt.Errorf("parsing SQL trace directory: %w", err)
-	}
-
-	result := make([]SQLTraceEntry, 0, len(feed.Entries))
-	for _, entry := range feed.Entries {
-		var recordCount int
-		var size int64
-		if entry.Content.Trace.RecordCount != "" {
-			fmt.Sscanf(entry.Content.Trace.RecordCount, "%d", &recordCount)
+	state := &SQLTraceState{Instances: make([]SQLTraceInstanceState, 0, len(table.Instances))}
+	for _, inst := range table.Instances {
+		types := SQLTraceTypes{
+			SQLOn:  inst.TraceTypes.SQLOn == "true",
+			BufOn:  inst.TraceTypes.BufOn == "true",
+			EnqOn:  inst.TraceTypes.EnqOn == "true",
+			RfcOn:  inst.TraceTypes.RfcOn == "true",
+			HTTPOn: inst.TraceTypes.HTTPOn == "true",
+			ApcOn:  inst.TraceTypes.ApcOn == "true",
+			AmcOn:  inst.TraceTypes.AmcOn == "true",
+			AuthOn: inst.TraceTypes.AuthOn == "true",
 		}
-		if entry.Content.Trace.Size != "" {
-			fmt.Sscanf(entry.Content.Trace.Size, "%d", &size)
-		}
-
-		trace := SQLTraceEntry{
-			ID:          entry.ID,
-			User:        entry.Author.Name,
-			StartTime:   entry.Content.Trace.StartTime,
-			EndTime:     entry.Content.Trace.EndTime,
-			TraceType:   entry.Content.Trace.TraceType,
-			RecordCount: recordCount,
-			Size:        size,
-			URI:         entry.Link.Href,
-		}
-		result = append(result, trace)
+		state.Instances = append(state.Instances, SQLTraceInstanceState{
+			Instance:             inst.Instance,
+			Host:                 inst.Host,
+			IsLocal:              inst.IsLocal == "true",
+			IsSelected:           inst.IsSelected == "true",
+			Active:               types.SQLOn || types.BufOn || types.EnqOn || types.RfcOn || types.HTTPOn || types.ApcOn || types.AmcOn || types.AuthOn,
+			ModificationUser:     inst.ModificationUser,
+			ModificationDateTime: inst.ModificationDateTime,
+			TraceTypes:           types,
+		})
 	}
-
-	return result, nil
+	return state, nil
 }
 
 // --- API Release State (Clean Core) ---

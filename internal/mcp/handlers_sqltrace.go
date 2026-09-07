@@ -38,21 +38,6 @@ func (s *Server) handleGetSQLTraceState(ctx context.Context, request mcp.CallToo
 }
 
 func (s *Server) handleListSQLTraces(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	user := ""
-	maxResults := 100
-
-	if u, ok := request.GetArguments()["user"].(string); ok {
-		user = u
-	}
-	if max, ok := request.GetArguments()["max_results"].(float64); ok && max > 0 {
-		maxResults = int(max)
-	}
-
-	traces, err := s.adtClient.ListSQLTraces(ctx, user, maxResults)
-	if err != nil {
-		return newToolResultError(fmt.Sprintf("Failed to list SQL traces: %v", err)), nil
-	}
-
-	result, _ := json.MarshalIndent(traces, "", "  ")
-	return mcp.NewToolResultText(string(result)), nil
+	err := s.adtClient.ListSQLTraces(ctx)
+	return newToolResultError(fmt.Sprintf("Failed to list SQL traces: %v", err)), nil
 }

@@ -615,13 +615,7 @@ func (s *Server) registerDiagnosticsTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("ListSQLTraces") {
 		s.mcpServer.AddTool(mcp.NewTool("ListSQLTraces",
-			mcp.WithDescription("List SQL trace files from ST05."),
-			mcp.WithString("user",
-				mcp.Description("Filter by username"),
-			),
-			mcp.WithNumber("max_results",
-				mcp.Description("Maximum number of results (default: 100)"),
-			),
+			mcp.WithDescription("(Unavailable) SQL trace listing is not supported via ADT: SAP only exposes a Fiori UI link (SQL_TRACE_ANALYSIS), not machine-readable trace data. Pending Basis review of the link's internal-hostname access."),
 		), s.handleListSQLTraces)
 	}
 }

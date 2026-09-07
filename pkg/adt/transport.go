@@ -83,7 +83,49 @@ func (c *Client) GetUserTransports(ctx context.Context, userName string) (*UserT
 		return nil, fmt.Errorf("get user transports failed: %w", err)
 	}
 
-	return parseUserTransports(resp.Body)
+	result, err := parseUserTransports(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Some systems return a genuinely empty tree for this query (confirmed live:
+	// SAP returns a bare, childless <tm:root/> for ?targets=true on this system,
+	// even though the same user has real modifiable transports). Fall back to the
+	// same E070/E07T SQL query ListTransports already uses in that situation.
+	if len(result.Workbench) == 0 && len(result.Customizing) == 0 {
+		summaries, sqlErr := c.listTransportsViaSQL(ctx, userName)
+		if sqlErr == nil {
+			result = convertTransportSummaryToUserTransports(summaries)
+		}
+	}
+
+	return result, nil
+}
+
+// convertTransportSummaryToUserTransports maps the flat TransportSummary list
+// returned by listTransportsViaSQL into the hierarchical UserTransports shape.
+// Transports sourced this way have no Tasks/Objects detail - E070/E07T only
+// carries header-level data, not the task/object breakdown the ADT tree gives.
+func convertTransportSummaryToUserTransports(summaries []TransportSummary) *UserTransports {
+	result := &UserTransports{}
+	for _, s := range summaries {
+		tr := TransportRequest{
+			Number:      s.Number,
+			Owner:       s.Owner,
+			Description: s.Description,
+			Status:      s.Status,
+			Target:      s.Target,
+		}
+		switch s.Type {
+		case "K":
+			tr.Type = "workbench"
+			result.Workbench = append(result.Workbench, tr)
+		case "W":
+			tr.Type = "customizing"
+			result.Customizing = append(result.Customizing, tr)
+		}
+	}
+	return result
 }
 
 func parseUserTransports(data []byte) (*UserTransports, error) {

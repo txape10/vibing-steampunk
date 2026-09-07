@@ -39,8 +39,8 @@
 - [x] Variable inspection
 - [x] Step commands (into, over, return, continue)
 - [x] Short dumps (RABAX/ST22)
-- [x] ABAP Profiler (ATRA)
-- [x] SQL Traces (ST05)
+- [x] ABAP Profiler (ATRA) — was broken (wrong Accept header + XML schema), fixed and verified live 2026-08-12, see CLAUDE.md
+- [x] SQL Traces (ST05) — partial: trace *state* works (fixed 2026-08-12); trace *listing* is not possible via ADT (Fiori UI link only, no machine-readable data), see CLAUDE.md "Known Open Issues"
 
 ### Phase 4: Advanced Analysis (v2.11-2.13) ✅
 - [x] Transport management (5 tools)
