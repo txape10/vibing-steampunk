@@ -17,7 +17,7 @@ type RFCResult struct {
 }
 
 // CallRFC calls a function module via WebSocket.
-func (c *DebugWebSocketClient) CallRFC(ctx context.Context, function string, params map[string]string) (*RFCResult, error) {
+func (c *DebugWebSocketClient) CallRFC(ctx context.Context, function string, params map[string]interface{}) (*RFCResult, error) {
 	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}

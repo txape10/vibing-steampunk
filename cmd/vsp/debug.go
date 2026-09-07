@@ -720,7 +720,7 @@ func (s *debugSession) callRFC(args []string) error {
 	}
 
 	fm := strings.ToUpper(args[0])
-	params := make(map[string]string)
+	params := make(map[string]interface{})
 
 	// Parse param=value pairs
 	for _, arg := range args[1:] {

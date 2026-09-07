@@ -65,6 +65,11 @@ CLASS zcl_vsp_rfc_service DEFINITION
                 iv_name         TYPE string
       RETURNING VALUE(rv_value) TYPE string.
 
+    METHODS extract_json_object
+      IMPORTING iv_params       TYPE string
+                iv_name         TYPE string
+      RETURNING VALUE(rv_value) TYPE string.
+
     METHODS escape_json
       IMPORTING iv_string         TYPE string
       RETURNING VALUE(rv_escaped) TYPE string.
@@ -198,12 +203,26 @@ CLASS zcl_vsp_rfc_service IMPLEMENTATION.
       CLEAR: ls_ptab, lo_data, lv_val.
       lo_data = create_param_data( ls_imp ).
       IF lo_data IS BOUND.
-        lv_val = extract_param( iv_params = is_message-params iv_name = CONV #( ls_imp-parameter ) ).
-        IF lv_val IS NOT INITIAL.
-          ASSIGN lo_data->* TO <fs_val>.
-          IF sy-subrc = 0.
+        DATA(lo_imp_type) = cl_abap_typedescr=>describe_by_data_ref( lo_data ).
+        IF lo_imp_type->kind = cl_abap_typedescr=>kind_elem.
+          lv_val = extract_param( iv_params = is_message-params iv_name = CONV #( ls_imp-parameter ) ).
+          IF lv_val IS NOT INITIAL.
+            ASSIGN lo_data->* TO <fs_val>.
+            IF sy-subrc = 0.
+              TRY.
+                  <fs_val> = lv_val.
+                CATCH cx_root.
+              ENDTRY.
+            ENDIF.
+          ENDIF.
+        ELSE.
+          " Structured IMPORTING parameter (e.g. ST05_TRACE_INTERVAL): extract_param's
+          " regex only captures quoted scalar values, so nested objects need their own
+          " balanced-brace extraction plus a real JSON deserializer.
+          DATA(lv_json_obj) = extract_json_object( iv_params = is_message-params iv_name = CONV #( ls_imp-parameter ) ).
+          IF lv_json_obj IS NOT INITIAL.
             TRY.
-                <fs_val> = lv_val.
+                /ui2/cl_json=>deserialize( EXPORTING json = lv_json_obj CHANGING data = lo_data->* ).
               CATCH cx_root.
             ENDTRY.
           ENDIF.
@@ -275,6 +294,52 @@ CLASS zcl_vsp_rfc_service IMPLEMENTATION.
               lv_str = ''.
           ENDTRY.
           lv_json = |{ lv_json }"{ lv_pname }":"{ lv_str }"|.
+        ELSEIF lo_exp_type->kind = cl_abap_typedescr=>kind_table.
+          " EXPORTING params can themselves be table types (e.g. ST05_TABLE_ACCESS_RECORD_TABLE),
+          " not just structures. The old code assumed non-elemental == structure and did
+          " CAST cl_abap_structdescr( lo_exp_type ), which raises CX_SY_MOVE_CAST_ERROR (uncaught)
+          " for a table type -- the method aborted mid-response and the caller just saw a timeout
+          " waiting for a reply that was never sent.
+          lv_json = |{ lv_json }"{ lv_pname }":[|.
+          DATA lv_exp_tab_row_first TYPE abap_bool.
+          lv_exp_tab_row_first = abap_true.
+          TRY.
+              LOOP AT <fs_out> ASSIGNING FIELD-SYMBOL(<fs_exp_tab_row>).
+                IF lv_exp_tab_row_first = abap_false.
+                  lv_json = |{ lv_json },|.
+                ENDIF.
+                lv_json = |{ lv_json }{ lv_o }|.
+                DATA(lo_exp_tab_row_struc) = CAST cl_abap_structdescr( cl_abap_typedescr=>describe_by_data( <fs_exp_tab_row> ) ).
+                DATA lv_exp_tab_comp_first TYPE abap_bool.
+                lv_exp_tab_comp_first = abap_true.
+                LOOP AT lo_exp_tab_row_struc->components INTO DATA(ls_exp_tab_comp).
+                  IF lv_exp_tab_comp_first = abap_false.
+                    lv_json = |{ lv_json },|.
+                  ENDIF.
+                  ASSIGN COMPONENT ls_exp_tab_comp-name OF STRUCTURE <fs_exp_tab_row> TO FIELD-SYMBOL(<fs_exp_tab_comp>).
+                  IF sy-subrc = 0.
+                    DATA(lo_exp_tab_comp_type) = cl_abap_typedescr=>describe_by_data( <fs_exp_tab_comp> ).
+                    IF lo_exp_tab_comp_type->kind = cl_abap_typedescr=>kind_elem.
+                      TRY.
+                          lv_str = <fs_exp_tab_comp>.
+                          lv_str = escape_json( lv_str ).
+                        CATCH cx_root.
+                          lv_str = ''.
+                      ENDTRY.
+                    ELSE.
+                      lv_str = '[complex]'.
+                    ENDIF.
+                    lv_json = |{ lv_json }"{ ls_exp_tab_comp-name }":"{ lv_str }"|.
+                  ENDIF.
+                  lv_exp_tab_comp_first = abap_false.
+                ENDLOOP.
+                lv_json = |{ lv_json }{ lv_c }|.
+                lv_exp_tab_row_first = abap_false.
+              ENDLOOP.
+            CATCH cx_root.
+              lv_json = |{ lv_json }{ lv_o }"error":"serialization failed"{ lv_c }|.
+          ENDTRY.
+          lv_json = |{ lv_json }]|.
         ELSE.
           lv_json = |{ lv_json }"{ lv_pname }":{ lv_o }|.
           DATA(lo_exp_struc) = CAST cl_abap_structdescr( lo_exp_type ).
@@ -570,6 +635,72 @@ CLASS zcl_vsp_rfc_service IMPLEMENTATION.
       lv_rest = iv_params+lv_pos.
       FIND REGEX ':\s*"([^"]*)"' IN lv_rest SUBMATCHES rv_value.
     ENDIF.
+  ENDMETHOD.
+
+  METHOD extract_json_object.
+    " Locates "iv_name": { ... } in iv_params and returns the full nested object as raw
+    " JSON text, matching braces so it works even if the object contains further nesting.
+    " Unlike extract_param (quoted-scalar values only), this is what lets structured
+    " IMPORTING RFC parameters (e.g. ST05_TRACE_INTERVAL) reach /ui2/cl_json=>deserialize
+    " with a complete, well-formed object instead of an empty match.
+    DATA lv_name TYPE string.
+    lv_name = iv_name.
+    CONDENSE lv_name.
+
+    DATA lv_regex TYPE string.
+    CONCATENATE '"' lv_name '"\s*:\s*\{' INTO lv_regex.
+
+    DATA lv_match_off TYPE i.
+    DATA lv_match_len TYPE i.
+    FIND REGEX lv_regex IN iv_params MATCH OFFSET lv_match_off MATCH LENGTH lv_match_len.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    DATA lv_open TYPE i.
+    lv_open = lv_match_off + lv_match_len - 1.
+
+    DATA lv_len TYPE i.
+    lv_len = strlen( iv_params ).
+
+    DATA lv_count TYPE i.
+    lv_count = lv_len - lv_open.
+    IF lv_count <= 0.
+      RETURN.
+    ENDIF.
+
+    DATA lv_depth TYPE i VALUE 0.
+    DATA lv_in_str TYPE abap_bool VALUE abap_false.
+    DATA lv_esc TYPE abap_bool VALUE abap_false.
+    DATA lv_char TYPE c LENGTH 1.
+    DATA lv_i TYPE i.
+
+    DO lv_count TIMES.
+      lv_i = lv_open + sy-index - 1.
+      lv_char = iv_params+lv_i(1).
+
+      IF lv_esc = abap_true.
+        lv_esc = abap_false.
+      ELSEIF lv_char = '\'.
+        lv_esc = abap_true.
+      ELSEIF lv_char = '"'.
+        IF lv_in_str = abap_true.
+          lv_in_str = abap_false.
+        ELSE.
+          lv_in_str = abap_true.
+        ENDIF.
+      ELSEIF lv_in_str = abap_false.
+        IF lv_char = '{'.
+          lv_depth = lv_depth + 1.
+        ELSEIF lv_char = '}'.
+          lv_depth = lv_depth - 1.
+          IF lv_depth = 0.
+            rv_value = substring( val = iv_params off = lv_open len = lv_i - lv_open + 1 ).
+            RETURN.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDDO.
   ENDMETHOD.
 
   METHOD escape_json.

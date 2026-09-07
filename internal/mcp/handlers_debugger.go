@@ -260,15 +260,13 @@ func (s *Server) handleCallRFC(ctx context.Context, request mcp.CallToolRequest)
 	}
 
 	// Parse params if provided
-	params := make(map[string]string)
+	params := make(map[string]interface{})
 	if paramsStr, ok := request.GetArguments()["params"].(string); ok && paramsStr != "" {
-		// Parse JSON params
-		var rawParams map[string]interface{}
-		if err := json.Unmarshal([]byte(paramsStr), &rawParams); err != nil {
+		// Parse JSON params, preserving structure/array types so nested
+		// IMPORTING parameters (e.g. TRACE_INTERVAL) reach ABAP as JSON
+		// objects instead of being flattened into Go's "map[...]" string form.
+		if err := json.Unmarshal([]byte(paramsStr), &params); err != nil {
 			return newToolResultError(fmt.Sprintf("Invalid params JSON: %v", err)), nil
-		}
-		for k, v := range rawParams {
-			params[k] = fmt.Sprintf("%v", v)
 		}
 	}
 
