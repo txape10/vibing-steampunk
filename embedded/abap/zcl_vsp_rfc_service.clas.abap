@@ -70,6 +70,18 @@ CLASS zcl_vsp_rfc_service DEFINITION
                 iv_name         TYPE string
       RETURNING VALUE(rv_value) TYPE string.
 
+    METHODS extract_json_array
+      IMPORTING iv_params       TYPE string
+                iv_name         TYPE string
+      RETURNING VALUE(rv_value) TYPE string.
+
+    METHODS find_balanced_json
+      IMPORTING iv_params       TYPE string
+                iv_name         TYPE string
+                iv_open_char    TYPE c LENGTH 1
+                iv_close_char   TYPE c LENGTH 1
+      RETURNING VALUE(rv_value) TYPE string.
+
     METHODS escape_json
       IMPORTING iv_string         TYPE string
       RETURNING VALUE(rv_escaped) TYPE string.
@@ -214,6 +226,17 @@ CLASS zcl_vsp_rfc_service IMPLEMENTATION.
                 CATCH cx_root.
               ENDTRY.
             ENDIF.
+          ENDIF.
+        ELSEIF lo_imp_type->kind = cl_abap_typedescr=>kind_table.
+          " Table-typed IMPORTING parameter sent as a JSON array, e.g. "PARAM":[{...},{...}].
+          " extract_json_object only matches an opening "{", so a table param here would
+          " silently stay at its initial value without this — no error, just ignored input.
+          DATA(lv_json_arr) = extract_json_array( iv_params = is_message-params iv_name = CONV #( ls_imp-parameter ) ).
+          IF lv_json_arr IS NOT INITIAL.
+            TRY.
+                /ui2/cl_json=>deserialize( EXPORTING json = lv_json_arr CHANGING data = lo_data->* ).
+              CATCH cx_root.
+            ENDTRY.
           ENDIF.
         ELSE.
           " Structured IMPORTING parameter (e.g. ST05_TRACE_INTERVAL): extract_param's
@@ -643,12 +666,30 @@ CLASS zcl_vsp_rfc_service IMPLEMENTATION.
     " Unlike extract_param (quoted-scalar values only), this is what lets structured
     " IMPORTING RFC parameters (e.g. ST05_TRACE_INTERVAL) reach /ui2/cl_json=>deserialize
     " with a complete, well-formed object instead of an empty match.
+    rv_value = find_balanced_json( iv_params = iv_params iv_name = iv_name
+                                    iv_open_char = '{' iv_close_char = '}' ).
+  ENDMETHOD.
+
+  METHOD extract_json_array.
+    " Same as extract_json_object, for table-typed IMPORTING parameters sent as a JSON
+    " array ("PARAM":[...]) instead of an object. Without this, extract_json_object's
+    " "{"-only match silently fails on an array and the table param is left initial.
+    rv_value = find_balanced_json( iv_params = iv_params iv_name = iv_name
+                                    iv_open_char = '[' iv_close_char = ']' ).
+  ENDMETHOD.
+
+  METHOD find_balanced_json.
+    " Shared balanced-delimiter scanner behind extract_json_object ({}) and
+    " extract_json_array ([]). Locates "iv_name": <open_char> ... <close_char> in
+    " iv_params and returns the full nested value as raw JSON text, counting delimiter
+    " depth (ignoring anything inside quoted strings, respecting backslash escapes) so
+    " it works even if the value contains further nesting.
     DATA lv_name TYPE string.
     lv_name = iv_name.
     CONDENSE lv_name.
 
     DATA lv_regex TYPE string.
-    CONCATENATE '"' lv_name '"\s*:\s*\{' INTO lv_regex.
+    CONCATENATE '"' lv_name '"\s*:\s*\' iv_open_char INTO lv_regex.
 
     DATA lv_match_off TYPE i.
     DATA lv_match_len TYPE i.
@@ -690,9 +731,9 @@ CLASS zcl_vsp_rfc_service IMPLEMENTATION.
           lv_in_str = abap_true.
         ENDIF.
       ELSEIF lv_in_str = abap_false.
-        IF lv_char = '{'.
+        IF lv_char = iv_open_char.
           lv_depth = lv_depth + 1.
-        ELSEIF lv_char = '}'.
+        ELSEIF lv_char = iv_close_char.
           lv_depth = lv_depth - 1.
           IF lv_depth = 0.
             rv_value = substring( val = iv_params off = lv_open len = lv_i - lv_open + 1 ).
