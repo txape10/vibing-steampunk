@@ -563,6 +563,14 @@ the code permanently — it is the fix, not a placeholder.
   `DeleteObjectWithAutoLock`.
 - `go build ./...` clean; full suite green (`go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)`).
   `-race` unavailable in this environment (CGO disabled, same constraint as `pkg/cache`/`cmd/vsp`).
+- **Verified live (2026-09-09, later session)** against the real SAP system with a throwaway standalone Go
+  program (built as a temporary `cmd/verify178/`, deleted after the run — not committed) that drives the
+  real `pkg/adt.Client`/`StartKeepAlive` directly rather than the MCP tool, so the exact deployed code path
+  is exercised: a real `LockObject` on `ZTESTRCG1` held open for 7s with a 2s keep-alive interval logged
+  three consecutive `[KEEPALIVE] Skipped: a lock is outstanding` lines (zero pings during the window), the
+  `UpdateSource` PUT that followed succeeded with no 423, and a control run with no lock held showed the
+  keep-alive DOES ping normally (`[KEEPALIVE] Ping OK` ×2) — confirming the skip is conditional on the lock
+  window, not a global keep-alive breakage.
 
 ### 2x. Ported upstream PR #191 — optimistic-concurrency guard via source hash, `SOURCE_DRIFT` (2026-09-09)
 - **The feature**: `GetSource(include_hash=true)` returns `{source, sourceHash}` (SHA-256 over the source,
@@ -636,8 +644,14 @@ the code permanently — it is the fix, not a placeholder.
   `internal/mcp/tools_register.go` (`DeployFromFile`/`EditSource` tool schemas), `MCP_USAGE.md`,
   `README_TOOLS.md`.
 - `go build ./...` clean; full suite green (`go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)`).
-  Not yet live-verified against the real SAP system — this port has not been exercised against a live
-  connection in this session.
+- **Verified live (2026-09-09, later session)** against the real SAP system, via the deployed MCP tool
+  (`SAP(action=..., target="PROG ZTESTRCG1", ...)`) end to end: `GetSource(include_hash=true)` returned
+  `{source, sourceHash}` JSON; `WriteSource` with a trivial change and the correct `expected_source_hash`
+  succeeded with matching `targetSourceHash`/`verifiedSourceHash`; a retry with the now-stale original hash
+  was rejected with the exact `SOURCE_DRIFT: expected source hash ..., but the locked object is now ...`
+  message and made no change to the object (confirmed by re-reading it — same hash as the prior successful
+  write); the object was then restored to its original content with a correctly-matching guarded write.
+  `ZTESTRCG1` ends the session identical to how it started.
 
 ## Known Open Issues (Not Fixed)
 
