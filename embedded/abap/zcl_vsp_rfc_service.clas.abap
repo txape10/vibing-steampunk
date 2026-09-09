@@ -490,6 +490,32 @@ CLASS zcl_vsp_rfc_service IMPLEMENTATION.
       RETURN.
     ENDIF.
 
+    " FUNCTION_IMPORT_INTERFACE's line-type name for a TABLES parameter is
+    " usually a structure, but some standard FMs declare it as a table type
+    " directly (e.g. DDIF_FIELDINFO_GET-FIXED_VALUES, whose line type
+    " DDFIXVALUES is itself TYPE STANDARD TABLE OF ...). Always wrapping in
+    " "STANDARD TABLE OF (lv_type)" then builds a table-of-tables, which
+    " CREATE DATA accepts but CALL FUNCTION ... PARAMETER-TABLE rejects as an
+    " incompatible type before the FM ever runs (issue #151). Resolve the
+    " name via RTTI first and only wrap when it is not already a table type.
+    DATA lo_descr TYPE REF TO cl_abap_typedescr.
+    CALL METHOD cl_abap_typedescr=>describe_by_name
+      EXPORTING
+        p_name      = lv_type
+      RECEIVING
+        p_descr_ref = lo_descr
+      EXCEPTIONS
+        type_not_found = 1
+        OTHERS         = 2.
+    IF sy-subrc = 0 AND lo_descr->kind = cl_abap_typedescr=>kind_table.
+      TRY.
+          CREATE DATA ro_data TYPE (lv_type).
+        CATCH cx_sy_create_data_error.
+          CLEAR ro_data.
+      ENDTRY.
+      RETURN.
+    ENDIF.
+
     TRY.
         CREATE DATA ro_data TYPE STANDARD TABLE OF (lv_type).
       CATCH cx_sy_create_data_error.

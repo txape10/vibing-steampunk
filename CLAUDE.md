@@ -653,6 +653,68 @@ the code permanently — it is the fix, not a placeholder.
   write); the object was then restored to its original content with a correctly-matching guarded write.
   `ZTESTRCG1` ends the session identical to how it started.
 
+### 2y. Fixed upstream issue #151 — `CallRFC` fails for FMs whose TABLES parameter's line type is itself a table type (2026-09-09)
+- **The bug**: `CALL_RFC` (`SAP(action="debug", target="CALL_RFC", ...)`) failed for `DDIF_FIELDINFO_GET`
+  with `TABNAME=BSEG` reporting `"Al parámetro FIXED_VALUES debería asignársele un campo cuyo tipo no es
+  compatible con este parámetro"` — even though `FIXED_VALUES` is an *optional* TABLES parameter never
+  explicitly passed. No remote-debugger breakpoint ever fired, matching the upstream report exactly: the
+  rejection happens at ABAP's dynamic `CALL FUNCTION ... PARAMETER-TABLE` binding, before the FM's own code
+  runs. No upstream PR exists for this — the diagnosis and fix are original to this session.
+- **Root cause (confirmed via RTTI live introspection, not guessed)**: `FUNCTION_IMPORT_INTERFACE` reports
+  `FIXED_VALUES`'s line type as `DDFIXVALUES` (`RSTBL-TYP`) — and `DDFIXVALUES` is itself a **table type**
+  (`TTYP/DA`, package `SDBT`), not a structure (confirmed via `SAP(action="search", target="DDFIXVALUES")`).
+  `ZCL_VSP_RFC_SERVICE=>CREATE_TABLE_DATA` unconditionally built `CREATE DATA ro_data TYPE STANDARD TABLE OF
+  (lv_type)` — when `lv_type` already names a table type, this produces a table-of-tables, syntactically
+  valid ABAP (`CREATE DATA` never errors) but incompatible with the binding the FM actually expects, hence
+  the "type not compatible" error at call time. `CREATE_PARAM_DATA` (used for IMPORTING/EXPORTING/CHANGING)
+  was checked and confirmed to NOT have this defect — it already does `CREATE DATA ro_data TYPE (lv_type)`
+  directly, no wrapping, so it works correctly regardless of whether `lv_type` is a structure or a table type.
+- **Fix**: `CREATE_TABLE_DATA` now resolves `lv_type` via RTTI first (`cl_abap_typedescr=>describe_by_name`,
+  classic `EXCEPTIONS type_not_found = 1 OTHERS = 2` — `describe_by_name` has no functional/`RAISING` form
+  for a dynamic name, confirmed by reading its live source: it ends in `raise type_not_found.`, the classic
+  non-CX-class raise syntax, not `RAISE EXCEPTION TYPE cx_...`). If it resolves and `kind = kind_table`, uses
+  `CREATE DATA ro_data TYPE (lv_type)` directly, unwrapped. Otherwise (structure, elementary, or RTTI
+  couldn't resolve the name) falls through unchanged to the original `STANDARD TABLE OF (lv_type)` +
+  `CATCH cx_sy_create_data_error` path — no behavior change for the majority case.
+- **Verification method, in order** (each step ruled out a real alternative explanation before moving on):
+  1. Isolated the two candidate parameters (`FIXED_VALUES` alone) via `SAP(action="analyze",
+     params={"type": "execute_abap", ...})` (a temporary throwaway `ZTEMP_EXEC_*` program, auto-cleaned) —
+     confirmed RTTI resolves `DDFIXVALUES` as `kind=T` and `CREATE DATA ... TYPE (lv_type)` (unwrapped)
+     succeeds in isolation.
+  2. Deployed the fix to the real `ZCL_VSP_RFC_SERVICE` (transport `S4DK928661`), activated clean.
+  3. `CALL_RFC` still failed identically — traced to the WebSocket `ZADT_VSP` session being **persistent**
+     across MCP tool calls within one `vsp.exe` process lifetime (`internal/mcp/handlers_debugger.go`'s
+     `ensureDebugWSClient` reuses `s.debugWSClient` while `IsConnected()`), and that session's ABAP roll
+     area had `ZCL_VSP_RFC_SERVICE` loaded from *before* the activation — a known SAP behavior where an
+     already-loaded class pool inside a long-running session context is not guaranteed to re-resolve to a
+     newly activated version until the session/roll-area restarts. This is a session-caching artifact, not
+     a defect in the fix.
+  4. Reproduced the *complete* real call (all IMPORT/EXPORT/TABLES parameters `DDIF_FIELDINFO_GET` actually
+     has, built exactly as `handle_call` builds them) via `ExecuteABAP`, which runs in a fresh roll area each
+     time — succeeded (`FULL_CALL_OK:subrc=0`), proving the fix correct independent of the stale WS session.
+  5. After the user restarted Claude Desktop (spawning a fresh `vsp.exe` and thus a fresh WebSocket
+     connection/session), repeated the original real `CALL_RFC` call — **succeeded**: `subrc: 0`,
+     `DFIES_TAB` (the old, unwrapped-structure branch) returned all 425 real `BSEG` field rows with no
+     regression, `FIXED_VALUES` (the new, table-type branch) returned `[]` correctly instead of erroring.
+- **Practical implication for future ZCL_VSP_RFC_SERVICE/ZADT_VSP edits**: a code change to a class used by
+  the WebSocket domain may need the WS session (i.e. a `vsp.exe` restart, same as any other binary/ABAP
+  redeploy — see "Deploying a local build for live testing" below) recycled before it's observable through
+  `CALL_RFC`/`RFC_SEARCH`/`RFC_METADATA`, even though the ADT-side activation itself succeeded immediately.
+  Worth remembering the next time a live-verification "didn't take effect" — check for this before assuming
+  the fix itself is wrong.
+- Files: `src/zcl_vsp_rfc_service.clas.abap`, `embedded/abap/zcl_vsp_rfc_service.clas.abap` (`create_table_data`
+  method only — confirmed byte-identical between the two files for this specific hunk; the two files have
+  unrelated pre-existing drift elsewhere, noted by code review but out of scope for this fix, see below).
+- Code-reviewed: 0 CRITICAL/HIGH/MEDIUM. 2 LOW (both informational, neither fixed): (1) `src/` and
+  `embedded/abap/` have ~74–233 lines of pre-existing drift *outside* this method (predates this session —
+  class-name casing, blank lines, `ZCL_VSP_TADIR_MOVE` vs `ZADT_CL_TADIR_MOVE`, and three whole methods present
+  only in `embedded/abap/`) — a separate sync task, not introduced or worsened by this fix. (2) the new RTTI
+  block uses classic `CALL METHOD ... EXCEPTIONS` syntax while the rest of the class calls
+  `cl_abap_typedescr` functionally (`DATA(x) = ...describe_by_data(...)`) — likely unavoidable since
+  `describe_by_name` has no functional form with class-based exceptions, not a real inconsistency.
+- No ABAP Unit tests (matches this class's existing pattern — no tests exist for it, verification is always
+  manual against live SAP, as documented in 2h/2m/2v above).
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
