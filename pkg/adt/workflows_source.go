@@ -23,6 +23,13 @@ type GetSourceOptions struct {
 	Parent  string // Function group name (required for FUNC type)
 	Include string // Class include type: definitions, implementations, macros, testclasses (optional for CLAS type)
 	Method  string // Method name for method-level source extraction (optional for CLAS type)
+	// NoCache skips the source cache lookup and forces a fresh read from SAP.
+	// Set by callers asking for include_hash: a hash computed from a stale
+	// cached read would not actually be the version currently on SAP, which
+	// defeats the point of a caller establishing a version baseline before a
+	// guarded write (PR #191 port). The cache is still refreshed afterwards,
+	// so this does not disable caching for later plain reads.
+	NoCache bool
 }
 
 // GetSource is a unified tool for reading ABAP source code across different object types.
@@ -63,8 +70,10 @@ func (c *Client) GetSource(ctx context.Context, objectType, name string, opts *G
 		include = opts.Include
 		parent = opts.Parent
 	}
-	if cached, ok := c.sourceCache.get(objectType, name, method, include, parent); ok {
-		return cached, nil
+	if !opts.NoCache {
+		if cached, ok := c.sourceCache.get(objectType, name, method, include, parent); ok {
+			return cached, nil
+		}
 	}
 
 	source, err := c.getSourceUncached(ctx, objectType, name, opts)
@@ -188,20 +197,27 @@ type WriteSourceOptions struct {
 	Transport   string          // Transport request number
 	Method      string          // For CLAS only: update only this method (source must be METHOD...ENDMETHOD block)
 	Parent      string          // For FUNC: function group name (required)
+	// ExpectedSourceHash is the SourceHash returned by GetSource. When supplied
+	// for an update, VSP re-reads the source after taking the write lock and
+	// refuses to overwrite a version changed since that read.
+	ExpectedSourceHash string
 }
 
 // WriteSourceResult represents the result of WriteSource operation
 type WriteSourceResult struct {
-	Success      bool                `json:"success"`
-	ObjectType   string              `json:"objectType"`
-	ObjectName   string              `json:"objectName"`
-	ObjectURL    string              `json:"objectUrl"`
-	Mode         string              `json:"mode"`             // "created" or "updated"
-	Method       string              `json:"method,omitempty"` // Method name if method-level update
-	SyntaxErrors []SyntaxCheckResult `json:"syntaxErrors,omitempty"`
-	Activation   *ActivationResult   `json:"activation,omitempty"`
-	TestResults  *UnitTestResult     `json:"testResults,omitempty"` // For CLAS with TestSource
-	Message      string              `json:"message,omitempty"`
+	Success            bool                `json:"success"`
+	ObjectType         string              `json:"objectType"`
+	ObjectName         string              `json:"objectName"`
+	ObjectURL          string              `json:"objectUrl"`
+	Mode               string              `json:"mode"`             // "created" or "updated"
+	Method             string              `json:"method,omitempty"` // Method name if method-level update
+	SyntaxErrors       []SyntaxCheckResult `json:"syntaxErrors,omitempty"`
+	Activation         *ActivationResult   `json:"activation,omitempty"`
+	TestResults        *UnitTestResult     `json:"testResults,omitempty"` // For CLAS with TestSource
+	ExpectedSourceHash string              `json:"expectedSourceHash,omitempty"`
+	TargetSourceHash   string              `json:"targetSourceHash,omitempty"`
+	VerifiedSourceHash string              `json:"verifiedSourceHash,omitempty"`
+	Message            string              `json:"message,omitempty"`
 }
 
 // writeSourceObjectURL resolves the ADT object URL for a WriteSource target
@@ -304,6 +320,15 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 		return result, nil
 	}
 
+	// This fork has no dedicated writeSourceFunctionModule dispatch (FUNC is
+	// handled inline in writeSourceCreate/writeSourceUpdate below), so the
+	// guard upstream places at the entry to that function is placed here
+	// instead, at the same point FUNC's other preconditions are checked.
+	if objectType == "FUNC" && opts.ExpectedSourceHash != "" {
+		result.Message = "expected_source_hash is not supported for function-module WriteSource; read and update the complete module through its dedicated workflow"
+		return result, nil
+	}
+
 	// Determine if the object exists. Needed regardless of mode: Upsert uses it
 	// to pick create-vs-update, and explicit Update/Create use it to validate
 	// the caller's requested mode against reality (issue: explicit Update always
@@ -356,6 +381,24 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 		result.Message = fmt.Sprintf("Object %s already exists (use mode=update or mode=upsert)", name)
 		return result, nil
 	}
+	// Decision A (PR #191 port): upstream bundles an unrelated change into this
+	// same check (`opts.Mode == WriteModeUpsert && !objectExists`), letting an
+	// explicit update through even when the object does not exist yet. This
+	// fork already fixed the underlying objectExists-computation bug that
+	// motivated that upstream change (see CLAUDE.md 2f) via a different,
+	// narrower fix, so the check below stays exactly as it already was —
+	// only the hash-guard validation is new here.
+	if opts.ExpectedSourceHash != "" {
+		if actualMode != WriteModeUpdate {
+			result.Message = "expected_source_hash is only valid when updating an existing object"
+			return result, nil
+		}
+		if opts.Method != "" {
+			result.Message = "expected_source_hash is not supported for method-level WriteSource; use a full-class read and update"
+			return result, nil
+		}
+		ctx = withExpectedSourceHash(ctx, opts.ExpectedSourceHash)
+	}
 	if actualMode == WriteModeUpdate && !objectExists {
 		result.Message = fmt.Sprintf("Object %s does not exist (use mode=create or mode=upsert)", name)
 		return result, nil
@@ -368,11 +411,51 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 		writeResult, writeErr = c.writeSourceCreate(ctx, objectType, name, source, opts)
 	} else {
 		writeResult, writeErr = c.writeSourceUpdate(ctx, objectType, name, source, opts)
+		// Decision F (PR #191 port): verify inline here, inside the update
+		// branch, rather than upstream's wrapper around the update call — this
+		// falls through to the cache-invalidation tail below, which upstream
+		// does not have.
+		if writeErr == nil && opts.ExpectedSourceHash != "" && writeResult != nil && writeResult.Success {
+			writeResult, writeErr = c.verifyWriteSourceResult(ctx, writeResult, source, opts)
+		}
 	}
 	if writeResult != nil && writeResult.Success {
 		c.sourceCache.InvalidateByName(name)
 	}
 	return writeResult, writeErr
+}
+
+// verifyWriteSourceResult performs the post-activation half of an explicit
+// versioned update. A successful PUT is not enough: SAP can materialise source
+// differently or activation can leave a different active version behind.
+func (c *Client) verifyWriteSourceResult(
+	ctx context.Context,
+	result *WriteSourceResult,
+	targetSource string,
+	opts *WriteSourceOptions,
+) (*WriteSourceResult, error) {
+	result.ExpectedSourceHash = opts.ExpectedSourceHash
+	result.TargetSourceHash = SourceHash(targetSource)
+	if result.ObjectURL == "" {
+		result.Success = false
+		result.Message = "Source was written and activated, but post-write verification has no object URL. Do not retry blindly."
+		return result, nil
+	}
+	resp, err := c.transport.Request(ctx, result.ObjectURL+"/source/main", &RequestOptions{
+		Method: "GET", Accept: "text/plain",
+	})
+	if err != nil {
+		result.Success = false
+		result.Message = fmt.Sprintf("Source was written and activated, but post-write verification could not read it: %v. Do not retry blindly.", err)
+		return result, nil
+	}
+	result.VerifiedSourceHash = SourceHash(string(resp.Body))
+	if result.VerifiedSourceHash != result.TargetSourceHash {
+		result.Success = false
+		result.Message = fmt.Sprintf("Source was written and activated, but post-write verification differs (target %s, actual %s). Do not retry blindly.", result.TargetSourceHash, result.VerifiedSourceHash)
+		return result, nil
+	}
+	return result, nil
 }
 
 // writeSourceCreate handles creation workflow

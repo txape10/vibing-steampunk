@@ -564,6 +564,81 @@ the code permanently — it is the fix, not a placeholder.
 - `go build ./...` clean; full suite green (`go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)`).
   `-race` unavailable in this environment (CGO disabled, same constraint as `pkg/cache`/`cmd/vsp`).
 
+### 2x. Ported upstream PR #191 — optimistic-concurrency guard via source hash, `SOURCE_DRIFT` (2026-09-09)
+- **The feature**: `GetSource(include_hash=true)` returns `{source, sourceHash}` (SHA-256 over the source,
+  canonicalized CRLF→LF and trailing-newline-trimmed so ADT's own materialization differences don't count
+  as drift). Passing that hash back as `expected_source_hash` to `WriteSource`, `EditSource`,
+  `DeployFromFile`, or `ImportFromFile` makes the write conditional: after the MODIFY lock is acquired,
+  VSP re-reads the source **inside that same lock window** (stateful — critical, see below) and compares
+  hashes; a mismatch aborts with a `*SourceDriftError` before any PUT is sent. A successful guarded write
+  also reports `targetSourceHash`/`verifiedSourceHash` from a post-activation read-back; a mismatch there
+  flips `Success` to `false` with an explicit "Do not retry blindly" message rather than silently accepting
+  whatever SAP actually materialized.
+- **Why the pre-write re-read has to be stateful**: this is exactly the family of session-affinity bugs
+  this project has repeatedly hit (#91/#132/#133/#168/#169, see 1./2t/2w above) — any stateless hop between
+  LOCK and the write that consumes its handle retires the ADT session and turns the eventual PUT into a 423.
+  `verifyExpectedSourceHash` (`pkg/adt/source_hash.go`) sends its GET with `Stateful: true` for this reason;
+  the post-activation verification read, by contrast, runs *after* UNLOCK and is deliberately non-stateful —
+  the lock window is already closed by then, so there is nothing left to protect.
+- **Single-use expectation**: the hash to check is stored on the context (`withExpectedSourceHash`) as a
+  `sourceHashExpectation` guarded by a mutex + `used` bool, consumed by the *first* source write in a
+  workflow. This matters for `WriteSource(CLAS, ..., TestSource: "...")`: the main class body write consumes
+  the expectation, so the optional follow-up test-include update (a different, unrelated source) does not
+  get compared against the class body's hash. Pinned directly by
+  `TestVerifyExpectedSourceHash_ConsumedOnlyOnce` (`pkg/adt/source_hash_test.go`).
+- **Six deliberate deviations from upstream's literal diff**, all because this fork's structure differs
+  from upstream's (planned before implementation, not discovered after):
+  - **A** — upstream bundles an unrelated behavior change into the same `WriteSource` validation line this
+    PR touches (`opts.Mode == WriteModeUpsert && !objectExists`, loosening explicit-update-on-nonexistent
+    handling). This fork already fixed the underlying bug that motivated it, differently (2f above) — so
+    that line was left exactly as it already was; only the new hash-guard validation was added next to it.
+  - **B** — this fork has no `writeSourceFunctionModule` dispatch (FUNC is handled inline in
+    `writeSourceCreate`/`writeSourceUpdate`), so `expected_source_hash` is rejected for FUNC at its other
+    precondition checks in `WriteSource` itself (alongside the `Parent` requirement), not at the entry to a
+    dedicated function upstream has and this fork doesn't. Pinned by
+    `TestWriteSource_FUNC_RejectsExpectedSourceHash`.
+  - **C** — this fork's `buildSourceURL` takes 2 args (objType, name), not upstream's 3-arg FUNC-capable
+    version; not extended for this PR. Function-module file deploys already couldn't resolve a source URL
+    through this same helper before this port (a pre-existing gap) — left untouched, not this PR's problem
+    to fix.
+  - **D** — `SourceHash`'s CRLF→LF canonicalization reuses this fork's existing `normalizeLineEndings`
+    (`workflows_edit.go`) instead of duplicating `strings.ReplaceAll` inline as upstream does.
+  - **E** — the two HTTP-level drift tests (`TestUpdateSourceRejectsDriftBeforePut`,
+    `TestUpdateSourceAcceptsMatchingVersionAndWrites`) were reimplemented against this fork's own
+    `newStubbedClient`/`adtRecorder` harness (`session_affinity_test.go`) instead of upstream's raw
+    `httptest.NewServer`, so they read like the rest of the lock-window/session-affinity suite.
+  - **F** — `verifyWriteSourceResult` is invoked inline inside `WriteSource`'s update branch (not as a
+    wrapper around the update call the way upstream structures it), so it falls through to the shared
+    `sourceCache.InvalidateByName` tail this fork has and upstream doesn't.
+- **Two MEDIUM findings from code review, fixed same session** (0 CRITICAL/HIGH from the start):
+  - `GetSource(include_hash=true)` could serve a hash computed from a stale `sourceCache` entry (10-minute
+    TTL) as if it were a fresh baseline — safe (the pre-write re-verify still catches real drift, so this
+    never risked a silent overwrite) but confusing (a `SOURCE_DRIFT` that's really a caching artifact, not a
+    concurrent edit). Fixed with a new `GetSourceOptions.NoCache` field, set from `include_hash` in
+    `handleGetSource` — forces a fresh read for the hash baseline while leaving the cache itself, and plain
+    reads, untouched (the fresh value still repopulates the cache afterward).
+  - Insufficient test coverage for the single-use expectation mechanism and the FUNC guard. Added
+    `TestVerifyExpectedSourceHash_ConsumedOnlyOnce` (unit-level, direct — deliberately not a full
+    `CLAS`+`TestSource` end-to-end stub, which would need a heavier multi-endpoint harness for a property
+    this pins just as precisely) and `TestWriteSource_FUNC_RejectsExpectedSourceHash`. The post-activation
+    verification-mismatch paths (`verifyWriteSourceResult`, and the equivalent blocks in
+    `EditSourceWithOptions`/`UpdateFromFileWithOptions`) remain without dedicated tests — noted here as a
+    gap, not fixed, matching this project's own convention of recording deferred coverage rather than
+    silently leaving it undiscoverable.
+- Files: `pkg/adt/source_hash.go` (new), `pkg/adt/source_hash_test.go` (new), `pkg/adt/crud.go`
+  (`UpdateSource`, `UpdateClassInclude`), `pkg/adt/workflows_edit.go` (`EditSourceOptions`/
+  `EditSourceResult`, post-activation verify), `pkg/adt/workflows_source.go` (`WriteSourceOptions`/
+  `WriteSourceResult`, `GetSourceOptions.NoCache`, `GetSource`, FUNC/method guards, `verifyWriteSourceResult`),
+  `pkg/adt/workflows_deploy.go` (`DeployResult`, `DeployFromFileOptions`, `UpdateFromFile`→wrapper +
+  `UpdateFromFileWithOptions`, `DeployFromFile`→wrapper + `DeployFromFileWithOptions`),
+  `internal/mcp/handlers_source.go` (`GetSource`/`WriteSource` routing, tool schemas, handlers),
+  `internal/mcp/handlers_fileio.go` (`handleDeployFromFile`, `handleEditSource`),
+  `internal/mcp/tools_register.go` (`DeployFromFile`/`EditSource` tool schemas), `MCP_USAGE.md`,
+  `README_TOOLS.md`.
+- `go build ./...` clean; full suite green (`go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)`).
+  Not yet live-verified against the real SAP system — this port has not been exercised against a live
+  connection in this session.
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)

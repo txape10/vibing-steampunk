@@ -47,8 +47,11 @@ func (s *Server) handleDeployFromFile(ctx context.Context, request mcp.CallToolR
 	if t, ok := request.GetArguments()["transport"].(string); ok {
 		transport = t
 	}
+	expectedSourceHash, _ := request.GetArguments()["expected_source_hash"].(string)
 
-	result, err := s.adtClient.DeployFromFile(ctx, filePath, packageName, transport)
+	result, err := s.adtClient.DeployFromFileWithOptions(ctx, filePath, packageName, transport, &adt.DeployFromFileOptions{
+		ExpectedSourceHash: expectedSourceHash,
+	})
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("DeployFromFile failed: %v", err)), nil
 	}
@@ -242,14 +245,16 @@ func (s *Server) handleEditSource(ctx context.Context, request mcp.CallToolReque
 	if t, ok := request.GetArguments()["transport"].(string); ok {
 		transport = t
 	}
+	expectedSourceHash, _ := request.GetArguments()["expected_source_hash"].(string)
 
 	opts := &adt.EditSourceOptions{
-		ReplaceAll:      replaceAll,
-		SyntaxCheck:     syntaxCheck,
-		IgnoreWarnings:  ignoreWarnings,
-		CaseInsensitive: caseInsensitive,
-		Method:          method,
-		Transport:       transport,
+		ReplaceAll:         replaceAll,
+		SyntaxCheck:        syntaxCheck,
+		IgnoreWarnings:     ignoreWarnings,
+		CaseInsensitive:    caseInsensitive,
+		Method:             method,
+		Transport:          transport,
+		ExpectedSourceHash: expectedSourceHash,
 	}
 
 	result, err := s.adtClient.EditSourceWithOptions(ctx, objectURL, oldString, newString, opts)
