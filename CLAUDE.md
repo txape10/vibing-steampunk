@@ -794,11 +794,18 @@ the code permanently — it is the fix, not a placeholder.
   `--transport-choice`), `cmd/vsp/devops.go` (impresión de `Transport`/`TransportNote` en 2 comandos CLI).
 - `go build ./...` clean; full suite green (`go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)`),
   incluidos los 15 tests nuevos (5 en `transport_choice_test.go` + 10 en `session_affinity_test.go`).
-- **Sin verificar en vivo todavía** — pendiente de sesión de verificación contra SAP real (mismo patrón que
-  #178/#191): crear un objeto de prueba en un paquete transportable sin `transport` explícito, confirmar que
-  aterriza en la orden abierta correcta (o crea una nueva si no hay ninguna), y probar `--transport-choice
-  off` para confirmar que restaura el comportamiento antiguo. Requiere decidir con el usuario qué paquete
-  transportable y qué orden usar antes de la prueba.
+- **Verificado en vivo (2026-09-09, misma sesión)** contra el sistema SAP real, vía el tool MCP desplegado:
+  `SAP(action="edit", target="PROG ZVSP_TST_TRCHOICE", params={"source": "...", "package": "ZABAP01",
+  "description": "..."})` — **sin `transport` explícito** — devolvió `transport: "S4DK928807"`,
+  `transportNote: "reused S4DK928807 (MM - Compras externas, reparto): it already holds objects of
+  ZABAP01"`. Confirmado leyendo la orden (`SAP(action="system", params={"type": "get_transport",
+  "transport": "S4DK928807"})`): `ZVSP_TST_TRCHOICE` aterrizó junto a `ZRSU_ENTRADA_MERCANCIAS_RESTO`, un
+  objeto de `ZABAP01` ya presente en esa misma orden — exactamente la rama "ya tiene el paquete" de
+  `chooseTransport` (`transportHoldsPackage`/TADIR) funcionando en producción, sin generar ninguna
+  "Generated Request for Change Recording". El programa throwaway fue borrado después de confirmar con el
+  usuario (`SAP(action="delete", target="OBJECT", params={"object_url": "..."})`). No se probó
+  `--transport-choice off` en vivo (mecanismo trivial — un solo `if` que corta `planTransport` antes de
+  cualquier llamada de red — ya cubierto por `TestResolveWriteTransportFor`/`TestChooseTransport_*`).
 
 ## Known Open Issues (Not Fixed)
 
