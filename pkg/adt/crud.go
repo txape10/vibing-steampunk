@@ -2102,15 +2102,17 @@ func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClass
 		return err
 	}
 
-	// 1. POST shell — creates the empty message class
+	// 1. POST shell — creates the empty message class. Namespace
+	// http://www.sap.com/adt/MessageClass (not /adt/mc) is live-verified —
+	// see the msagNS doc comment in client.go.
 	shellBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<mc:messageClass xmlns:mc="http://www.sap.com/adt/mc"
-                 xmlns:adtcore="http://www.sap.com/adt/core"
+<mc:messageClass xmlns:mc="%s"
+                 xmlns:adtcore="%s"
                  adtcore:name="%s" adtcore:type="MSAG/N"
                  adtcore:description="%s"
                  adtcore:language="%s" adtcore:masterLanguage="%s">
   <adtcore:packageRef adtcore:name="%s"/>
-</mc:messageClass>`, opts.Name, escapeXML(opts.Description), opts.Language, opts.Language, opts.Package)
+</mc:messageClass>`, msagNS, adtcoreNS, opts.Name, escapeXML(opts.Description), opts.Language, opts.Language, opts.Package)
 
 	q := url.Values{}
 	if opts.Transport != "" {
@@ -2130,7 +2132,16 @@ func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClass
 			return fmt.Errorf("locking for initial messages: %w", err)
 		}
 
-		mc := MessageClass{Name: opts.Name, Messages: opts.Messages}
+		// messageClassWriteBody, not MessageClass — see its doc comment in
+		// client.go for the live-verified shape (namespace, adtcore:-
+		// qualified name/description, mc:-qualified msgno/msgtext) this
+		// endpoint actually requires. Pass the real description (not "")
+		// so this PUT doesn't blank out what the shell POST just set —
+		// same risk WriteMessageClassTexts guards against for updates.
+		mc := newMessageClassWriteBody(opts.Name, opts.Description)
+		for _, m := range opts.Messages {
+			mc.Messages = append(mc.Messages, messageClassWriteMessage{Number: m.Number, Text: m.Text})
+		}
 		body, err := xml.Marshal(mc)
 		if err != nil {
 			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
@@ -2138,6 +2149,7 @@ func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClass
 			}
 			return fmt.Errorf("marshaling messages: %w", err)
 		}
+		body = append([]byte(xml.Header), body...)
 
 		putParams := url.Values{}
 		putParams.Set("lockHandle", lock.LockHandle)
@@ -2156,9 +2168,28 @@ func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClass
 			// its own lock (same defect as WriteMessageClassTexts, issue #91).
 			Stateful: true,
 		})
-		_ = c.UnlockObject(ctx, objectURL, lock.LockHandle) // best-effort
 		if putErr != nil {
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				return fmt.Errorf("writing initial messages: %w — %s", putErr, strandedLockAdvice(objectURL, unlockErr))
+			}
 			return fmt.Errorf("writing initial messages: %w", putErr)
+		}
+
+		// Confirm the write actually took effect before trusting the PUT's
+		// 2xx — this endpoint has been observed to answer 200 while silently
+		// persisting nothing (see verifyMessageClassWrite's doc comment in
+		// i18n.go, and the identical guard WriteMessageClassTexts applies to
+		// its own PUT against the same resource). Still inside the lock
+		// window, before unlock.
+		if verifyErr := c.verifyMessageClassWrite(ctx, objectURL, opts.Language, opts.Messages, nil); verifyErr != nil {
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				return fmt.Errorf("%w — %s", verifyErr, strandedLockAdvice(objectURL, unlockErr))
+			}
+			return verifyErr
+		}
+
+		if err := c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
+			return fmt.Errorf("initial messages written but unlock failed: %w", err)
 		}
 	}
 

@@ -273,7 +273,7 @@ func TestClient_WriteMessageClassTexts_EnforcesAllowedPackages(t *testing.T) {
 	transport := NewTransportWithClient(cfg, mock)
 	client := NewClientWithTransport(cfg, transport)
 
-	err := client.WriteMessageClassTexts(context.Background(), "ZTEST_MC", "EN", nil, "lock123", "")
+	err := client.WriteMessageClassTexts(context.Background(), "ZTEST_MC", "EN", nil, nil, "lock123", "")
 	if err == nil {
 		t.Fatal("WriteMessageClassTexts should fail when object package is not allowed")
 	}

@@ -900,17 +900,164 @@ func parseSRVBMetadata(data []byte) (*ServiceBinding, error) {
 
 // --- Message Class Operations ---
 
+// MessageClass XML namespaces, confirmed 2026-09-08 by reading a real GET
+// response (message class "00", standard on every system) over
+// VSP_HTTP_TRACE against the SAP system this project connects to. The
+// pre-existing assumption this replaced — http://www.sap.com/adt/mc,
+// lowercase "messageclass"/"messages", unprefixed msgno/msgtext attributes —
+// was never actually live-verified and turned out wrong on every count:
+//
+//	<mc:messageClass adtcore:name="00" adtcore:description="..." ...
+//	                  xmlns:mc="http://www.sap.com/adt/MessageClass"
+//	                  xmlns:adtcore="http://www.sap.com/adt/core">
+//	  <mc:messages mc:msgno="001" mc:msgtext="..." .../>
+//	  ...
+//	</mc:messageClass>
+//
+// i.e. the root element is camelCase "messageClass" in namespace
+// .../adt/MessageClass (capital M, different path from "/adt/mc"); the
+// class's own name/description are adtcore:-namespaced attributes on the
+// root (namespace http://www.sap.com/adt/core); and each message's msgno/
+// msgtext are themselves namespaced (mc:msgno, mc:msgtext) — plain
+// unqualified attributes don't count as the same attribute under XML
+// namespace rules, confirmed by reproducing the failure: a PUT with bare
+// msgno="001" (right value, no namespace prefix) got HTTP 400
+// ExceptionResourceBadRequest "Falta número de mensaje" (message number
+// missing) even though the attribute was present, spelled correctly, and had
+// the right value.
+const (
+	msagNS    = "http://www.sap.com/adt/MessageClass"
+	adtcoreNS = "http://www.sap.com/adt/core"
+)
+
 // MessageClassMessage represents a single message in a message class
 type MessageClassMessage struct {
 	Number string `xml:"msgno,attr" json:"number"`
 	Text   string `xml:"msgtext,attr" json:"text"`
 }
 
-// MessageClass represents an ABAP message class with all its messages
+// messageClassWriteMessage is the marshal-only, namespace-qualified form of
+// MessageClassMessage. See the msagNS doc comment: SAP's PUT endpoint treats
+// an unqualified msgno/msgtext attribute as absent, not merely as "not in the
+// expected namespace" — confirmed by reproducing the exact 400 this causes.
+//
+// The tags below use encoding/xml's "prefix:local,attr" form (no space
+// before the colon) rather than "namespace local,attr" (space-separated).
+// That distinction matters and was the second, more consequential live
+// finding of this session: with the namespace-URI form, Marshal auto-picks
+// its own prefix per namespace ("MessageClass:msgno" in one run) instead of
+// reproducing "mc:"/"adtcore:" literally. A PUT built that way returned
+// HTTP 200 — success — while silently persisting nothing, matching the
+// upstream analysis of CL_ADT_MC_RES_CONTROLLER=>DO_UPDATE: a body the
+// content handler can't fully map is discarded after a `CHECK lr_data IS NOT
+// INITIAL`, no error raised. This literal-prefix form is upstream's own fix
+// for the same two issues (oisee/vibing-steampunk commit 4a9e01f0,
+// 2026-08-20, "message classes are writable again") — ported here after
+// finding it independently on the read side and confirming the write side
+// still had this exact gap: the messageClassWrite type upstream shipped
+// hard-codes "mc:"/"adtcore:" as literal tag text for exactly this reason.
+// Upstream's own commit notes the shape came from reading a live message
+// class (settling the namespace, which this project's own live GET also
+// confirmed independently).
+//
+// UPDATE, same session: this exact literal-prefix body — byte-for-byte the
+// shape a live GET returns, confirmed by diffing the marshalled output
+// against a captured GET response before sending it — was then PUT against
+// this project's own SAP system and STILL did not persist the message: 200
+// OK, empty response body, and an immediate GET showed no <mc:messages>
+// child at all. So the namespace/prefix shape is settled (two independent
+// live findings — the 400 that named it, and this 200 that no longer
+// complains about it) but is NOT sufficient on its own; something else about
+// this PUT is still wrong, silently. Upstream's own fix (4a9e01f0) has never
+// been confirmed against a live system either — its commit message only
+// claims the *read* shape was confirmed live, not a live write.
+//
+// Leading hypothesis, not yet tested: the live GET response links each
+// message to its own sub-resource — <atom:link
+// href="/sap/bc/adt/messageclass/{name}/messages/{msgno}"
+// rel=".../relations/messageclasses/messages" .../> — which a REST-shaped
+// ADT resource typically means is where that message is actually created or
+// updated (POST/PUT to the sub-resource), rather than by embedding it in the
+// parent messageclass PUT body at all. Not probed this session.
+type messageClassWriteMessage struct {
+	Number string `xml:"mc:msgno,attr"`
+	Text   string `xml:"mc:msgtext,attr"`
+}
+
+// messageClassDeletedMessage identifies one message to remove from a class by
+// number. SAP's message class resource only deletes messages that arrive in
+// this separate collection on the PUT body — a number simply absent from
+// Messages is left untouched, not deleted (see WriteMessageClassTexts).
+//
+// The element name "deletedmessage" and its lowercase casing are UNVERIFIED
+// against a live SAP system — carried over from the upstream issue's
+// description of CL_ADT_MC_RES_CONTROLLER=>DO_UPDATE (tt_deletedmessage), not
+// read directly off this project's own system, unlike the messages shape
+// above. Delete support does not exist yet in upstream's own fix either
+// (issue #161, still open there) — this is this fork's own addition, still
+// resting on the same guess it always was. The namespace-qualified msgno
+// attribute follows the messages convention by analogy, since an unqualified
+// one is now confirmed to read as absent. Confirm the element name itself
+// with a live PUT before relying on this to actually delete a message.
+type messageClassDeletedMessage struct {
+	Number string `xml:"mc:msgno,attr"`
+}
+
+// MessageClass represents an ABAP message class with all its messages, as
+// read back from SAP. It deliberately carries no XMLName: encoding/xml
+// ignores the root element name and namespace on Unmarshal for a struct with
+// no XMLName field, and its Number/Text/Name/Description fields carry no
+// namespace on their attr tags either — Go's Unmarshal matches an attribute
+// by local name regardless of the namespace it actually arrived in, so this
+// stays tolerant of exactly the msagNS/adtcoreNS-qualified attributes SAP's
+// real GET response uses without needing to spell that out here. Do not add
+// an XMLName or namespace-qualify these tags: see messageClassWriteBody for
+// why the write side needs that precision and this read-only type must not.
 type MessageClass struct {
 	Name        string                `xml:"name,attr" json:"name"`
-	Description string                `xml:"description,attr" json:"description"`
+	Description string                `xml:"description,attr,omitempty" json:"description,omitempty"`
 	Messages    []MessageClassMessage `xml:"messages" json:"messages"`
+}
+
+// messageClassWriteBody is the marshal-only shape of a message class PUT
+// body. The root element/namespace and the adtcore:/mc: prefixes are
+// live-verified as the shape ADT's message class resource expects (this
+// project's own SAP system, 2026-09-08, and independently upstream via a
+// live GET, per the doc comment on messageClassWriteMessage). Whether this
+// exact body actually persists a message on PUT is NOT yet confirmed by
+// either project — see WriteMessageClassTexts's doc comment for the
+// live-reproduced silent-no-op this is meant to fix, and
+// verifyMessageClassWrite for the safety net that surfaces it as an error
+// instead of a false "success" until it is.
+//
+// It is a separate type from MessageClass on purpose: giving MessageClass
+// itself this same strict, namespaced shape would make Unmarshal
+// correspondingly strict and able to reject a GET response that doesn't
+// match exactly, regressing the two existing, already-working read paths
+// that share the type (GetMessageClass, GetMessageClassTexts). The
+// deletedmessage element name is the one piece still unverified — see
+// messageClassDeletedMessage.
+type messageClassWriteBody struct {
+	XMLName      xml.Name                     `xml:"mc:messageClass"`
+	XMLNSmc      string                       `xml:"xmlns:mc,attr"`
+	XMLNSadtcore string                       `xml:"xmlns:adtcore,attr"`
+	Name         string                       `xml:"adtcore:name,attr"`
+	Description  string                       `xml:"adtcore:description,attr,omitempty"`
+	Messages     []messageClassWriteMessage   `xml:"mc:messages"`
+	Deleted      []messageClassDeletedMessage `xml:"mc:deletedmessage,omitempty"`
+}
+
+// newMessageClassWriteBody fills in the two xmlns attributes so every call
+// site builds a valid body without repeating the namespace constants —
+// forgetting them silently produces empty xmlns:mc=""/xmlns:adtcore=""
+// attributes rather than a compile error, since Go can't require they be set.
+func newMessageClassWriteBody(name, description string) messageClassWriteBody {
+	return messageClassWriteBody{
+		XMLNSmc:      msagNS,
+		XMLNSadtcore: adtcoreNS,
+		Name:         name,
+		Description:  description,
+	}
 }
 
 // GetMessageClass retrieves all messages from an ABAP message class.

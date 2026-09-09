@@ -507,7 +507,50 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
   These exercise the exact code paths this pass touched (`crud.go`'s `CreateTable` unlock-before-activation
   fix, `workflows_edit.go`'s already-covered path) end-to-end on the real system.
 
+### 2v. MSAG/SE91 message-class bugs — 4 fixed, 1 closed as a permanent known limitation (2026-09-08/09)
+Four bugs in the `SAP(action="edit"/"read", target="MSAG ...")` path fixed and code-reviewed this session:
+dead/incorrect MCP tool schema for `WriteMessageClassTexts`, wrong XML namespace on read
+(`http://www.sap.com/adt/MessageClass`, not `/adt/mc`), missing `edit MSAG` routing, and no delete-message
+support. Files: `pkg/adt/client.go`, `pkg/adt/i18n.go`, `pkg/adt/crud.go`, `internal/mcp/handlers_i18n.go`,
+`internal/mcp/handlers_source.go`, `internal/mcp/tools_register.go`, `internal/mcp/handlers_help.go`, plus
+new/updated tests (`pkg/adt/i18n_test.go`, `pkg/adt/session_affinity_test.go`,
+`internal/mcp/handlers_source_msag_test.go`, `internal/mcp/server_test.go`).
+
+A 5th, deeper problem was investigated exhaustively and then **closed as a permanent known limitation, not
+a bug to keep chasing** — see "`WriteMessageClassTexts`/`CreateMessageClass`" under Known Open Issues below
+and the full write-up in `docs/message-class-write-investigation.md`: writing message text does not persist
+on this SAP system, even with the correct namespace/shape confirmed live, and the last remaining avenue
+(Eclipse ADT traffic capture via Wireshark) is blocked on IT and not worth keeping this task open for.
+`verifyMessageClassWrite` (the guard that turns SAP's silent false-success into an explicit error) stays in
+the code permanently — it is the fix, not a placeholder.
+
 ## Known Open Issues (Not Fixed)
+
+### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
+- **Symptom**: PUT to `/sap/bc/adt/messageclass/{name}` with the live-confirmed correct namespace
+  (`http://www.sap.com/adt/MessageClass`), root element (`mc:messageClass`), and literal `mc:`/`msg:` prefix
+  technique returns `200 OK`, but the message text is never actually saved — an immediate read-back (even
+  inside the same lock window) shows it empty.
+- **Root cause: not found.** Every direct-experimentation avenue was exhausted this session: the parent PUT
+  in two independently-verified XML shapes; all three lock/write variants against the per-message
+  sub-resource (parent-lock → 423, sub-resource `MODIFY`-lock → phantom lock accepted by LOCK but rejected
+  by PUT/UNLOCK, sub-resource `INSERT`-lock → real lock but no working create endpoint, 404); and
+  `If-Match`/`accessMode` HTTP precondition variants on the parent PUT (both divert SAP's generic REST
+  framework into an unrelated error branch). The only avenue left — capturing real Eclipse ADT traffic via
+  Wireshark + `SSLKEYLOGFILE` — was blocked on IT enabling the Npcap capture driver, with no committed date.
+- **Decision (user, 2026-09-09): stop investigating.** Not worth keeping open indefinitely pending an IT
+  permission with no ETA. `verifyMessageClassWrite` (`pkg/adt/i18n.go`) stays active permanently — it
+  converts SAP's silent false-success into an explicit error, so callers never believe a message was saved
+  when it wasn't. This is the intended, final behavior, not a temporary guard to remove later.
+- Also discovered along the way and documented as a caution (not itself fixed — no working release
+  mechanism was found): **any** LOCK→PUT→UNLOCK→DELETE cycle against a message class leaves orphaned
+  `T100`/`T100A` enqueue entries (`ES_MSGSI`) behind even when every HTTP step reports success; RFC
+  `DEQUEUE_ES_MSGSI` in every variant tried did not release them — only manual `SM12` cleanup did.
+- **If this is ever revisited**: read `docs/message-class-write-investigation.md` first — it has the exact
+  HTTP statuses/SAP error messages for every attempt above, the two failed proxy-capture approaches already
+  tried (Fiddler via Eclipse network prefs, Fiddler via `eclipse.ini` JVM properties — both silently ignored
+  by ADT's own HTTP client), and the ready-to-resume Wireshark capture plan. Do not re-attempt the parent-PUT
+  or sub-resource variants listed above; they are confirmed dead ends, not untested ideas.
 
 ### `ListSQLTraces` (ST05 trace directory) — not implementable via ADT as originally designed — intentionally stubbed (2026-08-12)
 - **Root cause**: `/sap/bc/adt/st05/trace/directory` (with the correct Accept header,

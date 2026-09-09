@@ -119,32 +119,94 @@ func (c *Client) GetMessageClassTexts(ctx context.Context, name, lang string) ([
 }
 
 // WriteMessageClassTexts updates message class texts in a specific language.
-// Requires a lock handle from LockObject and optionally a transport request number.
-func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, texts []MessageClassMessage, lockHandle, transport string) error {
+// texts is an upsert by message number — a message omitted from both texts
+// and deleteNumbers is left unchanged. deleteNumbers removes messages by
+// number in the same PUT; pass nil if nothing is being deleted.
+//
+// STATUS as of this session's live testing against this project's own SAP
+// system: this PUT does not currently persist a message, on either of the
+// two independently-tried, namespace-correct body shapes (see
+// messageClassWriteMessage's doc comment for the second attempt and its
+// result). verifyMessageClassWrite below exists specifically because of
+// this — it turns SAP's silent no-op into a returned error, so a caller
+// never sees a false "success". Do not treat a nil error from this function
+// as proof the write is fixed until that read-back verification is removed
+// or this comment is.
+//
+// Requires a lock handle from LockObject and optionally a transport request
+// number. Callers that don't want to manage a lock handle themselves should
+// use WriteMessageClassTextsAutoLock instead.
+//
+// The Description SAP currently has is read first and echoed back on the PUT
+// rather than left empty: an empty description attribute reportedly
+// overwrites the message class's real short text (T100A/T100T) — see this
+// function's package doc and the struct comment on MessageClass. UNVERIFIED
+// against a live SAP system; confirm with a real PUT before relying on this
+// in production.
+//
+// That read runs its own request rather than calling the public
+// GetMessageClass, and deliberately after the lock, with Stateful: true: it
+// happens inside the caller's lock window, and GetMessageClass's normal GET
+// is stateless — a stateless hop between LOCK and this PUT would retire the
+// very session the lock handle is bound to (issue #91).
+func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, texts []MessageClassMessage, deleteNumbers []string, lockHandle, transport string) error {
 	name = strings.ToUpper(name)
 	lang = strings.ToUpper(lang)
+	path := fmt.Sprintf("/sap/bc/adt/messageclass/%s", url.PathEscape(strings.ToLower(name)))
 
 	// Unified mutation policy gate (op type + package + transport)
 	if err := c.checkMutation(ctx, MutationContext{
 		Op:        OpUpdate,
 		OpName:    "WriteMessageClassTexts",
-		ObjectURL: fmt.Sprintf("/sap/bc/adt/messageclass/%s", url.PathEscape(strings.ToLower(name))),
+		ObjectURL: path,
 		Transport: transport,
 	}); err != nil {
 		return err
 	}
 
-	// Build XML body
-	mc := MessageClass{
-		Name:     name,
-		Messages: texts,
+	// Echo the current description back rather than send an empty one — see
+	// the doc comment above. A failure here is not fatal to the write: worst
+	// case the description travels empty, same as before this fix.
+	//
+	// OverrideLanguage must match the PUT below: without it this GET reads
+	// the session/logon language, not lang, so translating a class into a
+	// language other than the session's would echo the description back in
+	// the wrong language and overwrite the real one — the same class of
+	// corruption this fix exists to prevent, just relocated from "empty" to
+	// "wrong language".
+	description := ""
+	if resp, err := c.transport.Request(ctx, path, &RequestOptions{
+		Method:           http.MethodGet,
+		Accept:           "application/vnd.sap.adt.mc.messageclass+xml",
+		OverrideLanguage: lang,
+		Stateful:         true,
+	}); err == nil {
+		var current MessageClass
+		if xml.Unmarshal(resp.Body, &current) == nil {
+			description = current.Description
+		}
+	}
+
+	// Build XML body. messageClassWriteBody, not MessageClass — see its doc
+	// comment for why the write shape needs literal mc:/adtcore: prefixes
+	// that the read type must not carry.
+	mc := newMessageClassWriteBody(name, description)
+	for _, m := range texts {
+		mc.Messages = append(mc.Messages, messageClassWriteMessage{Number: m.Number, Text: m.Text})
+	}
+	for _, num := range deleteNumbers {
+		mc.Deleted = append(mc.Deleted, messageClassDeletedMessage{Number: num})
 	}
 	body, err := xml.Marshal(mc)
 	if err != nil {
 		return fmt.Errorf("marshal message class XML: %w", err)
 	}
-
-	path := fmt.Sprintf("/sap/bc/adt/messageclass/%s", url.PathEscape(strings.ToLower(name)))
+	// An explicit XML prolog: upstream's own fix for this same defect sends
+	// one, and this project's write attempt without it is exactly the one
+	// that silently persisted nothing (see the doc comment on
+	// messageClassWriteMessage) — matching or not, there's no reason not to
+	// send what ADT's own real requests carry.
+	body = append([]byte(xml.Header), body...)
 
 	params := url.Values{}
 	params.Set("lockHandle", lockHandle)
@@ -166,6 +228,136 @@ func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, 
 	})
 	if err != nil {
 		return fmt.Errorf("write message class texts: %w", err)
+	}
+
+	// Read back and confirm the write actually took effect, rather than
+	// trusting the PUT's 2xx. Confirmed live 2026-09-08 against this
+	// project's own SAP system: a PUT shaped exactly like the one above
+	// (root element/namespace correct, msgno/msgtext namespace-qualified per
+	// the live-verified shape on messageClassWriteMessage) returned HTTP 200
+	// with an empty body, and a subsequent GET showed no message had been
+	// persisted at all — a silent no-op, not a reported failure. This
+	// matches the mechanism the upstream issue this fix is based on
+	// describes in CL_ADT_MC_RES_CONTROLLER=>DO_UPDATE: a body the content
+	// handler cannot fully map is discarded after a `CHECK lr_data IS NOT
+	// INITIAL`, with no error raised. The exact remaining gap in the shape
+	// above is unconfirmed (see messageClassWriteMessage's doc comment) —
+	// this check exists so that gap surfaces as an error instead of a false
+	// "success" while it's being narrowed down, the same class of fix this
+	// project has already applied to installers and other writes that used
+	// to report success without verifying the result.
+	if len(texts) > 0 || len(deleteNumbers) > 0 {
+		if verifyErr := c.verifyMessageClassWrite(ctx, path, lang, texts, deleteNumbers); verifyErr != nil {
+			return verifyErr
+		}
+	}
+
+	return nil
+}
+
+// verifyMessageClassWrite reads a message class back, inside the same lock
+// window (Stateful: true) as the PUT it is verifying, and confirms every
+// expected text and deletion actually landed. See WriteMessageClassTexts's
+// doc comment for why this exists: the PUT it follows has been observed to
+// report success while silently writing nothing.
+//
+// A failure to even read back is not itself reported as a write failure —
+// the PUT's own 2xx is the only signal available in that case, and this is a
+// best-effort safety net, not the source of truth.
+func (c *Client) verifyMessageClassWrite(ctx context.Context, path, lang string, texts []MessageClassMessage, deleteNumbers []string) error {
+	resp, err := c.transport.Request(ctx, path, &RequestOptions{
+		Method:           http.MethodGet,
+		Accept:           "application/vnd.sap.adt.mc.messageclass+xml",
+		OverrideLanguage: lang,
+		Stateful:         true,
+	})
+	if err != nil {
+		return nil
+	}
+	var after MessageClass
+	if xml.Unmarshal(resp.Body, &after) != nil {
+		return nil
+	}
+
+	byNumber := make(map[string]string, len(after.Messages))
+	for _, m := range after.Messages {
+		byNumber[m.Number] = m.Text
+	}
+
+	for _, want := range texts {
+		if got, ok := byNumber[want.Number]; !ok || got != want.Text {
+			return fmt.Errorf(
+				"write message class texts: PUT returned success but message %s does not have the expected text after read-back "+
+					"(got %q, want %q) — the write did not actually take effect", want.Number, got, want.Text)
+		}
+	}
+	for _, num := range deleteNumbers {
+		if _, stillThere := byNumber[num]; stillThere {
+			return fmt.Errorf(
+				"write message class texts: PUT returned success but message %s is still present after read-back — "+
+					"the delete did not actually take effect", num)
+		}
+	}
+	return nil
+}
+
+// WriteMessageClassTextsAutoLock updates message class texts, taking and
+// releasing its own lock within the call. Intended for callers that don't
+// manage lock handles themselves, such as the hyperfocused `edit MSAG` route
+// — see WriteMessageClassTexts for the handle-supplied low-level form this
+// wraps.
+func (c *Client) WriteMessageClassTextsAutoLock(ctx context.Context, name, lang string, texts []MessageClassMessage, deleteNumbers []string, transport string) (err error) {
+	name = strings.ToUpper(name)
+	objectURL := fmt.Sprintf("/sap/bc/adt/messageclass/%s", url.PathEscape(strings.ToLower(name)))
+
+	// Gate above the lock and mark the object so WriteMessageClassTexts's own
+	// checkMutation below skips the redundant networked package lookup
+	// inside the lock window — a stateless hop there would retire the
+	// session the lock handle is bound to (issue #91).
+	ctx, err = c.gateAndMark(ctx, MutationContext{
+		Op:        OpUpdate,
+		OpName:    "WriteMessageClassTexts",
+		ObjectURL: objectURL,
+		Transport: transport,
+	})
+	if err != nil {
+		return err
+	}
+
+	var lockResult *LockResult
+	lockResult, err = c.LockObject(ctx, objectURL, "MODIFY")
+	if err != nil {
+		return fmt.Errorf("failed to lock message class: %w", err)
+	}
+
+	// Ensure unlock. Detached from ctx's cancellation and given its own
+	// deadline (issue #91) — a failure that cancelled ctx would otherwise
+	// never send the compensating UNLOCK at all.
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lockResult.LockHandle); unlockErr != nil {
+				err = fmt.Errorf("%w — %s", err, strandedLockAdvice(objectURL, unlockErr))
+			}
+		}
+	}()
+
+	// Adopt transport from lock result when caller did not supply one, same
+	// as every other write path (issue #144/#91).
+	var effectiveTransport string
+	effectiveTransport, err = c.resolveWriteTransport(transport, lockResult.CorrNr, "WriteMessageClassTexts")
+	if err != nil {
+		return fmt.Errorf("transportable-edit check failed: %w", err)
+	}
+
+	if err = c.WriteMessageClassTexts(ctx, name, lang, texts, deleteNumbers, lockResult.LockHandle, effectiveTransport); err != nil {
+		return err
+	}
+
+	err = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
+	unlocked = true
+	if err != nil {
+		return fmt.Errorf("message class texts updated but unlock failed: %w", err)
 	}
 
 	return nil

@@ -2580,7 +2580,7 @@ func (s *Server) registerI18NTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("WriteMessageClassTexts") {
 		s.mcpServer.AddTool(mcp.NewTool("WriteMessageClassTexts",
-			mcp.WithDescription("Update message class texts in a specific language. Requires a lock handle from LockObject. Use for translating message class entries."),
+			mcp.WithDescription("Create, update or delete message class texts in a specific language. texts is an upsert by message number (a number omitted from both texts and delete_numbers is left unchanged); delete_numbers removes messages by number in the same call. Requires a lock handle from LockObject. Use for translating or editing message class entries."),
 			mcp.WithString("name",
 				mcp.Required(),
 				mcp.Description("Message class name"),
@@ -2588,6 +2588,21 @@ func (s *Server) registerI18NTools(shouldRegister func(string) bool) {
 			mcp.WithString("language",
 				mcp.Required(),
 				mcp.Description("ISO language code (e.g., EN, DE, FR)"),
+			),
+			mcp.WithArray("texts",
+				mcp.Description(`Messages to create or update, upsert by number, e.g. [{"number": "001", "text": "Enter a value"}]. Not required if delete_numbers covers every change.`),
+				mcp.Items(map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"number": map[string]interface{}{"type": "string", "description": "Message number, e.g. \"001\""},
+						"text":   map[string]interface{}{"type": "string", "description": "Message text"},
+					},
+					"required": []string{"number", "text"},
+				}),
+			),
+			mcp.WithArray("delete_numbers",
+				mcp.Description(`Message numbers to remove from the class, e.g. ["009"]. A number not listed here (and not in texts) is left untouched.`),
+				mcp.Items(map[string]interface{}{"type": "string"}),
 			),
 			mcp.WithString("lock_handle",
 				mcp.Required(),

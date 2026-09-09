@@ -102,24 +102,88 @@ func (s *Server) handleWriteMessageClassTexts(ctx context.Context, request mcp.C
 
 	transport, _ := request.GetArguments()["transport"].(string)
 
-	// Parse texts from arguments
-	textsRaw, ok := request.GetArguments()["texts"]
-	if !ok || textsRaw == nil {
-		return newToolResultError("texts is required"), nil
+	// texts is an upsert list; delete_numbers is the only way to actually
+	// remove a message. At least one of the two must carry something, or the
+	// call would be a no-op.
+	var texts []adt.MessageClassMessage
+	if textsRaw, ok := request.GetArguments()["texts"]; ok && textsRaw != nil {
+		textsJSON, err := json.Marshal(textsRaw)
+		if err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to parse texts: %v", err)), nil
+		}
+		if err := json.Unmarshal(textsJSON, &texts); err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to parse texts: %v", err)), nil
+		}
 	}
 
-	textsJSON, err := json.Marshal(textsRaw)
-	if err != nil {
-		return newToolResultError(fmt.Sprintf("Failed to parse texts: %v", err)), nil
+	var deleteNumbers []string
+	if deleteRaw, ok := request.GetArguments()["delete_numbers"]; ok && deleteRaw != nil {
+		deleteJSON, err := json.Marshal(deleteRaw)
+		if err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to parse delete_numbers: %v", err)), nil
+		}
+		if err := json.Unmarshal(deleteJSON, &deleteNumbers); err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to parse delete_numbers: %v", err)), nil
+		}
 	}
+
+	if len(texts) == 0 && len(deleteNumbers) == 0 {
+		return newToolResultError("at least one of texts or delete_numbers is required"), nil
+	}
+
+	err := s.adtClient.WriteMessageClassTexts(ctx, name, lang, texts, deleteNumbers, lockHandle, transport)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("WriteMessageClassTexts failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Message class %s texts updated successfully in language %s.", name, lang)), nil
+}
+
+// handleWriteMessageClassTextsAutoLock is the auto-locking counterpart of
+// handleWriteMessageClassTexts, for callers that don't manage lock handles
+// themselves — currently only the hyperfocused `edit MSAG` route
+// (routeSourceAction in handlers_source.go), since WriteSource itself has no
+// MSAG case.
+func (s *Server) handleWriteMessageClassTextsAutoLock(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	name, ok := request.GetArguments()["name"].(string)
+	if !ok || name == "" {
+		return newToolResultError("name is required"), nil
+	}
+
+	lang, ok := request.GetArguments()["language"].(string)
+	if !ok || lang == "" {
+		return newToolResultError("language is required"), nil
+	}
+
+	transport, _ := request.GetArguments()["transport"].(string)
 
 	var texts []adt.MessageClassMessage
-	if err := json.Unmarshal(textsJSON, &texts); err != nil {
-		return newToolResultError(fmt.Sprintf("Failed to parse texts: %v", err)), nil
+	if textsRaw, ok := request.GetArguments()["texts"]; ok && textsRaw != nil {
+		textsJSON, err := json.Marshal(textsRaw)
+		if err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to parse texts: %v", err)), nil
+		}
+		if err := json.Unmarshal(textsJSON, &texts); err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to parse texts: %v", err)), nil
+		}
 	}
 
-	err = s.adtClient.WriteMessageClassTexts(ctx, name, lang, texts, lockHandle, transport)
-	if err != nil {
+	var deleteNumbers []string
+	if deleteRaw, ok := request.GetArguments()["delete_numbers"]; ok && deleteRaw != nil {
+		deleteJSON, err := json.Marshal(deleteRaw)
+		if err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to parse delete_numbers: %v", err)), nil
+		}
+		if err := json.Unmarshal(deleteJSON, &deleteNumbers); err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to parse delete_numbers: %v", err)), nil
+		}
+	}
+
+	if len(texts) == 0 && len(deleteNumbers) == 0 {
+		return newToolResultError("at least one of texts or delete_numbers is required"), nil
+	}
+
+	if err := s.adtClient.WriteMessageClassTextsAutoLock(ctx, name, lang, texts, deleteNumbers, transport); err != nil {
 		return newToolResultError(fmt.Sprintf("WriteMessageClassTexts failed: %v", err)), nil
 	}
 

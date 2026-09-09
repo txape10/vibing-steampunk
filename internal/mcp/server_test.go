@@ -159,3 +159,71 @@ func TestDebuggerGetVariablesSchemaIncludesItems(t *testing.T) {
 		t.Fatalf("expected variable_ids.items.type to be 'string', got %v", items["type"])
 	}
 }
+
+// TestWriteMessageClassTextsSchemaIncludesTexts guards against the tool being
+// uncallable again: before this fix the registered schema had no "texts"
+// property at all, even though the handler required it — every call failed
+// with "texts is required" regardless of what the caller sent, because the
+// schema never offered the parameter in the first place.
+func TestWriteMessageClassTextsSchemaIncludesTexts(t *testing.T) {
+	cfg := &Config{
+		BaseURL:  "https://sap.example.com:44300",
+		Username: "testuser",
+		Password: "testpass",
+		Client:   "001",
+		Language: "EN",
+		Mode:     "expert", // WriteMessageClassTexts is not in the focused-mode whitelist
+	}
+
+	server := NewServer(cfg)
+	if server == nil || server.mcpServer == nil {
+		t.Fatal("server or MCP server is nil")
+	}
+
+	rawResponse := server.mcpServer.HandleMessage(context.Background(), []byte(`{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "tools/list",
+		"params": {}
+	}`))
+
+	response, ok := rawResponse.(mcp.JSONRPCResponse)
+	if !ok {
+		t.Fatalf("expected JSONRPCResponse, got %T", rawResponse)
+	}
+
+	var tools []mcp.Tool
+	switch result := response.Result.(type) {
+	case mcp.ListToolsResult:
+		tools = result.Tools
+	case *mcp.ListToolsResult:
+		tools = result.Tools
+	default:
+		t.Fatalf("expected ListToolsResult, got %T", response.Result)
+	}
+
+	var tool *mcp.Tool
+	for i := range tools {
+		if tools[i].Name == "WriteMessageClassTexts" {
+			tool = &tools[i]
+			break
+		}
+	}
+	if tool == nil {
+		t.Fatal("WriteMessageClassTexts tool not found")
+	}
+
+	for _, prop := range []string{"texts", "delete_numbers"} {
+		raw, ok := tool.InputSchema.Properties[prop]
+		if !ok {
+			t.Fatalf("%s property not found in WriteMessageClassTexts schema — the tool would be uncallable for that argument", prop)
+		}
+		schema, ok := raw.(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected %s schema to be map[string]interface{}, got %T", prop, raw)
+		}
+		if schema["type"] != "array" {
+			t.Fatalf("expected %s type to be 'array', got %v", prop, schema["type"])
+		}
+	}
+}

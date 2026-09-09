@@ -83,6 +83,27 @@ func (s *Server) routeSourceAction(ctx context.Context, action, objectType, obje
 				args[k] = v
 			}
 			return s.callHandler(ctx, s.handleEditSource, args)
+		case "MSAG":
+			// Message class texts: not a WriteSource type (there's no ABAP
+			// source to write), so route straight to the i18n writer instead
+			// of falling through to a "type unsupported" error that blames
+			// the object type rather than the missing route (issue #162).
+			args := map[string]any{
+				"name": objectName,
+			}
+			if v := getStringParam(params, "language"); v != "" {
+				args["language"] = v
+			}
+			if v, ok := params["texts"]; ok {
+				args["texts"] = v
+			}
+			if v, ok := params["delete_numbers"]; ok {
+				args["delete_numbers"] = v
+			}
+			if v := getStringParam(params, "transport"); v != "" {
+				args["transport"] = v
+			}
+			return s.callHandler(ctx, s.handleWriteMessageClassTextsAutoLock, args)
 		}
 	}
 

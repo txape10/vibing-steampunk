@@ -317,7 +317,7 @@ func TestWriteMessageClassTexts_PutStaysInTheLockSession(t *testing.T) {
 		t.Fatalf("LockObject: %v", err)
 	}
 	if err := client.WriteMessageClassTexts(ctx, "ZDEMO_MC", "EN",
-		[]MessageClassMessage{{Number: "001", Text: "hello"}}, lock.LockHandle, ""); err != nil {
+		[]MessageClassMessage{{Number: "001", Text: "hello"}}, nil, lock.LockHandle, ""); err != nil {
 		t.Fatalf("WriteMessageClassTexts: %v", err)
 	}
 
@@ -336,6 +336,132 @@ func TestWriteMessageClassTexts_PutStaysInTheLockSession(t *testing.T) {
 }
 
 // --- The one hop no config gates: the CSRF refetch mid-write ---
+
+// TestWriteMessageClassTextsAutoLock_StaysInTheLockSession is the auto-lock
+// counterpart of TestWriteMessageClassTexts_PutStaysInTheLockSession (issue
+// #162's edit MSAG gap): the package lookup gateAndMark performs happens
+// once, before the lock, and everything between LOCK and UNLOCK — including
+// the description-echo GET this fix added ahead of the PUT — stays stateful.
+func TestWriteMessageClassTextsAutoLock_StaysInTheLockSession(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "informationsystem/search"):
+			_, _ = io.WriteString(w, searchXMLFor(
+				"/sap/bc/adt/messageclass/zdemo_mc", "ZDEMO_MC", "$TMP"))
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithAllowedPackages("$TMP"))
+
+	err := client.WriteMessageClassTextsAutoLock(context.Background(), "ZDEMO_MC", "EN",
+		[]MessageClassMessage{{Number: "001", Text: "hello"}}, nil, "")
+	if err != nil {
+		t.Fatalf("WriteMessageClassTextsAutoLock: %v", err)
+	}
+
+	calls := rec.snapshot()
+	lockAt := indexOfCall(calls, isLock)
+	if lockAt < 0 {
+		t.Fatalf("expected a LOCK; trace:\n%v", calls)
+	}
+
+	// The package lookup must happen exactly once, before the lock — not
+	// repeated inside the window (that repeat is the #91 defect this whole
+	// file exists to catch).
+	searchCalls := 0
+	for _, c := range calls {
+		if strings.Contains(c.path, "informationsystem/search") {
+			searchCalls++
+		}
+	}
+	if searchCalls != 1 {
+		t.Errorf("expected exactly 1 package lookup, got %d; trace:\n%v", searchCalls, calls)
+		dumpCalls(t, calls)
+	}
+	if searchAt := indexOfCall(calls, func(c wireCall) bool {
+		return strings.Contains(c.path, "informationsystem/search")
+	}); searchAt >= lockAt {
+		t.Errorf("package lookup happened at or after the lock (index %d >= %d) — "+
+			"a stateless hop there retires the session the lock handle lives in", searchAt, lockAt)
+	}
+
+	unlockAt := indexOfCall(calls, isUnlock)
+	if unlockAt < 0 || unlockAt < lockAt {
+		t.Fatalf("expected an UNLOCK after the LOCK; trace:\n%v", calls)
+	}
+
+	putAt := indexOfCall(calls, func(c wireCall) bool {
+		return c.method == http.MethodPut && strings.Contains(c.path, "/messageclass/")
+	})
+	if putAt < 0 || putAt < lockAt || putAt > unlockAt {
+		t.Fatalf("expected the message class PUT between LOCK and UNLOCK; trace:\n%v", calls)
+	}
+	if got := calls[putAt].sessionType; got != "stateful" {
+		t.Errorf("message class PUT X-sap-adt-sessiontype = %q, want \"stateful\"", got)
+	}
+
+	assertWindowStateful(t, calls, lockAt, unlockAt)
+}
+
+// TestCreateMessageClass_ReleasesLockWhenVerifyFails exercises the branch
+// code review flagged as untested: CreateMessageClass's own verify-read-back
+// guard (mirroring WriteMessageClassTextsAutoLock's, added for the same
+// live-confirmed reason — this PUT has been observed to answer 200 while
+// persisting nothing) must release the lock and report the failure, not
+// leave the object locked or silently report success.
+func TestCreateMessageClass_ReleasesLockWhenVerifyFails(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/messageclass/"):
+			// The verify read-back: a message class with no messages at
+			// all — simulating the live-confirmed silent no-op where the
+			// PUT answers 200 but persists nothing.
+			w.Header().Set("Content-Type", "application/vnd.sap.adt.mc.messageclass+xml")
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><messageClass xmlns="`+msagNS+`"/>`)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+
+	err := client.CreateMessageClass(context.Background(), CreateMessageClassOptions{
+		Name:     "ZDEMO_MC",
+		Package:  "$TMP",
+		Language: "EN",
+		Messages: []MessageClassMessage{{Number: "001", Text: "hello"}},
+	})
+	if err == nil {
+		t.Fatal("expected CreateMessageClass to fail when the initial-messages write does not verify")
+	}
+	if !strings.Contains(err.Error(), "does not have the expected text") {
+		t.Errorf("expected a verify-failure error, got: %v", err)
+	}
+
+	calls := rec.snapshot()
+	lockAt := indexOfCall(calls, isLock)
+	if lockAt < 0 {
+		t.Fatalf("expected a LOCK for the initial-messages write; trace:\n%v", calls)
+	}
+	unlockAt := indexOfCall(calls, isUnlock)
+	if unlockAt < 0 || unlockAt < lockAt {
+		t.Errorf("expected the lock to be released after the verify failure; trace:\n%v", calls)
+		dumpCalls(t, calls)
+	}
+
+	activateAt := indexOfCall(calls, func(c wireCall) bool {
+		return strings.Contains(c.path, "/activation")
+	})
+	if activateAt >= 0 {
+		t.Errorf("did not expect Activate to run after a verify failure; trace:\n%v", calls)
+	}
+}
 
 func TestCSRFRefetchDuringStatefulWriteStaysStateful(t *testing.T) {
 	rec := &adtRecorder{}
