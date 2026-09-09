@@ -25,6 +25,10 @@ type Client struct {
 	keepAliveCancel context.CancelFunc
 	keepAliveDone   chan struct{}
 	keepAliveMu     sync.Mutex
+
+	// Lock handles believed outstanding, so the keep-alive ping does not
+	// retire the session one of them is bound to. See lock_window.go.
+	locks lockWindow
 }
 
 // NewClient creates a new ADT client with the given configuration.
@@ -80,6 +84,16 @@ func (c *Client) StartKeepAlive(interval time.Duration, verbose bool) {
 				}
 				return
 			case <-ticker.C:
+				// A ping is an ordinary request, and an ordinary request is
+				// stamped stateless — which retires the session a lock handle
+				// lives in. Skipping a tick costs nothing; sending it during a
+				// write costs the write (#168).
+				if c.lockOutstanding() {
+					if verbose {
+						fmt.Fprintf(LogOutput, "[KEEPALIVE] Skipped: a lock is outstanding\n")
+					}
+					continue
+				}
 				if err := c.transport.Ping(ctx); err != nil {
 					if ctx.Err() != nil {
 						return // context cancelled, expected

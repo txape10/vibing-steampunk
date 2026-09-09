@@ -406,7 +406,9 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
   `opts.Stateful` instead of relying only on the global default. The keep-alive ping (`Ping()` →
   `fetchCSRFToken` → `fetchCSRFTokenFor(ctx, false)`) is deliberately left non-stateful, unchanged — an
   explicitly-stateful keep-alive would hold a server-side session slot on a timer, a separate tradeoff
-  (upstream's own #168, not fixed here either).
+  (upstream's own #168, not fixed here either at the time). **#168 itself is now fixed — see 2w below**,
+  via a different mechanism (skip the ping entirely during an open lock window) that leaves this
+  non-stateful design untouched.
 - **`RenameObject`** (`pkg/adt/workflows_fileio.go`) had two independent defects beyond the marker
   migration: an unconditional `defer UnlockObject` *plus* an inline `UnlockObject` on the happy path sent a
   second UNLOCK for a handle already released on every successful rename; and the old object's lock, taken
@@ -524,6 +526,44 @@ on this SAP system, even with the correct namespace/shape confirmed live, and th
 `verifyMessageClassWrite` (the guard that turns SAP's silent false-success into an explicit error) stays in
 the code permanently — it is the fix, not a placeholder.
 
+### 2w. Ported upstream PR #178 — keep-alive skips the ping during an open lock window, closes #168 (2026-09-09)
+- **The bug**: a keep-alive ping is an ordinary request, and under the stateless default it is not answered
+  on the stateful ADT session a lock handle is bound to — sending one retires that session. A tick landing
+  between a LOCK and the write that consumes it silently kills the handle; the write then returns 423. This
+  was the "genuinely open on this fork too" entry under Known Open Issues (see 2t's note on
+  `fetchCSRFTokenFor`), and is exactly the family of session-affinity bugs #91/#132/#133 already invested
+  heavily in — plausibly a contributor to some of the orphaned SM12 locks hit during the MSAG investigation
+  (2v / `docs/message-class-write-investigation.md`).
+- **Fix, ported from upstream almost mechanically**: new `pkg/adt/lock_window.go` — a `lockWindow` (handle →
+  open-time map + mutex) tracked on `Client`, with `noteLockOpened`/`noteLockClosed`/`lockOutstanding`.
+  Entries older than 30 minutes (under SAP's own ADT session timeout) are pruned rather than suppressing the
+  ping forever, so a leaked entry can't disable keep-alive permanently. `StartKeepAlive`'s ticker now skips
+  the `Ping` call entirely (`continue`) whenever `lockOutstanding()` is true.
+- **Three hooks ported as-is** (`pkg/adt/crud.go`): `LockObject` calls `noteLockOpened` after a successful
+  parse; `UnlockObject` and `DeleteObject` call `noteLockClosed` only on success (a failed unlock may have
+  left the lock held — suppressing an extra ping is the cheap mistake, not the expensive one). The DELETE
+  hook matters on its own: a delete consumes the handle without any UNLOCK ever being sent, which is exactly
+  the case that sank the first design of this feature upstream (pinned by
+  `TestLockWindow_DeleteEndsTheWindow`).
+- **One hook not in the upstream diff, fork-specific**: `DeleteObjectWithAutoLock` (`pkg/adt/crud.go`, added
+  in 2t/2u for the #88 session-affinity problem) issues its own inline DELETE instead of delegating to
+  `DeleteObject`, so the DELETE hook above never runs for it. Added its own `noteLockClosed` call on the
+  happy path, with its own regression test (`TestLockWindow_DeleteObjectWithAutoLockEndsTheWindow` —
+  upstream has no equivalent function to have covered this).
+- **Default changed**: `--keepalive` default is now `0` (disabled), matching upstream's decision. With the
+  lock-window skip in place, the only remaining reason for a nonzero default (avoiding an idle-session
+  timeout) is a soft failure (re-login) versus the hard failure (423, possible stranded lock) a ping with no
+  protection used to risk during a write. `--keepalive 5m` (or any value) is still available and now safe to
+  use explicitly. File: `cmd/vsp/main.go`.
+- No change to `fetchCSRFTokenFor`'s non-stateful keep-alive design from 2t — this fix is orthogonal
+  (suppresses the ping outright rather than making it stateful).
+- Tests: `pkg/adt/lock_window_test.go` — 5 of upstream's tests ported near-verbatim (suppression, DELETE
+  ends the window, stale-entry pruning, concurrency safety with `Client` shared across MCP handler calls,
+  and an end-to-end test that drives the real `StartKeepAlive` goroutine) + 1 new fork-specific test for
+  `DeleteObjectWithAutoLock`.
+- `go build ./...` clean; full suite green (`go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)`).
+  `-race` unavailable in this environment (CGO disabled, same constraint as `pkg/cache`/`cmd/vsp`).
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
@@ -640,9 +680,9 @@ Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_A
 - **#88** Lock handle bug (EditSource/WriteSource) — same root cause as #132 (session affinity). **Resolved**
   by the #91 port (see 2t/2u above) — the marker migration and enqueue-leak fixes close this on this fork.
   Upstream's own PR #167 lists #88 among the issues it closes.
-- **#168** Keep-alive ping has no session affinity, can retire the context inside any lock window — genuinely
-  open on this fork too (upstream tracks it separately from #91/#167, deliberately not fixed there either;
-  fixing it is a tradeoff, since a stateful keep-alive holds a server-side session slot on a timer).
+- **#168** Keep-alive ping has no session affinity, can retire the context inside any lock window. **Fixed**
+  by the #178 port (see 2w above) — the ping now skips entirely while a lock is outstanding, and
+  `--keepalive` defaults to 0.
 - **#169** MCP cross-tool-call window: a lock handle spans separate tool calls, and any read the agent does
   between LOCK and the write that consumes it is a stateless hop — no in-process fix closes this, it needs
   an MCP-level design change (upstream is exploring this per PR #183, not ported here).

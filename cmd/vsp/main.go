@@ -120,7 +120,7 @@ func init() {
 
 
 	// Session keep-alive
-	rootCmd.Flags().Duration("keepalive", 5*time.Minute, "Session keep-alive interval (e.g., 60s, 5m). Prevents session timeout during idle periods. 0 = disabled")
+	rootCmd.Flags().Duration("keepalive", 0, "Session keep-alive interval (e.g., 60s, 5m). Prevents session timeout during idle periods. 0 = disabled (default; see #168)")
 
 	// Safety options
 	rootCmd.Flags().BoolVar(&cfg.ReadOnly, "read-only", false, "Block all write operations (create, update, delete, activate)")
