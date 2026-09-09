@@ -274,6 +274,13 @@ Transports:
   SAP(action="system", params={"type": "get_user_transports", "user_name": "DEVELOPER"})
   SAP(action="system", params={"type": "get_transport_info", "object_url": "...", "dev_class": "$TMP"})
 
+A write to a transportable object with no "transport" named picks a request the way Eclipse's
+dialog would: the object's own, else your open request that already holds the package's objects,
+else the only one that fits, else the newest; with none and --enable-transports one is created.
+The result says which under "transport" and why under "transportNote". SAP no longer generates a
+"Generated Request for Change Recording" per write. --transport-choice off (or
+SAP_TRANSPORT_CHOICE=off) restores that.
+
 Git/abapGit:
   SAP(action="system", params={"type": "git_types"})
   SAP(action="system", params={"type": "git_export", "packages": "$TMP"})

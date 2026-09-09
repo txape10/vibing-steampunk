@@ -298,6 +298,173 @@ func TestCreateTable_RefusesPackageOutsideAllowlist(t *testing.T) {
 	}
 }
 
+// --- PR #203 port: CreateStructure gained the same gate + Stateful fix
+// CreateTable already had, plus the transport-choice plumbing ---
+
+func TestCreateStructure_SourcePutStaysInTheLockSession(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithAllowedPackages("$TMP"))
+
+	err := client.CreateStructure(context.Background(), CreateStructureOptions{
+		Name:        "ZDEMO_STRU",
+		Description: "demo",
+		Package:     "$TMP",
+		Fields:      []TableField{{Name: "FIELD1", Type: "CHAR", Length: 10}},
+	})
+	if err != nil {
+		t.Fatalf("CreateStructure: %v", err)
+	}
+
+	calls := rec.snapshot()
+	putAt := indexOfCall(calls, isSourcePut)
+	if putAt < 0 {
+		t.Fatalf("expected a PUT of the structure source; trace:\n%v", calls)
+	}
+	if got := calls[putAt].sessionType; got != "stateful" {
+		t.Errorf("structure source PUT X-sap-adt-sessiontype = %q, want \"stateful\" — "+
+			"this used to be a hand-rolled PUT with no Stateful field, the same defect "+
+			"CreateTable had before it was fixed (issue #91)", got)
+		dumpCalls(t, calls)
+	}
+
+	lockAt := indexOfCall(calls, isLock)
+	if lockAt < 0 || lockAt > putAt {
+		t.Fatalf("expected a LOCK before the source PUT; trace:\n%v", calls)
+	}
+	assertWindowStateful(t, calls, lockAt, putAt)
+}
+
+func TestCreateStructure_RefusesPackageOutsideAllowlist(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}, WithAllowedPackages("$TMP"))
+
+	err := client.CreateStructure(context.Background(), CreateStructureOptions{
+		Name:        "ZDEMO_STRU",
+		Description: "demo",
+		Package:     "ZDEMO_PROD",
+		Fields:      []TableField{{Name: "FIELD1", Type: "CHAR", Length: 10}},
+	})
+	if err == nil {
+		t.Fatal("CreateStructure created a structure in ZDEMO_PROD with SAP_ALLOWED_PACKAGES=$TMP — " +
+			"this path only ran the op-type check before, so --allowed-packages never applied to it")
+	}
+	if calls := rec.snapshot(); len(calls) != 0 {
+		t.Errorf("a blocked CreateStructure still talked to SAP:")
+		dumpCalls(t, calls)
+	}
+}
+
+// --- PR #203 port: the 4 XML-metadata DDIC creators gained checkMutation
+// (they only ran checkSafety before), and their shared writeXMLObject
+// helper's PUT gained Stateful — it consumed a stateful LOCK's handle
+// without carrying the header, the same defect CreateTable had. CreateDomain
+// stands in for CreateDataElement/CreateTableType/CreateLockObject, which
+// share the exact same writeXMLObject call. ---
+
+func TestWriteXMLObject_PutStaysInTheLockSession(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithAllowedPackages("$TMP"))
+
+	err := client.CreateDomain(context.Background(), CreateDomainOptions{
+		Name:     "ZDEMO_DO",
+		Package:  "$TMP",
+		DataType: "CHAR",
+		Length:   10,
+	})
+	if err != nil {
+		t.Fatalf("CreateDomain: %v", err)
+	}
+
+	calls := rec.snapshot()
+	putAt := indexOfCall(calls, func(c wireCall) bool {
+		return c.method == http.MethodPut && strings.Contains(c.path, "/ddic/domains/")
+	})
+	if putAt < 0 {
+		t.Fatalf("expected a PUT of the domain metadata; trace:\n%v", calls)
+	}
+	if got := calls[putAt].sessionType; got != "stateful" {
+		t.Errorf("domain metadata PUT X-sap-adt-sessiontype = %q, want \"stateful\" — "+
+			"writeXMLObject's PUT carries the lockHandle from a stateful LOCK right above it "+
+			"and could never match its own lock without this (issue #91)", got)
+		dumpCalls(t, calls)
+	}
+
+	lockAt := indexOfCall(calls, isLock)
+	if lockAt < 0 || lockAt > putAt {
+		t.Fatalf("expected a LOCK before the metadata PUT; trace:\n%v", calls)
+	}
+	assertWindowStateful(t, calls, lockAt, putAt)
+}
+
+func TestCreateDomain_RefusesPackageOutsideAllowlist(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}, WithAllowedPackages("$TMP"))
+
+	err := client.CreateDomain(context.Background(), CreateDomainOptions{
+		Name:     "ZDEMO_DO",
+		Package:  "ZDEMO_PROD",
+		DataType: "CHAR",
+		Length:   10,
+	})
+	if err == nil {
+		t.Fatal("CreateDomain created a domain in ZDEMO_PROD with SAP_ALLOWED_PACKAGES=$TMP — " +
+			"this path only ran the op-type check before, so --allowed-packages never applied to it")
+	}
+	if calls := rec.snapshot(); len(calls) != 0 {
+		t.Errorf("a blocked CreateDomain still talked to SAP:")
+		dumpCalls(t, calls)
+	}
+}
+
+// TestCreateMessageClass_RefusesPackageOutsideAllowlist pins the fix to
+// CreateMessageClass's own mutation gate: it used to pass ObjectURL for an
+// object that does not exist yet, which — with AllowedPackages configured —
+// would make checkMutationPackage try to resolve the package via
+// SearchObject on a nonexistent object and fail with an unrelated "package
+// metadata not found" error instead of a clean policy refusal. Package is
+// now passed directly, like every other create path.
+func TestCreateMessageClass_RefusesPackageOutsideAllowlist(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}, WithAllowedPackages("$TMP"))
+
+	err := client.CreateMessageClass(context.Background(), CreateMessageClassOptions{
+		Name:    "ZDEMO_MC",
+		Package: "ZDEMO_PROD",
+	})
+	if err == nil {
+		t.Fatal("CreateMessageClass created a message class in ZDEMO_PROD with SAP_ALLOWED_PACKAGES=$TMP")
+	}
+	if strings.Contains(err.Error(), "package metadata not found") || strings.Contains(err.Error(), "resolving package") {
+		t.Errorf("gate failed by trying to resolve a package for a not-yet-created object, not by refusing it cleanly: %v", err)
+	}
+	if calls := rec.snapshot(); len(calls) != 0 {
+		t.Errorf("a blocked CreateMessageClass still talked to SAP:")
+		dumpCalls(t, calls)
+	}
+}
+
 // --- The other unconditionally-stateless mutation ---
 
 func TestWriteMessageClassTexts_PutStaysInTheLockSession(t *testing.T) {
@@ -781,4 +948,81 @@ func TestPrepareSourceUpdate_MarksTheObjectItChecked(t *testing.T) {
 	if after := len(rec.snapshot()); after == before {
 		t.Error("an unmarked object was accepted without resolving its package")
 	}
+}
+
+// --- PR #203 port: the FUNC update branch never adopted lock.CorrNr
+// (issue #144) even before the transport-choice port — a plain omission,
+// not shared by any structural difference from the INTF/DDLS/BDEF/SRVD
+// branches right above it in the same function, which already had the
+// fix. Both close together in the same change. ---
+
+const testLockXMLWithTransport = `<?xml version="1.0" encoding="UTF-8"?>
+<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0"><asx:values><DATA>
+<LOCK_HANDLE>HANDLE-1</LOCK_HANDLE><CORRNR>TR-EXAMPLE</CORRNR>
+<MODIFICATION_SUPPORT>NoModification</MODIFICATION_SUPPORT>
+</DATA></asx:values></asx:abap>`
+
+func TestWriteSourceFUNC_AdoptsLockCorrNrWhenTransportNotSupplied(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXMLWithTransport)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithAllowTransportableEdits())
+
+	result, err := client.writeSourceUpdate(context.Background(), "FUNC", "Z_DEMO_FM",
+		"FUNCTION z_demo_fm.\nENDFUNCTION.\n", &WriteSourceOptions{Parent: "ZFG_DEMO"})
+	if err != nil {
+		t.Fatalf("writeSourceUpdate(FUNC): %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("update did not succeed: %s", result.Message)
+	}
+	if result.Transport != "TR-EXAMPLE" {
+		t.Errorf("Transport = %q, want the lock's own request TR-EXAMPLE (issue #144) — "+
+			"this branch never adopted lock.CorrNr before the #203 port", result.Transport)
+	}
+
+	calls := rec.snapshot()
+	putAt := indexOfCall(calls, isSourcePut)
+	if putAt < 0 {
+		t.Fatalf("expected a PUT of the function module source; trace:\n%v", calls)
+	}
+	if got := calls[putAt].query.Get("corrNr"); got != "TR-EXAMPLE" {
+		t.Errorf("source PUT corrNr = %q, want TR-EXAMPLE; trace:\n%v", got, calls)
+	}
+}
+
+func TestWriteSourceFUNC_SourcePutStaysInTheLockSession(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+
+	result, err := client.writeSourceUpdate(context.Background(), "FUNC", "Z_DEMO_FM",
+		"FUNCTION z_demo_fm.\nENDFUNCTION.\n", &WriteSourceOptions{Parent: "ZFG_DEMO"})
+	if err != nil {
+		t.Fatalf("writeSourceUpdate(FUNC): %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("update did not succeed: %s", result.Message)
+	}
+
+	calls := rec.snapshot()
+	lockAt := indexOfCall(calls, isLock)
+	putAt := indexOfCall(calls, isSourcePut)
+	if lockAt < 0 || putAt < 0 || putAt < lockAt {
+		t.Fatalf("expected a LOCK followed by a source PUT; trace:\n%v", calls)
+	}
+	assertWindowStateful(t, calls, lockAt, putAt)
 }

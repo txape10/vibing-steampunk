@@ -205,6 +205,10 @@ type WriteSourceOptions struct {
 
 // WriteSourceResult represents the result of WriteSource operation
 type WriteSourceResult struct {
+	// Transport is the request the write went under, and TransportNote
+	// says how it was chosen when the caller named none.
+	Transport          string              `json:"transport,omitempty"`
+	TransportNote      string              `json:"transportNote,omitempty"`
 	Success            bool                `json:"success"`
 	ObjectType         string              `json:"objectType"`
 	ObjectName         string              `json:"objectName"`
@@ -488,6 +492,7 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		result.ObjectURL = progResult.ObjectURL
 		result.SyntaxErrors = progResult.SyntaxErrors
 		result.Activation = progResult.Activation
+		result.Transport, result.TransportNote = progResult.Transport, progResult.TransportNote
 		result.Message = progResult.Message
 		return result, nil
 
@@ -510,17 +515,23 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.ObjectURL = objectURL
 
 			// Create object
+			var chosen TransportChoice
 			err := c.CreateObject(ctx, CreateObjectOptions{
 				ObjectType:  ObjectTypeClass,
 				Name:        name,
 				Description: opts.Description,
 				PackageName: opts.Package,
 				Transport:   opts.Transport,
+				Chosen:      &chosen,
 			})
 			if err != nil {
 				result.Message = fmt.Sprintf("Failed to create class: %v", err)
 				return result, nil
 			}
+			if chosen.Transport != "" {
+				opts.Transport = chosen.Transport
+			}
+			result.Transport, result.TransportNote = opts.Transport, chosen.Reason
 
 			// Write source
 			writeResult, err := c.WriteClass(ctx, name, source, opts.Transport)
@@ -554,17 +565,23 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		}
 
 		// Create object
+		var chosen TransportChoice
 		err := c.CreateObject(ctx, CreateObjectOptions{
 			ObjectType:  ObjectTypeInterface,
 			Name:        name,
 			Description: opts.Description,
 			PackageName: opts.Package,
 			Transport:   opts.Transport,
+			Chosen:      &chosen,
 		})
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to create interface: %v", err)
 			return result, nil
 		}
+		if chosen.Transport != "" {
+			opts.Transport = chosen.Transport
+		}
+		result.Transport, result.TransportNote = opts.Transport, chosen.Reason
 
 		// The gate above accepted opts.Package, and CreateObject checked it a
 		// second time before creating the interface there — so UpdateSource
@@ -645,16 +662,28 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		return result, nil
 
 	case "INCL":
+		var chosen TransportChoice
 		if err := c.CreateObject(ctx, CreateObjectOptions{
 			ObjectType:  ObjectTypeInclude,
 			Name:        name,
 			Description: opts.Description,
 			PackageName: opts.Package,
 			Transport:   opts.Transport,
+			Chosen:      &chosen,
 		}); err != nil {
 			result.Message = fmt.Sprintf("Failed to create include: %v", err)
 			return result, nil
 		}
+		if chosen.Transport != "" {
+			opts.Transport = chosen.Transport
+		}
+		// Set from the CreateObject choice, like every other branch above —
+		// not from inclResult below. By the time WriteInclude runs,
+		// opts.Transport is never empty (either the caller supplied it, or
+		// CreateObject just chose one), so WriteInclude's own
+		// resolveWriteTransportFor always takes the "named" path and never
+		// carries a note — using it here would silently drop chosen.Reason.
+		result.Transport, result.TransportNote = opts.Transport, chosen.Reason
 		inclResult, err := c.WriteInclude(ctx, name, source, opts.Transport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to write include source: %v", err)
@@ -709,11 +738,17 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		if objectType == "BDEF" {
 			createOpts.Source = source // BDEF requires source embedded in creation request
 		}
+		var chosen TransportChoice
+		createOpts.Chosen = &chosen
 		err := c.CreateObject(ctx, createOpts)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to create %s: %v", objectType, err)
 			return result, nil
 		}
+		if chosen.Transport != "" {
+			opts.Transport = chosen.Transport
+		}
+		result.Transport, result.TransportNote = opts.Transport, chosen.Reason
 
 		// The gate above accepted opts.Package, and CreateObject checked it a
 		// second time before creating the object there — so UpdateSource
@@ -919,6 +954,7 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		}
 
 		// Create FM shell inside the function group
+		var chosen TransportChoice
 		err := c.CreateObject(ctx, CreateObjectOptions{
 			ObjectType:  ObjectTypeFunctionMod,
 			Name:        name,
@@ -926,11 +962,16 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			PackageName: opts.Package,
 			Transport:   opts.Transport,
 			ParentName:  opts.Parent,
+			Chosen:      &chosen,
 		})
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to create function module: %v", err)
 			return result, nil
 		}
+		if chosen.Transport != "" {
+			opts.Transport = chosen.Transport
+		}
+		result.Transport, result.TransportNote = opts.Transport, chosen.Reason
 
 		// The gate above accepted opts.Package, and CreateObject checked it a
 		// second time before creating the FM there — so UpdateSource below
@@ -1002,6 +1043,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		result.ObjectURL = progResult.ObjectURL
 		result.SyntaxErrors = progResult.SyntaxErrors
 		result.Activation = progResult.Activation
+		result.Transport, result.TransportNote = progResult.Transport, progResult.TransportNote
 		result.Message = progResult.Message
 		return result, nil
 
@@ -1015,6 +1057,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		result.ObjectURL = inclResult.ObjectURL
 		result.SyntaxErrors = inclResult.SyntaxErrors
 		result.Activation = inclResult.Activation
+		result.Transport, result.TransportNote = inclResult.Transport, inclResult.TransportNote
 		result.Message = inclResult.Message
 		return result, nil
 
@@ -1031,6 +1074,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			result.Method = methodResult.Method
 			result.SyntaxErrors = methodResult.SyntaxErrors
 			result.Activation = methodResult.Activation
+			result.Transport, result.TransportNote = methodResult.Transport, methodResult.TransportNote
 			result.Message = methodResult.Message
 			return result, nil
 		}
@@ -1044,11 +1088,17 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		result.ObjectURL = classResult.ObjectURL
 		result.SyntaxErrors = classResult.SyntaxErrors
 		result.Activation = classResult.Activation
+		result.Transport, result.TransportNote = classResult.Transport, classResult.TransportNote
 		result.Message = classResult.Message
 
 		// If test source provided, update test include
 		if opts.TestSource != "" {
 			objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(name))
+
+			// A transportable object with no request named: pick one the way
+			// the editor would (PR #203). Runs before the lock — stateless,
+			// must not sit between LOCK and PUT (issue #91).
+			trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
 
 			// Lock for test update
 			lock, err := c.LockObject(ctx, objectURL, "MODIFY")
@@ -1057,14 +1107,31 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 				return result, nil
 			}
 
+			// Reuse the request the object is already bound to when the caller
+			// supplied no transport, so an already-captured object is not
+			// rejected with a spurious 409 (issue #144). Otherwise the plan
+			// above (issue #91's #203 follow-on). Note deliberately not
+			// surfaced on result — this block only updates the test include of
+			// a class whose Transport/TransportNote already came from the main
+			// class body write above.
+			testTransport, _, resolveErr := c.resolveWriteTransportFor(trPlan, opts.Transport, lock.CorrNr, "WriteSource(testclasses)")
+			if resolveErr != nil {
+				if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+					result.Message += fmt.Sprintf(" (Warning: transportable-edit check failed: %v — %s)", resolveErr, strandedLockAdvice(objectURL, unlockErr))
+				} else {
+					result.Message += fmt.Sprintf(" (Warning: transportable-edit check failed: %v)", resolveErr)
+				}
+				return result, nil
+			}
+
 			// Update test include - try update first, create if it doesn't exist
-			err = c.UpdateClassInclude(ctx, name, "testclasses", opts.TestSource, lock.LockHandle, opts.Transport)
+			err = c.UpdateClassInclude(ctx, name, "testclasses", opts.TestSource, lock.LockHandle, testTransport)
 			if err != nil {
 				// Try to create the test include first (it may not exist)
-				createErr := c.CreateTestInclude(ctx, name, lock.LockHandle, opts.Transport)
+				createErr := c.CreateTestInclude(ctx, name, lock.LockHandle, testTransport)
 				if createErr == nil {
 					// Retry update after creating
-					err = c.UpdateClassInclude(ctx, name, "testclasses", opts.TestSource, lock.LockHandle, opts.Transport)
+					err = c.UpdateClassInclude(ctx, name, "testclasses", opts.TestSource, lock.LockHandle, testTransport)
 				}
 			}
 			unlockErr := c.UnlockObject(ctx, objectURL, lock.LockHandle)
@@ -1130,6 +1197,11 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		}
 		result.SyntaxErrors = syntaxErrors
 
+		// A transportable object with no request named: pick one the way the
+		// editor would (PR #203). Runs before the lock — stateless, must not
+		// sit between LOCK and PUT (issue #91).
+		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
+
 		// Lock
 		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
 		if err != nil {
@@ -1149,8 +1221,18 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			}
 		}()
 
+		// Reuse the request the object is already bound to when the caller
+		// supplied no transport (issue #144); otherwise the plan above
+		// (issue #91's #203 follow-on).
+		effectiveTransport, trNote, err := c.resolveWriteTransportFor(trPlan, opts.Transport, lock.CorrNr, "WriteSource(INTF)")
+		if err != nil {
+			result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+			return result, nil
+		}
+		result.Transport, result.TransportNote = effectiveTransport, trNote
+
 		// Update
-		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, opts.Transport)
+		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, effectiveTransport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to update source: %v", err)
 			return result, nil
@@ -1226,6 +1308,11 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		}
 		result.SyntaxErrors = syntaxErrors
 
+		// A transportable object with no request named: pick one the way the
+		// editor would (PR #203). Runs before the lock — stateless, must not
+		// sit between LOCK and PUT (issue #91).
+		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
+
 		// Lock
 		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
 		if err != nil {
@@ -1245,8 +1332,18 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			}
 		}()
 
+		// Reuse the request the object is already bound to when the caller
+		// supplied no transport (issue #144); otherwise the plan above
+		// (issue #91's #203 follow-on).
+		effectiveTransport, trNote, err := c.resolveWriteTransportFor(trPlan, opts.Transport, lock.CorrNr, fmt.Sprintf("WriteSource(%s)", objectType))
+		if err != nil {
+			result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+			return result, nil
+		}
+		result.Transport, result.TransportNote = effectiveTransport, trNote
+
 		// Update
-		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, opts.Transport)
+		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, effectiveTransport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to update source: %v", err)
 			return result, nil
@@ -1296,6 +1393,11 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			return result, nil
 		}
 
+		// A transportable object with no request named: pick one the way the
+		// editor would (PR #203). Runs before the lock — stateless, must not
+		// sit between LOCK and PUT (issue #91).
+		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
+
 		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock function module: %v", err)
@@ -1314,7 +1416,18 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			}
 		}()
 
-		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, opts.Transport)
+		// This branch never adopted lock.CorrNr (issue #144) even before the
+		// #203 transport-choice port — a plain omission, not a structural
+		// difference from the INTF/DDLS/BDEF/SRVD branches right above it,
+		// which already had the fix. Both gaps close together here.
+		effectiveTransport, trNote, err := c.resolveWriteTransportFor(trPlan, opts.Transport, lock.CorrNr, "WriteSource(FUNC)")
+		if err != nil {
+			result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+			return result, nil
+		}
+		result.Transport, result.TransportNote = effectiveTransport, trNote
+
+		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, effectiveTransport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to update function module source: %v", err)
 			return result, nil
@@ -1440,6 +1553,11 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 	}
 	result.SyntaxErrors = syntaxErrors
 
+	// A transportable object with no request named: pick one the way the
+	// editor would (PR #203). Runs before the lock — stateless, must not
+	// sit between LOCK and PUT (issue #91).
+	trPlan := c.planTransport(ctx, transport, objectURL, "")
+
 	// Lock
 	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
 	if err != nil {
@@ -1448,7 +1566,7 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 	}
 
 	writeLockHandle := lock.LockHandle
-	writeTransport, err := c.resolveWriteTransport(transport, lock.CorrNr, "WriteClassMethodUpdate")
+	writeTransport, trNote, err := c.resolveWriteTransportFor(trPlan, transport, lock.CorrNr, "WriteClassMethodUpdate")
 	if err != nil {
 		if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
 			result.Message = fmt.Sprintf("Transportable-edit check failed: %v — %s", err, strandedLockAdvice(objectURL, unlockErr))
@@ -1457,6 +1575,7 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 		}
 		return result, nil
 	}
+	result.Transport, result.TransportNote = writeTransport, trNote
 
 	// Tracked explicitly rather than keyed off result.Success — activation
 	// can still fail after a successful unlock below, and result.Success

@@ -10,6 +10,10 @@ import (
 
 // EditSourceResult represents the result of editing source code.
 type EditSourceResult struct {
+	// Transport is the request the write went under, and TransportNote
+	// says how it was chosen when the caller named none.
+	Transport          string            `json:"transport,omitempty"`
+	TransportNote      string            `json:"transportNote,omitempty"`
 	Success            bool              `json:"success"`
 	ObjectURL          string            `json:"objectUrl"`
 	ObjectName         string            `json:"objectName"`
@@ -374,6 +378,10 @@ func (c *Client) EditSourceWithOptions(ctx context.Context, objectURL, oldString
 	if isClassInclude && parentClassURL != "" {
 		lockURL = parentClassURL
 	}
+	// A transportable object with no request named: pick one the way the
+	// editor would (PR #203). Runs before the lock — stateless, must not
+	// sit between LOCK and PUT (issue #91).
+	trPlan := c.planTransport(ctx, opts.Transport, lockURL, "")
 	lockResult, err := c.LockObject(ctx, lockURL, "MODIFY")
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
@@ -395,11 +403,13 @@ func (c *Client) EditSourceWithOptions(ctx context.Context, objectURL, oldString
 	// Adopt transport from lock result when caller did not supply one.
 	// SAP returns the active corrNr in the lock response; without it the PUT
 	// fails with ExceptionParameterNotFound for transport-owned objects.
-	effectiveTransport, err := c.resolveWriteTransport(opts.Transport, lockResult.CorrNr, "EditSourceWithOptions")
+	// Otherwise the plan above (issue #91's #203 follow-on).
+	effectiveTransport, trNote, err := c.resolveWriteTransportFor(trPlan, opts.Transport, lockResult.CorrNr, "EditSourceWithOptions")
 	if err != nil {
 		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
 		return result, nil
 	}
+	result.Transport, result.TransportNote = effectiveTransport, trNote
 
 	// 6. Update source
 	if isClassInclude && className != "" {

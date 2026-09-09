@@ -1408,6 +1408,12 @@ func runSourceWrite(cmd *cobra.Command, args []string) error {
 		if result.ObjectURL != "" {
 			fmt.Fprintf(os.Stderr, "URL: %s\n", result.ObjectURL)
 		}
+		if result.Transport != "" {
+			fmt.Fprintf(os.Stderr, "Transport: %s\n", result.Transport)
+		}
+		if result.TransportNote != "" {
+			fmt.Fprintf(os.Stderr, "  %s\n", result.TransportNote)
+		}
 	} else {
 		fmt.Fprintf(os.Stderr, "Write failed for %s %s\n", objType, name)
 		if result.Message != "" {
@@ -2918,6 +2924,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "%s %s %s\n", action, result.ObjectType, result.ObjectName)
 		if result.ObjectURL != "" {
 			fmt.Fprintf(os.Stderr, "URL: %s\n", result.ObjectURL)
+		}
+		if result.Transport != "" {
+			fmt.Fprintf(os.Stderr, "Transport: %s\n", result.Transport)
+		}
+		if result.TransportNote != "" {
+			fmt.Fprintf(os.Stderr, "  %s\n", result.TransportNote)
 		}
 		if result.Message != "" {
 			fmt.Fprintf(os.Stderr, "%s\n", result.Message)

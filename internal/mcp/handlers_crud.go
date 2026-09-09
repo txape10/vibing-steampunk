@@ -324,6 +324,7 @@ func (s *Server) handleCreateTable(ctx context.Context, request mcp.CallToolRequ
 		deliveryClass = strings.ToUpper(dc)
 	}
 
+	var chosen adt.TransportChoice
 	opts := adt.CreateTableOptions{
 		Name:          name,
 		Description:   description,
@@ -331,6 +332,7 @@ func (s *Server) handleCreateTable(ctx context.Context, request mcp.CallToolRequ
 		Fields:        fields,
 		Transport:     transport,
 		DeliveryClass: deliveryClass,
+		Chosen:        &chosen,
 	}
 
 	err := s.adtClient.CreateTable(ctx, opts)
@@ -344,6 +346,12 @@ func (s *Server) handleCreateTable(ctx context.Context, request mcp.CallToolRequ
 		"package":     pkg,
 		"description": description,
 		"fields":      len(fields),
+	}
+	if chosen.Transport != "" {
+		result["transport"] = chosen.Transport
+	}
+	if chosen.Reason != "" {
+		result["transportNote"] = chosen.Reason
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil
@@ -384,12 +392,14 @@ func (s *Server) handleCreateStructure(ctx context.Context, request mcp.CallTool
 		transport = t
 	}
 
+	var chosen adt.TransportChoice
 	opts := adt.CreateStructureOptions{
 		Name:        name,
 		Description: description,
 		Package:     pkg,
 		Fields:      fields,
 		Transport:   transport,
+		Chosen:      &chosen,
 	}
 
 	if err := s.adtClient.CreateStructure(ctx, opts); err != nil {
@@ -402,6 +412,12 @@ func (s *Server) handleCreateStructure(ctx context.Context, request mcp.CallTool
 		"package":     pkg,
 		"description": description,
 		"fields":      len(fields),
+	}
+	if chosen.Transport != "" {
+		result["transport"] = chosen.Transport
+	}
+	if chosen.Reason != "" {
+		result["transportNote"] = chosen.Reason
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil
@@ -455,6 +471,7 @@ func (s *Server) handleCreateDomain(ctx context.Context, request mcp.CallToolReq
 		}
 	}
 
+	var chosen adt.TransportChoice
 	opts := adt.CreateDomainOptions{
 		Name:        name,
 		Description: description,
@@ -465,6 +482,7 @@ func (s *Server) handleCreateDomain(ctx context.Context, request mcp.CallToolReq
 		Lowercase:   lowercase,
 		FixedValues: fixedValues,
 		Transport:   transport,
+		Chosen:      &chosen,
 	}
 
 	if err := s.adtClient.CreateDomain(ctx, opts); err != nil {
@@ -474,6 +492,12 @@ func (s *Server) handleCreateDomain(ctx context.Context, request mcp.CallToolReq
 	result := map[string]interface{}{
 		"status": "created", "domain": strings.ToUpper(name),
 		"package": pkg, "data_type": dataType, "length": length,
+	}
+	if chosen.Transport != "" {
+		result["transport"] = chosen.Transport
+	}
+	if chosen.Reason != "" {
+		result["transportNote"] = chosen.Reason
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil
@@ -514,6 +538,7 @@ func (s *Server) handleCreateDataElement(ctx context.Context, request mcp.CallTo
 	}
 	transport, _ := request.GetArguments()["transport"].(string)
 
+	var chosen adt.TransportChoice
 	opts := adt.CreateDataElementOptions{
 		Name:             name,
 		Description:      description,
@@ -530,6 +555,7 @@ func (s *Server) handleCreateDataElement(ctx context.Context, request mcp.CallTo
 		SearchHelp:       searchHelp,
 		ParameterID:      parameterID,
 		Transport:        transport,
+		Chosen:           &chosen,
 	}
 
 	if err := s.adtClient.CreateDataElement(ctx, opts); err != nil {
@@ -539,6 +565,12 @@ func (s *Server) handleCreateDataElement(ctx context.Context, request mcp.CallTo
 	result := map[string]interface{}{
 		"status": "created", "data_element": strings.ToUpper(name),
 		"package": pkg, "type_name": typeName,
+	}
+	if chosen.Transport != "" {
+		result["transport"] = chosen.Transport
+	}
+	if chosen.Reason != "" {
+		result["transportNote"] = chosen.Reason
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil
@@ -568,6 +600,7 @@ func (s *Server) handleCreateTableType(ctx context.Context, request mcp.CallTool
 	}
 	transport, _ := request.GetArguments()["transport"].(string)
 
+	var chosen adt.TransportChoice
 	opts := adt.CreateTableTypeOptions{
 		Name:        name,
 		Description: description,
@@ -578,6 +611,7 @@ func (s *Server) handleCreateTableType(ctx context.Context, request mcp.CallTool
 		KeyDef:      keyDef,
 		KeyKind:     keyKind,
 		Transport:   transport,
+		Chosen:      &chosen,
 	}
 
 	if err := s.adtClient.CreateTableType(ctx, opts); err != nil {
@@ -587,6 +621,12 @@ func (s *Server) handleCreateTableType(ctx context.Context, request mcp.CallTool
 	result := map[string]interface{}{
 		"status": "created", "table_type": strings.ToUpper(name),
 		"package": pkg, "row_type": rowTypeName,
+	}
+	if chosen.Transport != "" {
+		result["transport"] = chosen.Transport
+	}
+	if chosen.Reason != "" {
+		result["transportNote"] = chosen.Reason
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil
@@ -621,6 +661,7 @@ func (s *Server) handleCreateLockObject(ctx context.Context, request mcp.CallToo
 		}
 	}
 
+	var chosen adt.TransportChoice
 	opts := adt.CreateLockObjectOptions{
 		Name:           name,
 		Description:    description,
@@ -630,6 +671,7 @@ func (s *Server) handleCreateLockObject(ctx context.Context, request mcp.CallToo
 		LockParameters: lockParams,
 		AllowRFC:       allowRFC,
 		Transport:      transport,
+		Chosen:         &chosen,
 	}
 
 	if err := s.adtClient.CreateLockObject(ctx, opts); err != nil {
@@ -639,6 +681,12 @@ func (s *Server) handleCreateLockObject(ctx context.Context, request mcp.CallToo
 	result := map[string]interface{}{
 		"status": "created", "lock_object": strings.ToUpper(name),
 		"package": pkg, "primary_table": strings.ToUpper(primaryTable),
+	}
+	if chosen.Transport != "" {
+		result["transport"] = chosen.Transport
+	}
+	if chosen.Reason != "" {
+		result["transportNote"] = chosen.Reason
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil
@@ -667,6 +715,7 @@ func (s *Server) handleCreateMessageClass(ctx context.Context, request mcp.CallT
 		}
 	}
 
+	var chosen adt.TransportChoice
 	opts := adt.CreateMessageClassOptions{
 		Name:        name,
 		Description: description,
@@ -674,6 +723,7 @@ func (s *Server) handleCreateMessageClass(ctx context.Context, request mcp.CallT
 		Language:    language,
 		Messages:    messages,
 		Transport:   transport,
+		Chosen:      &chosen,
 	}
 
 	if err := s.adtClient.CreateMessageClass(ctx, opts); err != nil {
@@ -685,6 +735,12 @@ func (s *Server) handleCreateMessageClass(ctx context.Context, request mcp.CallT
 		"message_class": strings.ToUpper(name),
 		"package":       pkg,
 		"messages":      len(messages),
+	}
+	if chosen.Transport != "" {
+		result["transport"] = chosen.Transport
+	}
+	if chosen.Reason != "" {
+		result["transportNote"] = chosen.Reason
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil

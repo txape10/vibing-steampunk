@@ -171,6 +171,14 @@ func WithAllowTransportableEdits() Option {
 	}
 }
 
+// WithTransportChoice sets how a write with no request named picks one:
+// "auto" (the default) or "off".
+func WithTransportChoice(mode string) Option {
+	return func(c *Config) {
+		c.Safety.TransportChoice = mode
+	}
+}
+
 // HasBasicAuth returns true if username and password are configured.
 func (c *Config) HasBasicAuth() bool {
 	return c.Username != "" && c.Password != ""

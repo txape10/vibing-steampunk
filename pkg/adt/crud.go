@@ -216,7 +216,10 @@ type CreateObjectOptions struct {
 	Description string              `json:"description"`
 	PackageName string              `json:"packageName"`
 	Transport   string              `json:"transport,omitempty"`
-	Responsible string              `json:"responsible,omitempty"`
+	// Chosen, when given, receives the request picked for a transportable
+	// object created with no Transport named — reused or created — and why.
+	Chosen      *TransportChoice `json:"-"`
+	Responsible string           `json:"responsible,omitempty"`
 	// For function modules - the function group name
 	ParentName string `json:"parentName,omitempty"`
 	// For packages - the software component (required for transportable packages)
@@ -604,6 +607,26 @@ func (c *Client) CreateObject(ctx context.Context, opts CreateObjectOptions) err
 		Transport: opts.Transport,
 	}); err != nil {
 		return err
+	}
+
+	// A transportable object with no request named: pick one the way the
+	// editor would, rather than let SAP generate a request per write.
+	if opts.Transport == "" && opts.ObjectType != ObjectTypePackage && opts.PackageName != "" && !strings.HasPrefix(opts.PackageName, "$") && c.config.Safety.TransportChoice != "off" {
+		if objectURL, uerr := c.buildObjectURLWithParent(opts.ObjectType, opts.Name, opts.ParentName); uerr == nil {
+			choice := c.planTransport(ctx, "", objectURL, opts.PackageName)
+			if choice.Err != nil {
+				return choice.Err
+			}
+			if choice.Transport != "" {
+				if err := c.checkTransportableEdit(choice.Transport, "CreateObject"); err != nil {
+					return err
+				}
+				opts.Transport = choice.Transport
+			}
+			if opts.Chosen != nil {
+				*opts.Chosen = *choice
+			}
+		}
 	}
 
 	// Package creation validation: local packages always allowed, transportable requires opt-in
@@ -1241,15 +1264,14 @@ type CreateStructureOptions struct {
 	Package     string       `json:"package,omitempty"`   // Target package (default: $TMP)
 	Fields      []TableField `json:"fields"`              // Field definitions
 	Transport   string       `json:"transport,omitempty"` // Transport request (optional for $TMP)
+	// Chosen, when given, receives the request picked for a transportable
+	// structure created with no Transport named — reused or created — and why.
+	Chosen *TransportChoice `json:"-"`
 }
 
 // CreateStructure creates a new DDIC structure from JSON-like options.
 // Handles the full workflow: create → set source → activate.
 func (c *Client) CreateStructure(ctx context.Context, opts CreateStructureOptions) error {
-	if err := c.checkSafety(OpCreate, "CreateStructure"); err != nil {
-		return err
-	}
-
 	opts.Name = strings.ToUpper(opts.Name)
 	if opts.Name == "" || len(opts.Name) > 30 {
 		return fmt.Errorf("structure name must be 1-30 characters")
@@ -1259,6 +1281,46 @@ func (c *Client) CreateStructure(ctx context.Context, opts CreateStructureOption
 	}
 	if opts.Package == "" {
 		opts.Package = "$TMP"
+	}
+
+	// Full mutation gate, not just the op-type half. This used to run
+	// checkSafety alone, so it created structures in any package the user
+	// could reach — AllowedPackages did not apply to it at all, same
+	// pre-existing defect CreateTable had before it was fixed (issue #91).
+	if err := c.checkMutation(ctx, MutationContext{
+		Op:        OpCreate,
+		OpName:    "CreateStructure",
+		Package:   opts.Package,
+		Transport: opts.Transport,
+	}); err != nil {
+		return err
+	}
+
+	// A transportable structure with no request named: pick one the way
+	// the editor would (PR #203). Skipped for local packages, same as
+	// CreateObject — a $TMP structure never needs a transport, so there is
+	// nothing to check. The prospective object URL (its real ADT identity
+	// once created) is passed rather than "", matching CreateObject's own
+	// call: an empty URI leaves the ADT-side check unable to identify the
+	// object/type.
+	var trPlan *TransportChoice
+	if !strings.HasPrefix(opts.Package, "$") {
+		trPlan = c.planTransport(ctx, opts.Transport,
+			fmt.Sprintf("/sap/bc/adt/ddic/structures/%s", strings.ToLower(opts.Name)), opts.Package)
+	}
+	if trPlan != nil {
+		if trPlan.Err != nil {
+			return trPlan.Err
+		}
+		if trPlan.Transport != "" {
+			if err := c.checkTransportableEdit(trPlan.Transport, "CreateStructure"); err != nil {
+				return err
+			}
+			opts.Transport = trPlan.Transport
+		}
+		if opts.Chosen != nil {
+			*opts.Chosen = *trPlan
+		}
 	}
 
 	ddlSource := generateStructureDDL(opts)
@@ -1293,29 +1355,32 @@ func (c *Client) CreateStructure(ctx context.Context, opts CreateStructureOption
 	structURL := fmt.Sprintf("/sap/bc/adt/ddic/structures/%s", strings.ToLower(opts.Name))
 	sourceURL := structURL + "/source/main"
 
+	// The structure was just created in opts.Package, which the gate above
+	// accepted, so UpdateSource does not have to resolve it again from
+	// inside the lock (issue #91).
+	ctx = withMutationPackageChecked(ctx, structURL)
+
 	lock, err := c.LockObject(ctx, structURL, "MODIFY")
 	if err != nil {
 		return fmt.Errorf("locking structure: %w", err)
 	}
 
-	params = url.Values{}
-	params.Set("lockHandle", lock.LockHandle)
-	if opts.Transport != "" {
-		params.Set("corrNr", opts.Transport)
-	}
-
-	_, err = c.transport.Request(ctx, sourceURL, &RequestOptions{
-		Method:      http.MethodPut,
-		Query:       params,
-		Body:        []byte(ddlSource),
-		ContentType: "text/plain",
-	})
-	if err != nil {
-		c.UnlockObject(ctx, structURL, lock.LockHandle)
+	// This used to be a hand-rolled transport.Request with no Stateful
+	// field, which meant the PUT that consumes the lock handle went out
+	// explicitly stateless — the same defect CreateTable had before it was
+	// fixed. UpdateSource is the same request with Stateful: true and the
+	// mutation gate attached.
+	if err := c.UpdateSource(ctx, sourceURL, ddlSource, lock.LockHandle, opts.Transport); err != nil {
+		if unlockErr := c.releaseLockAfterFailure(ctx, structURL, lock.LockHandle); unlockErr != nil {
+			return fmt.Errorf("updating structure source: %w — %s", err, strandedLockAdvice(structURL, unlockErr))
+		}
 		return fmt.Errorf("updating structure source: %w", err)
 	}
 
-	c.UnlockObject(ctx, structURL, lock.LockHandle)
+	// Unlock BEFORE activation
+	if err := c.UnlockObject(ctx, structURL, lock.LockHandle); err != nil {
+		return fmt.Errorf("unlocking structure before activation: %s", strandedLockAdvice(structURL, err))
+	}
 
 	// Step 3: Activate
 	if _, err := c.Activate(ctx, structURL, opts.Name); err != nil {
@@ -1365,6 +1430,9 @@ type CreateTableOptions struct {
 	Transport     string       `json:"transport,omitempty"`     // Transport request (optional for $TMP)
 	DeliveryClass string       `json:"deliveryClass,omitempty"` // A=Application, C=Customizing, L=Temp, etc. (default: A)
 	TableCategory string       `json:"tableCategory,omitempty"` // TRANSPARENT (default), STRUCTURE, etc.
+	// Chosen, when given, receives the request picked for a transportable
+	// table created with no Transport named — reused or created — and why.
+	Chosen *TransportChoice `json:"-"`
 }
 
 // CreateTable creates a new DDIC transparent table from JSON-like options.
@@ -1400,6 +1468,31 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 		Transport: opts.Transport,
 	}); err != nil {
 		return err
+	}
+
+	// A transportable table with no request named: pick one the way the
+	// editor would (PR #203). Skipped for local packages, same as
+	// CreateObject. The prospective object URL is passed rather than "" —
+	// an empty URI leaves the ADT-side check unable to identify the
+	// object/type.
+	var trPlan *TransportChoice
+	if !strings.HasPrefix(opts.Package, "$") {
+		trPlan = c.planTransport(ctx, opts.Transport,
+			fmt.Sprintf("/sap/bc/adt/ddic/tables/%s", strings.ToLower(opts.Name)), opts.Package)
+	}
+	if trPlan != nil {
+		if trPlan.Err != nil {
+			return trPlan.Err
+		}
+		if trPlan.Transport != "" {
+			if err := c.checkTransportableEdit(trPlan.Transport, "CreateTable"); err != nil {
+				return err
+			}
+			opts.Transport = trPlan.Transport
+		}
+		if opts.Chosen != nil {
+			*opts.Chosen = *trPlan
+		}
 	}
 
 	// Generate DDL source
@@ -1595,6 +1688,11 @@ func (c *Client) writeXMLObject(ctx context.Context, objectURL, xmlBody, transpo
 		Query:       params,
 		Body:        []byte(xmlBody),
 		ContentType: "application/*",
+		// The lockHandle above came from a stateful LOCK a few lines up;
+		// without this the PUT went out stateless and could never match its
+		// own lock (issue #91) — could return 423 intermittently regardless
+		// of the transport it carried.
+		Stateful: true,
 	})
 	_ = c.UnlockObject(ctx, objectURL, lock.LockHandle) // best-effort
 	if putErr != nil {
@@ -1622,13 +1720,13 @@ type CreateDomainOptions struct {
 	Lowercase   bool               `json:"lowercase,omitempty"`
 	FixedValues []DomainFixedValue `json:"fixed_values,omitempty"` // Optional value list
 	Transport   string             `json:"transport,omitempty"`
+	// Chosen, when given, receives the request picked for a transportable
+	// domain created with no Transport named — reused or created — and why.
+	Chosen *TransportChoice `json:"-"`
 }
 
 // CreateDomain creates a new DDIC domain (SE11 DOMA).
 func (c *Client) CreateDomain(ctx context.Context, opts CreateDomainOptions) error {
-	if err := c.checkSafety(OpCreate, "CreateDomain"); err != nil {
-		return err
-	}
 	opts.Name = strings.ToUpper(opts.Name)
 	if opts.Name == "" || len(opts.Name) > 30 {
 		return fmt.Errorf("domain name must be 1–30 characters")
@@ -1640,6 +1738,42 @@ func (c *Client) CreateDomain(ctx context.Context, opts CreateDomainOptions) err
 		opts.Package = "$TMP"
 	}
 	opts.DataType = strings.ToUpper(opts.DataType)
+
+	// Full mutation gate, not just the op-type half — this used to run
+	// checkSafety alone, so AllowedPackages did not apply to it at all.
+	if err := c.checkMutation(ctx, MutationContext{
+		Op:        OpCreate,
+		OpName:    "CreateDomain",
+		Package:   opts.Package,
+		Transport: opts.Transport,
+	}); err != nil {
+		return err
+	}
+
+	// A transportable domain with no request named: pick one the way the
+	// editor would (PR #203). Skipped for local packages, same as
+	// CreateObject. The prospective object URL is passed rather than "" —
+	// an empty URI leaves the ADT-side check unable to identify the
+	// object/type.
+	var trPlan *TransportChoice
+	if !strings.HasPrefix(opts.Package, "$") {
+		trPlan = c.planTransport(ctx, opts.Transport,
+			fmt.Sprintf("/sap/bc/adt/ddic/domains/%s", strings.ToLower(opts.Name)), opts.Package)
+	}
+	if trPlan != nil {
+		if trPlan.Err != nil {
+			return trPlan.Err
+		}
+		if trPlan.Transport != "" {
+			if err := c.checkTransportableEdit(trPlan.Transport, "CreateDomain"); err != nil {
+				return err
+			}
+			opts.Transport = trPlan.Transport
+		}
+		if opts.Chosen != nil {
+			*opts.Chosen = *trPlan
+		}
+	}
 
 	shellBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <doma:domain xmlns:doma="http://www.sap.com/dictionary/domain"
@@ -1733,13 +1867,13 @@ type CreateDataElementOptions struct {
 	SearchHelp       string `json:"search_help,omitempty"`
 	ParameterID      string `json:"parameter_id,omitempty"` // SET/GET parameter
 	Transport        string `json:"transport,omitempty"`
+	// Chosen, when given, receives the request picked for a transportable
+	// data element created with no Transport named — reused or created — and why.
+	Chosen *TransportChoice `json:"-"`
 }
 
 // CreateDataElement creates a new DDIC data element (SE11 DTEL).
 func (c *Client) CreateDataElement(ctx context.Context, opts CreateDataElementOptions) error {
-	if err := c.checkSafety(OpCreate, "CreateDataElement"); err != nil {
-		return err
-	}
 	opts.Name = strings.ToUpper(opts.Name)
 	if opts.Name == "" || len(opts.Name) > 30 {
 		return fmt.Errorf("data element name must be 1–30 characters")
@@ -1765,6 +1899,42 @@ func (c *Client) CreateDataElement(ctx context.Context, opts CreateDataElementOp
 	}
 	if opts.LabelHeading == "" {
 		opts.LabelHeading = opts.Description
+	}
+
+	// Full mutation gate, not just the op-type half — this used to run
+	// checkSafety alone, so AllowedPackages did not apply to it at all.
+	if err := c.checkMutation(ctx, MutationContext{
+		Op:        OpCreate,
+		OpName:    "CreateDataElement",
+		Package:   opts.Package,
+		Transport: opts.Transport,
+	}); err != nil {
+		return err
+	}
+
+	// A transportable data element with no request named: pick one the way
+	// the editor would (PR #203). Skipped for local packages, same as
+	// CreateObject. The prospective object URL is passed rather than "" —
+	// an empty URI leaves the ADT-side check unable to identify the
+	// object/type.
+	var trPlan *TransportChoice
+	if !strings.HasPrefix(opts.Package, "$") {
+		trPlan = c.planTransport(ctx, opts.Transport,
+			fmt.Sprintf("/sap/bc/adt/ddic/dataelements/%s", strings.ToLower(opts.Name)), opts.Package)
+	}
+	if trPlan != nil {
+		if trPlan.Err != nil {
+			return trPlan.Err
+		}
+		if trPlan.Transport != "" {
+			if err := c.checkTransportableEdit(trPlan.Transport, "CreateDataElement"); err != nil {
+				return err
+			}
+			opts.Transport = trPlan.Transport
+		}
+		if opts.Chosen != nil {
+			*opts.Chosen = *trPlan
+		}
 	}
 
 	shellBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
@@ -1863,13 +2033,13 @@ type CreateTableTypeOptions struct {
 	KeyDef      string `json:"key_definition,omitempty"` // "standard" (default), "rowType", "notSpecified"
 	KeyKind     string `json:"key_kind,omitempty"`       // "nonUnique" (default), "unique"
 	Transport   string `json:"transport,omitempty"`
+	// Chosen, when given, receives the request picked for a transportable
+	// table type created with no Transport named — reused or created — and why.
+	Chosen *TransportChoice `json:"-"`
 }
 
 // CreateTableType creates a new DDIC table type (SE11 TTYP).
 func (c *Client) CreateTableType(ctx context.Context, opts CreateTableTypeOptions) error {
-	if err := c.checkSafety(OpCreate, "CreateTableType"); err != nil {
-		return err
-	}
 	opts.Name = strings.ToUpper(opts.Name)
 	if opts.Name == "" || len(opts.Name) > 30 {
 		return fmt.Errorf("table type name must be 1–30 characters")
@@ -1891,6 +2061,42 @@ func (c *Client) CreateTableType(ctx context.Context, opts CreateTableTypeOption
 	}
 	if opts.KeyKind == "" {
 		opts.KeyKind = "nonUnique"
+	}
+
+	// Full mutation gate, not just the op-type half — this used to run
+	// checkSafety alone, so AllowedPackages did not apply to it at all.
+	if err := c.checkMutation(ctx, MutationContext{
+		Op:        OpCreate,
+		OpName:    "CreateTableType",
+		Package:   opts.Package,
+		Transport: opts.Transport,
+	}); err != nil {
+		return err
+	}
+
+	// A transportable table type with no request named: pick one the way
+	// the editor would (PR #203). Skipped for local packages, same as
+	// CreateObject. The prospective object URL is passed rather than "" —
+	// an empty URI leaves the ADT-side check unable to identify the
+	// object/type.
+	var trPlan *TransportChoice
+	if !strings.HasPrefix(opts.Package, "$") {
+		trPlan = c.planTransport(ctx, opts.Transport,
+			fmt.Sprintf("/sap/bc/adt/ddic/tabletypes/%s", strings.ToLower(opts.Name)), opts.Package)
+	}
+	if trPlan != nil {
+		if trPlan.Err != nil {
+			return trPlan.Err
+		}
+		if trPlan.Transport != "" {
+			if err := c.checkTransportableEdit(trPlan.Transport, "CreateTableType"); err != nil {
+				return err
+			}
+			opts.Transport = trPlan.Transport
+		}
+		if opts.Chosen != nil {
+			*opts.Chosen = *trPlan
+		}
 	}
 
 	shellBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
@@ -1978,13 +2184,13 @@ type CreateLockObjectOptions struct {
 	LockParameters []LockObjectParameter `json:"lock_parameters,omitempty"` // Key fields to expose
 	AllowRFC       bool                  `json:"allow_rfc,omitempty"`
 	Transport      string                `json:"transport,omitempty"`
+	// Chosen, when given, receives the request picked for a transportable
+	// lock object created with no Transport named — reused or created — and why.
+	Chosen *TransportChoice `json:"-"`
 }
 
 // CreateLockObject creates a new DDIC lock object (SE11 ENQU).
 func (c *Client) CreateLockObject(ctx context.Context, opts CreateLockObjectOptions) error {
-	if err := c.checkSafety(OpCreate, "CreateLockObject"); err != nil {
-		return err
-	}
 	opts.Name = strings.ToUpper(opts.Name)
 	if opts.Name == "" || len(opts.Name) > 30 {
 		return fmt.Errorf("lock object name must be 1–30 characters")
@@ -1999,6 +2205,42 @@ func (c *Client) CreateLockObject(ctx context.Context, opts CreateLockObjectOpti
 		opts.LockMode = "E"
 	}
 	opts.PrimaryTable = strings.ToUpper(opts.PrimaryTable)
+
+	// Full mutation gate, not just the op-type half — this used to run
+	// checkSafety alone, so AllowedPackages did not apply to it at all.
+	if err := c.checkMutation(ctx, MutationContext{
+		Op:        OpCreate,
+		OpName:    "CreateLockObject",
+		Package:   opts.Package,
+		Transport: opts.Transport,
+	}); err != nil {
+		return err
+	}
+
+	// A transportable lock object with no request named: pick one the way
+	// the editor would (PR #203). Skipped for local packages, same as
+	// CreateObject. The prospective object URL is passed rather than "" —
+	// an empty URI leaves the ADT-side check unable to identify the
+	// object/type.
+	var trPlan *TransportChoice
+	if !strings.HasPrefix(opts.Package, "$") {
+		trPlan = c.planTransport(ctx, opts.Transport,
+			fmt.Sprintf("/sap/bc/adt/ddic/lockobjects/sources/%s", strings.ToLower(opts.Name)), opts.Package)
+	}
+	if trPlan != nil {
+		if trPlan.Err != nil {
+			return trPlan.Err
+		}
+		if trPlan.Transport != "" {
+			if err := c.checkTransportableEdit(trPlan.Transport, "CreateLockObject"); err != nil {
+				return err
+			}
+			opts.Transport = trPlan.Transport
+		}
+		if opts.Chosen != nil {
+			*opts.Chosen = *trPlan
+		}
+	}
 
 	shellBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <enqu:lockobject xmlns:enqu="http://www.sap.com/adt/ddic/enqu"
@@ -2092,6 +2334,9 @@ type CreateMessageClassOptions struct {
 	Language    string                `json:"language,omitempty"` // Master language (default: ES)
 	Messages    []MessageClassMessage `json:"messages,omitempty"` // Initial messages (optional)
 	Transport   string                `json:"transport,omitempty"`
+	// Chosen, when given, receives the request picked for a transportable
+	// message class created with no Transport named — reused or created — and why.
+	Chosen *TransportChoice `json:"-"`
 }
 
 // CreateMessageClass creates a new ABAP message class (SE91 MSAG).
@@ -2116,15 +2361,41 @@ func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClass
 	}
 	opts.Language = strings.ToUpper(opts.Language)
 
-	// Mutation gate: package + transport policy check
+	// Mutation gate: package + transport policy check. Package (not
+	// ObjectURL) is used deliberately — the object does not exist yet, so
+	// resolving a package from ObjectURL via SearchObject would fail
+	// whenever AllowedPackages is configured, contradicting
+	// MutationContext's own doc comment for create operations.
 	objectURL := fmt.Sprintf("/sap/bc/adt/messageclass/%s", strings.ToLower(opts.Name))
 	if err := c.checkMutation(ctx, MutationContext{
 		Op:        OpCreate,
 		OpName:    "CreateMessageClass",
-		ObjectURL: objectURL,
+		Package:   opts.Package,
 		Transport: opts.Transport,
 	}); err != nil {
 		return err
+	}
+
+	// A transportable message class with no request named: pick one the
+	// way the editor would (PR #203). Skipped for local packages, same as
+	// CreateObject.
+	var trPlan *TransportChoice
+	if !strings.HasPrefix(opts.Package, "$") {
+		trPlan = c.planTransport(ctx, opts.Transport, objectURL, opts.Package)
+	}
+	if trPlan != nil {
+		if trPlan.Err != nil {
+			return trPlan.Err
+		}
+		if trPlan.Transport != "" {
+			if err := c.checkTransportableEdit(trPlan.Transport, "CreateMessageClass"); err != nil {
+				return err
+			}
+			opts.Transport = trPlan.Transport
+		}
+		if opts.Chosen != nil {
+			*opts.Chosen = *trPlan
+		}
 	}
 
 	// 1. POST shell — creates the empty message class. Namespace

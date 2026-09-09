@@ -12,6 +12,10 @@ import (
 
 // DeployResult contains the result of a file deployment operation.
 type DeployResult struct {
+	// Transport is the request the write went under, and TransportNote
+	// says how it was chosen when the caller named none.
+	Transport          string   `json:"transport,omitempty"`
+	TransportNote      string   `json:"transportNote,omitempty"`
 	ObjectURL          string   `json:"objectUrl"`
 	ObjectName         string   `json:"objectName"`
 	ObjectType         string   `json:"objectType"`
@@ -72,6 +76,7 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 	source := string(sourceBytes)
 
 	// 3. Create object
+	var chosen TransportChoice
 	err = c.CreateObject(ctx, CreateObjectOptions{
 		ObjectType:  info.ObjectType,
 		Name:        info.ObjectName,
@@ -79,6 +84,7 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 		Description: info.Description,
 		PackageName: packageName,
 		Transport:   transport,
+		Chosen:      &chosen,
 	})
 	if err != nil {
 		return &DeployResult{
@@ -90,6 +96,10 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 			Message:    fmt.Sprintf("Failed to create %s %s", info.ObjectType, info.ObjectName),
 		}, nil
 	}
+	if chosen.Transport != "" {
+		transport = chosen.Transport
+	}
+	trNote := chosen.Reason
 
 	// 4. Build object URL
 	objectURL, err := c.buildObjectURLWithParent(info.ObjectType, info.ObjectName, info.ParentName)
@@ -109,13 +119,15 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 	syntaxErrors, err := c.SyntaxCheck(ctx, objectURL, source)
 	if err != nil {
 		return &DeployResult{
-			FilePath:   filePath,
-			ObjectURL:  objectURL,
-			ObjectName: info.ObjectName,
-			ObjectType: string(info.ObjectType),
-			Success:    false,
-			Errors:     []string{fmt.Sprintf("syntax check failed: %v", err)},
-			Message:    fmt.Sprintf("Object created but syntax check failed: %v", err),
+			FilePath:      filePath,
+			ObjectURL:     objectURL,
+			ObjectName:    info.ObjectName,
+			ObjectType:    string(info.ObjectType),
+			Transport:     transport,
+			TransportNote: trNote,
+			Success:       false,
+			Errors:        []string{fmt.Sprintf("syntax check failed: %v", err)},
+			Message:       fmt.Sprintf("Object created but syntax check failed: %v", err),
 		}, nil
 	}
 
@@ -126,13 +138,15 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 			errorMsgs[i] = fmt.Sprintf("Line %d: %s", e.Line, e.Text)
 		}
 		return &DeployResult{
-			FilePath:     filePath,
-			ObjectURL:    objectURL,
-			ObjectName:   info.ObjectName,
-			ObjectType:   string(info.ObjectType),
-			Success:      false,
-			SyntaxErrors: errorMsgs,
-			Message:      fmt.Sprintf("Object created but has %d syntax errors", len(syntaxErrors)),
+			FilePath:      filePath,
+			ObjectURL:     objectURL,
+			ObjectName:    info.ObjectName,
+			ObjectType:    string(info.ObjectType),
+			Transport:     transport,
+			TransportNote: trNote,
+			Success:       false,
+			SyntaxErrors:  errorMsgs,
+			Message:       fmt.Sprintf("Object created but has %d syntax errors", len(syntaxErrors)),
 		}, nil
 	}
 
@@ -141,13 +155,15 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY")
 	if err != nil {
 		return &DeployResult{
-			FilePath:   filePath,
-			ObjectURL:  objectURL,
-			ObjectName: info.ObjectName,
-			ObjectType: string(info.ObjectType),
-			Success:    false,
-			Errors:     []string{fmt.Sprintf("lock failed: %v", err)},
-			Message:    fmt.Sprintf("Object created but failed to lock: %v", err),
+			FilePath:      filePath,
+			ObjectURL:     objectURL,
+			ObjectName:    info.ObjectName,
+			ObjectType:    string(info.ObjectType),
+			Transport:     transport,
+			TransportNote: trNote,
+			Success:       false,
+			Errors:        []string{fmt.Sprintf("lock failed: %v", err)},
+			Message:       fmt.Sprintf("Object created but failed to lock: %v", err),
 		}, nil
 	}
 
@@ -171,13 +187,15 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 	err = c.UpdateSource(ctx, sourceURL, source, lockResult.LockHandle, transport)
 	if err != nil {
 		return &DeployResult{
-			FilePath:   filePath,
-			ObjectURL:  objectURL,
-			ObjectName: info.ObjectName,
-			ObjectType: string(info.ObjectType),
-			Success:    false,
-			Errors:     []string{fmt.Sprintf("write source failed: %v", err)},
-			Message:    fmt.Sprintf("Object created but failed to write source: %v", err),
+			FilePath:      filePath,
+			ObjectURL:     objectURL,
+			ObjectName:    info.ObjectName,
+			ObjectType:    string(info.ObjectType),
+			Transport:     transport,
+			TransportNote: trNote,
+			Success:       false,
+			Errors:        []string{fmt.Sprintf("write source failed: %v", err)},
+			Message:       fmt.Sprintf("Object created but failed to write source: %v", err),
 		}, nil
 	}
 
@@ -186,13 +204,15 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 	unlocked = true
 	if err != nil {
 		return &DeployResult{
-			FilePath:   filePath,
-			ObjectURL:  objectURL,
-			ObjectName: info.ObjectName,
-			ObjectType: string(info.ObjectType),
-			Success:    false,
-			Errors:     []string{fmt.Sprintf("unlock failed: %v", err)},
-			Message:    fmt.Sprintf("Source written but failed to unlock: %v", err),
+			FilePath:      filePath,
+			ObjectURL:     objectURL,
+			ObjectName:    info.ObjectName,
+			ObjectType:    string(info.ObjectType),
+			Transport:     transport,
+			TransportNote: trNote,
+			Success:       false,
+			Errors:        []string{fmt.Sprintf("unlock failed: %v", err)},
+			Message:       fmt.Sprintf("Source written but failed to unlock: %v", err),
 		}, nil
 	}
 
@@ -200,24 +220,28 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 	_, err = c.Activate(ctx, objectURL, info.ObjectName)
 	if err != nil {
 		return &DeployResult{
-			FilePath:   filePath,
-			ObjectURL:  objectURL,
-			ObjectName: info.ObjectName,
-			ObjectType: string(info.ObjectType),
-			Success:    false,
-			Errors:     []string{fmt.Sprintf("activation failed: %v", err)},
-			Message:    fmt.Sprintf("Source written but activation failed: %v", err),
+			FilePath:      filePath,
+			ObjectURL:     objectURL,
+			ObjectName:    info.ObjectName,
+			ObjectType:    string(info.ObjectType),
+			Transport:     transport,
+			TransportNote: trNote,
+			Success:       false,
+			Errors:        []string{fmt.Sprintf("activation failed: %v", err)},
+			Message:       fmt.Sprintf("Source written but activation failed: %v", err),
 		}, nil
 	}
 
 	return &DeployResult{
-		FilePath:   filePath,
-		ObjectURL:  objectURL,
-		ObjectName: info.ObjectName,
-		ObjectType: string(info.ObjectType),
-		Success:    true,
-		Created:    true,
-		Message:    fmt.Sprintf("Successfully created and activated %s %s from %s", info.ObjectType, info.ObjectName, filePath),
+		FilePath:      filePath,
+		ObjectURL:     objectURL,
+		ObjectName:    info.ObjectName,
+		ObjectType:    string(info.ObjectType),
+		Transport:     transport,
+		TransportNote: trNote,
+		Success:       true,
+		Created:       true,
+		Message:       fmt.Sprintf("Successfully created and activated %s %s from %s", info.ObjectType, info.ObjectName, filePath),
 	}, nil
 }
 
@@ -311,6 +335,11 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 		}
 	}
 
+	// A transportable object with no request named: pick one the way the
+	// editor would (PR #203). Runs before the lock — stateless, must not
+	// sit between LOCK and PUT (issue #91).
+	trPlan := c.planTransport(ctx, transport, objectURL, "")
+
 	// 5. Lock object — from here on, ALL requests must be stateful to
 	// maintain session affinity for the lock handle (issue #88).
 	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY")
@@ -338,6 +367,23 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 		}
 	}()
 
+	// Reuse the request the object is already bound to when the caller
+	// supplied no transport (issue #144); otherwise the plan above
+	// (issue #91's #203 follow-on).
+	effectiveTransport, trNote, err := c.resolveWriteTransportFor(trPlan, transport, lockResult.CorrNr, "UpdateFromFile")
+	if err != nil {
+		return &DeployResult{
+			FilePath:   filePath,
+			ObjectURL:  objectURL,
+			ObjectName: info.ObjectName,
+			ObjectType: string(info.ObjectType),
+			Success:    false,
+			Errors:     []string{fmt.Sprintf("transportable-edit check failed: %v", err)},
+			Message:    fmt.Sprintf("Transportable-edit check failed: %v", err),
+		}, nil
+	}
+	transport = effectiveTransport
+
 	// 6. Write source
 	if isClassInclude {
 		// For class includes, use UpdateClassInclude
@@ -355,13 +401,15 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 		}
 		if err != nil {
 			return &DeployResult{
-				FilePath:   filePath,
-				ObjectURL:  objectURL,
-				ObjectName: info.ObjectName,
-				ObjectType: fmt.Sprintf("%s.%s", info.ObjectType, info.ClassIncludeType),
-				Success:    false,
-				Errors:     []string{fmt.Sprintf("write class include failed: %v", err)},
-				Message:    fmt.Sprintf("Failed to write class include: %v", err),
+				FilePath:      filePath,
+				ObjectURL:     objectURL,
+				ObjectName:    info.ObjectName,
+				ObjectType:    fmt.Sprintf("%s.%s", info.ObjectType, info.ClassIncludeType),
+				Transport:     transport,
+				TransportNote: trNote,
+				Success:       false,
+				Errors:        []string{fmt.Sprintf("write class include failed: %v", err)},
+				Message:       fmt.Sprintf("Failed to write class include: %v", err),
 			}, nil
 		}
 	} else {
@@ -373,13 +421,15 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 		err = c.UpdateSource(ctx, sourceURL, source, lockResult.LockHandle, transport)
 		if err != nil {
 			return &DeployResult{
-				FilePath:   filePath,
-				ObjectURL:  objectURL,
-				ObjectName: info.ObjectName,
-				ObjectType: string(info.ObjectType),
-				Success:    false,
-				Errors:     []string{fmt.Sprintf("write source failed: %v", err)},
-				Message:    fmt.Sprintf("Failed to write source: %v", err),
+				FilePath:      filePath,
+				ObjectURL:     objectURL,
+				ObjectName:    info.ObjectName,
+				ObjectType:    string(info.ObjectType),
+				Transport:     transport,
+				TransportNote: trNote,
+				Success:       false,
+				Errors:        []string{fmt.Sprintf("write source failed: %v", err)},
+				Message:       fmt.Sprintf("Failed to write source: %v", err),
 			}, nil
 		}
 	}
@@ -389,13 +439,15 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 	unlocked = true
 	if err != nil {
 		return &DeployResult{
-			FilePath:   filePath,
-			ObjectURL:  objectURL,
-			ObjectName: info.ObjectName,
-			ObjectType: string(info.ObjectType),
-			Success:    false,
-			Errors:     []string{fmt.Sprintf("unlock failed: %v", err)},
-			Message:    fmt.Sprintf("Source written but failed to unlock: %v", err),
+			FilePath:      filePath,
+			ObjectURL:     objectURL,
+			ObjectName:    info.ObjectName,
+			ObjectType:    string(info.ObjectType),
+			Transport:     transport,
+			TransportNote: trNote,
+			Success:       false,
+			Errors:        []string{fmt.Sprintf("unlock failed: %v", err)},
+			Message:       fmt.Sprintf("Source written but failed to unlock: %v", err),
 		}, nil
 	}
 
@@ -403,13 +455,15 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 	_, err = c.Activate(ctx, objectURL, info.ObjectName)
 	if err != nil {
 		return &DeployResult{
-			FilePath:   filePath,
-			ObjectURL:  objectURL,
-			ObjectName: info.ObjectName,
-			ObjectType: string(info.ObjectType),
-			Success:    false,
-			Errors:     []string{fmt.Sprintf("activation failed: %v", err)},
-			Message:    fmt.Sprintf("Source written but activation failed: %v", err),
+			FilePath:      filePath,
+			ObjectURL:     objectURL,
+			ObjectName:    info.ObjectName,
+			ObjectType:    string(info.ObjectType),
+			Transport:     transport,
+			TransportNote: trNote,
+			Success:       false,
+			Errors:        []string{fmt.Sprintf("activation failed: %v", err)},
+			Message:       fmt.Sprintf("Source written but activation failed: %v", err),
 		}, nil
 	}
 
@@ -420,13 +474,15 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 	}
 
 	result = &DeployResult{
-		FilePath:   filePath,
-		ObjectURL:  objectURL,
-		ObjectName: info.ObjectName,
-		ObjectType: objTypeStr,
-		Success:    true,
-		Created:    false,
-		Message:    fmt.Sprintf("Successfully updated and activated %s %s from %s", objTypeStr, info.ObjectName, filePath),
+		FilePath:      filePath,
+		ObjectURL:     objectURL,
+		ObjectName:    info.ObjectName,
+		ObjectType:    objTypeStr,
+		Transport:     transport,
+		TransportNote: trNote,
+		Success:       true,
+		Created:       false,
+		Message:       fmt.Sprintf("Successfully updated and activated %s %s from %s", objTypeStr, info.ObjectName, filePath),
 	}
 	if opts == nil || opts.ExpectedSourceHash == "" {
 		return result, nil

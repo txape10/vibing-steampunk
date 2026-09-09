@@ -715,6 +715,91 @@ the code permanently — it is the fix, not a placeholder.
 - No ABAP Unit tests (matches this class's existing pattern — no tests exist for it, verification is always
   manual against live SAP, as documented in 2h/2m/2v above).
 
+### 2z. Ported upstream PR #203 — transport auto-choice, the way Eclipse's dialog does it (2026-09-09)
+- **The bug**: a write to a transportable object with no `transport` named used to leave the choice to SAP,
+  which answered with a request of its own — "Generated Request for Change Recording" — one per write. A
+  day's work on one feature could end up spread over several such requests beside the developer's own open
+  one, exactly the "regla de oro" scenario the project's global `CLAUDE.md` already calls out ("nunca dejar
+  que SAP autogenere una orden por omisión").
+- **The fix**: before the LOCK — deliberately, since a stateless hop between LOCK and the write that
+  consumes its handle retires the session (issue #91, this project's most recurring bug family) — a new
+  `planTransport` (`pkg/adt/transport_choice.go`, new file) POSTs to `/sap/bc/adt/cts/transportchecks` (the
+  same resource Eclipse's own transport dialog reads) and picks, in order: the request the object is already
+  locked in, else the user's only open request that fits, else the open request that already holds an
+  object of the same package (checked via a TADIR query, `transportHoldsPackage`), else the newest of
+  several; with none and `--enable-transports`, one is created and named after the package and object. A
+  failed check is not a reason to refuse the write — the choice is then left to SAP as before (fail-open);
+  a failed *creation* is, since the caller explicitly enabled it. `resolveWriteTransportFor` re-applies
+  `checkTransportableEdit` to whatever was chosen — a request found or made this way cannot bypass
+  `--allow-transportable-edits`/`--allowed-transports` the way naming it explicitly would have to pass.
+  New flag `--transport-choice off` / `SAP_TRANSPORT_CHOICE=off` restores the old behaviour. Every
+  create/update result now carries `transport` and, when chosen here, `transportNote` explaining why.
+- **Alcance ampliado más allá del diff literal de upstream** (decidido explícitamente con el usuario antes
+  de implementar, vía planner + `AskUserQuestion`):
+  - **`WriteInclude`** incluida por consistencia con `WriteProgram`/`WriteClass` (upstream no la toca).
+  - **Los 7 creadores DDIC/MSAG de este fork** (`CreateStructure`, `CreateTable`, `CreateDomain`,
+    `CreateDataElement`, `CreateTableType`, `CreateLockObject`, `CreateMessageClass`, en `crud.go`) —
+    upstream no los tiene, no pasan por `CreateObject`, así que no heredaban la elección automática.
+  - **La rama `FUNC` de `writeSourceUpdate`**, que además de la elección de transporte recibió el fix del
+    issue #144 (adopción de `lock.CorrNr`) que nunca tuvo — un descuido simple compartido con ninguna otra
+    rama de esa función, cerrado en el mismo cambio.
+  - **3 bugs preexistentes encontrados y arreglados al planificar los 7 creadores DDIC/MSAG**, aprobados
+    explícitamente para incluir en el mismo cambio en vez de diferir: (a) `writeXMLObject` (helper
+    compartido por `CreateDomain`/`CreateDataElement`/`CreateTableType`/`CreateLockObject`) hacía el PUT que
+    consume el lock **sin `Stateful: true`** — el mismo defecto de session-affinity que `CreateTable` ya
+    tenía arreglado antes de esta sesión; (b) 5 de los 7 creadores solo llamaban `checkSafety`, nunca
+    `checkMutation` — `--allowed-packages` no se aplicaba en absoluto a ellas (`CreateStructure` de paso
+    pasó de un PUT manual a `UpdateSource`, alineándola con el patrón ya usado en `CreateTable`); (c)
+    `CreateMessageClass` gateaba con `ObjectURL` de un objeto que aún no existe en vez de `Package` — con
+    `AllowedPackages` configurado esto haría fallar `SearchObject` sobre un objeto inexistente en vez de
+    devolver un rechazo de política limpio.
+- **Decisiones estructurales del fork, no en el diff upstream**: `sqlQuote`/`cell` de upstream son
+  `escapeQuote`/`getString` en este fork (ya existían, sin duplicar); `pkg/adt/description.go` y
+  `pkg/adt/textpool.go` no existen en este fork (SetDescription y el text pool van por otras rutas — ver
+  2g) así que esas dos partes del diff de #203 no aplican; `cmd/vsp/cli.go` de este fork es un archivo
+  distinto del que asume el diff — el wiring de flags va en `cmd/vsp/main.go`; `pkg/config/systems.json` no
+  tenía ningún campo de transporte previo, así que `transport_choice` por sistema no se portó (solo
+  flag/env global); `vsp adt request` de upstream se portó como `vsp transport request METHOD PATH` (nuevo
+  subcomando de `transportCmd`, que ya existía) en vez de crear un grupo `adt` nuevo que este fork no tiene.
+- **Hallazgos del code-reviewer, todos corregidos en la misma sesión** (0 CRITICAL/HIGH desde el principio):
+  4 MEDIUM — (1) la rama `INCL` de `writeSourceCreate` perdía `TransportNote` al sobrescribirlo con el
+  resultado (vacío) de la delegación interna a `WriteInclude`, en vez de conservar el motivo original de
+  `CreateObject`; (2) los 6 creadores DDIC pasaban `objectURL=""` a `planTransport` en vez de la URL
+  prospectiva real del objeto (que `CreateObject`/`CreateMessageClass` sí construyen), dejando el check ADT
+  sin poder identificar el objeto/tipo; (3) faltaba en los 7 creadores el guard de paquete local (`$`) que
+  `CreateObject` sí tiene, disparando una llamada de red desperdiciada a `/cts/transportchecks` en cada
+  creación en `$TMP`; (4) `chooseTransport` — la lógica de decisión central (única candidata / candidata que
+  ya tiene el paquete / la más reciente / crear una nueva) no tenía ningún test directo. Los 4 se
+  corrigieron: guard `$` + URL prospectiva añadidos a los 6 creadores DDIC, `INCL` ya no sobrescribe
+  `TransportNote`, y 5 tests nuevos de `chooseTransport` contra un servidor stub
+  (`TestChooseTransport_SingleCandidate`, `..._PicksTheOneThatHoldsThePackage`,
+  `..._NoneHoldsPackage_PicksNewest`, `..._CreatesRequest`, `..._TransportsDisabled_LeavesItToSAP`).
+- **Hallazgo colateral, documentado no arreglado**: `transportHoldsPackage` llama a `GetTransport`, que
+  tiene su propio gate de lectura (`CheckTransport(..., isWrite=false)`) — requiere `--enable-transports` o
+  `--allow-transportable-edits`. Sin ninguno de los dos, la rama "ya tiene el paquete" degrada
+  silenciosamente a "la más reciente" (fail-open, consistente con el resto del diseño, pero no anunciado en
+  ningún mensaje). Descubierto escribiendo `TestChooseTransport_MultipleCandidates_PicksTheOneThatHoldsThePackage`
+  (fallaba hasta añadir `WithEnableTransports()` al cliente de test). No es un bug de este port — es una
+  consecuencia del gate ya existente de `GetTransport` — pero vale la pena saberlo antes de asumir por qué
+  la elección "no encontró" la orden correcta en un sistema sin esos flags.
+- Files: `pkg/adt/transport_choice.go` (nuevo), `pkg/adt/transport_choice_test.go` (nuevo), `pkg/adt/raw.go`
+  (nuevo, `Client.RawRequest`), `cmd/vsp/adt_request.go` (nuevo, `vsp transport request`), `pkg/adt/safety.go`,
+  `pkg/adt/config.go`, `pkg/adt/crud.go` (`CreateObject` + los 7 creadores + `writeXMLObject`),
+  `pkg/adt/workflows.go` (`WriteProgram`, `WriteInclude`, `WriteClass`, `CreateAndActivateProgram`),
+  `pkg/adt/workflows_edit.go` (`EditSourceWithOptions`), `pkg/adt/workflows_source.go` (todas las ramas de
+  `writeSourceCreate`/`writeSourceUpdate` + `writeClassMethodUpdate`), `pkg/adt/workflows_deploy.go`
+  (`CreateFromFile`, `UpdateFromFileWithOptions`), `pkg/adt/session_affinity_test.go` (9 tests nuevos),
+  `internal/mcp/server.go`, `internal/mcp/handlers_crud.go` (los 7 handlers DDIC/MSAG exponen
+  `transport`/`transportNote`), `internal/mcp/handlers_help.go`, `cmd/vsp/main.go` (flag
+  `--transport-choice`), `cmd/vsp/devops.go` (impresión de `Transport`/`TransportNote` en 2 comandos CLI).
+- `go build ./...` clean; full suite green (`go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)`),
+  incluidos los 15 tests nuevos (5 en `transport_choice_test.go` + 10 en `session_affinity_test.go`).
+- **Sin verificar en vivo todavía** — pendiente de sesión de verificación contra SAP real (mismo patrón que
+  #178/#191): crear un objeto de prueba en un paquete transportable sin `transport` explícito, confirmar que
+  aterriza en la orden abierta correcta (o crea una nueva si no hay ninguna), y probar `--transport-choice
+  off` para confirmar que restaura el comportamiento antiguo. Requiere decidir con el usuario qué paquete
+  transportable y qué orden usar antes de la prueba.
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
