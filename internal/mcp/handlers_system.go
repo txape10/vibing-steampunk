@@ -64,6 +64,17 @@ func (s *Server) handleGetConnectionInfo(ctx context.Context, request mcp.CallTo
 	// Add feature summary
 	info["features"] = s.featureProber.FeatureSummary(ctx)
 
+	// Add response cache stats, when the cache is enabled
+	if cs := s.adtClient.CacheStats(); cs.Enabled {
+		info["cache"] = map[string]interface{}{
+			"hits":          cs.Hits,
+			"misses":        cs.Misses,
+			"entries":       cs.Entries,
+			"invalidations": cs.Invalidations,
+			"ttl":           cs.TTL.String(),
+		}
+	}
+
 	// Add debugger status
 	info["debugger_user"] = strings.ToUpper(s.config.Username) // Debugger uses uppercase
 

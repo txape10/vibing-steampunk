@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/oisee/vibing-steampunk/pkg/adt"
+	"github.com/oisee/vibing-steampunk/pkg/cache"
 	"github.com/oisee/vibing-steampunk/pkg/config"
 	"github.com/spf13/cobra"
 )
@@ -147,14 +149,52 @@ func resolveTransportAttributeFromEnv() string {
 	return ""
 }
 
+// responseCacheTTL reads VSP_CACHE_TTL (a Go duration such as 10m); the
+// default is adt.DefaultCacheTTL.
+func responseCacheTTL() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("VSP_CACHE_TTL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return adt.DefaultCacheTTL
+}
+
+// lastClient is the client the command built, so the root command can
+// report the response cache's counters when asked to be verbose.
+var lastClient *adt.Client
+
 // getClient creates an ADT client from system params.
 func getClient(params *systemParams) (*adt.Client, error) {
+	client, err := buildClient(params)
+	if err == nil {
+		lastClient = client
+	}
+	return client, err
+}
+
+func buildClient(params *systemParams) (*adt.Client, error) {
 	opts := []adt.Option{
 		adt.WithClient(params.Client),
 		adt.WithLanguage(params.Language),
 	}
 	if params.Insecure {
 		opts = append(opts, adt.WithInsecureSkipVerify())
+	}
+	// The response cache: GET (and stable-table data preview) answers kept
+	// for a while, dropped on any write. In memory by default; on SQLite
+	// when a path is configured, so the next CLI run starts warm.
+	if params.Cache {
+		ttl := responseCacheTTL()
+		if params.CachePath != "" {
+			store, err := cache.NewResponseStore(params.CachePath)
+			if err != nil {
+				return nil, err
+			}
+			opts = append(opts, adt.WithCacheStore(store, ttl))
+		} else {
+			opts = append(opts, adt.WithCache(ttl))
+		}
 	}
 
 	// Use cookie auth if available

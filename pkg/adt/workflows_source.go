@@ -74,6 +74,17 @@ func (c *Client) GetSource(ctx context.Context, objectType, name string, opts *G
 		if cached, ok := c.sourceCache.get(objectType, name, method, include, parent); ok {
 			return cached, nil
 		}
+	} else {
+		// NoCache promises "a fresh read from SAP" — the sourceCache lookup
+		// above is skipped, but without this the GET below could still be
+		// answered from the transport's own response cache (VSP_CACHE) if
+		// one happens to be configured, silently defeating that promise for
+		// exactly the hash-baseline callers this option exists for (PR #191
+		// port). Emptying the whole response cache here is the same
+		// "cheapest correct assumption" every write already uses — cheaper
+		// than threading a per-request cache bypass through every
+		// GetXxx variant getSourceUncached dispatches to.
+		c.InvalidateCache()
 	}
 
 	source, err := c.getSourceUncached(ctx, objectType, name, opts)

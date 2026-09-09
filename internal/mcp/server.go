@@ -12,6 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
+	"github.com/oisee/vibing-steampunk/pkg/cache"
 )
 
 // AsyncTask represents a background task status.
@@ -181,6 +182,30 @@ func NewServer(cfg *Config) *Server {
 		safety.IgnoreWarnings = true
 	}
 	opts = append(opts, adt.WithSafety(safety))
+
+	// VSP_CACHE=true keeps GET (and stable-table data preview) answers for
+	// VSP_CACHE_TTL (10m by default), in memory for the life of the server;
+	// VSP_CACHE_PATH puts them on SQLite instead. Any write through the
+	// client empties it. No CLI flag exists for the server mode — this
+	// mirrors how cfg.TerminalID and other env-only knobs are read below.
+	if strings.EqualFold(os.Getenv("VSP_CACHE"), "true") {
+		ttl := adt.DefaultCacheTTL
+		if raw := strings.TrimSpace(os.Getenv("VSP_CACHE_TTL")); raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+				ttl = d
+			}
+		}
+		if path := strings.TrimSpace(os.Getenv("VSP_CACHE_PATH")); path != "" {
+			if store, err := cache.NewResponseStore(path); err == nil {
+				opts = append(opts, adt.WithCacheStore(store, ttl))
+			} else {
+				fmt.Fprintf(os.Stderr, "[vsp] warning: VSP_CACHE_PATH %q: %v — falling back to in-memory cache\n", path, err)
+				opts = append(opts, adt.WithCache(ttl))
+			}
+		} else {
+			opts = append(opts, adt.WithCache(ttl))
+		}
+	}
 
 	adtClient := adt.NewClient(cfg.BaseURL, cfg.Username, cfg.Password, opts...)
 

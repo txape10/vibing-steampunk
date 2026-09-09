@@ -568,7 +568,27 @@ export SAP_URL=https://host:44300
 export SAP_USER=developer
 export SAP_PASSWORD=secret
 export SAP_CLIENT=001
+export VSP_CACHE=true              # keep read answers; see "Response cache"
+export VSP_CACHE_PATH=.vsp-cache/dev.db
+export VSP_CACHE_TTL=10m
 ```
+
+### Response cache
+
+`VSP_CACHE=true` (or `"cache": true` on a system in `.vsp.json`) keeps the
+answers to reads: every GET, and data preview queries on the tables that
+change with development rather than with business — DD03L, TADIR, CROSS,
+T100, the documentation tables. Kept for `VSP_CACHE_TTL` (10 minutes) and
+dropped, all of it, on any write through the client, so an edit is never
+followed by a stale read. Queries on logs, spool and jobs are never kept.
+
+In memory by default, which is what an MCP session wants: the same class is
+read once, not on every turn. With `VSP_CACHE_PATH` (the CLI's default is
+`.vsp-cache/<system>.db`) it lives on SQLite and the next run starts warm.
+`-v` prints the hit/miss counters at the end, and `SAP(action="system",
+params={"type":"CONNECTION"})` shows them on the MCP side. A change made by
+someone else within the TTL is the one case the cache cannot see; delete the
+file, or wait it out.
 
 ### .env File
 ```bash
@@ -591,6 +611,9 @@ SAP_PASSWORD=secret
 | `--allow-transportable-edits` | `SAP_ALLOW_TRANSPORTABLE_EDITS` | Enable editing transportable objects |
 | `--allowed-transports` | `SAP_ALLOWED_TRANSPORTS` | Whitelist transports (wildcards: `A4HK*`) |
 | `--allowed-packages` | `SAP_ALLOWED_PACKAGES` | Whitelist packages (wildcards: `Z*,$TMP`) |
+| — | `VSP_CACHE` | Keep GET (and stable-table data preview) answers; see "Response cache" |
+| — | `VSP_CACHE_TTL` | How long a cached answer is trusted (default: `10m`) |
+| — | `VSP_CACHE_PATH` | Persist the cache on SQLite instead of in memory |
 
 </details>
 

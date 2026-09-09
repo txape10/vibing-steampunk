@@ -21,8 +21,11 @@ type SystemConfig struct {
 	// Optional CTS correlation attribute (for CR-level grouping, e.g. SAPTEST/ZCR)
 	TransportAttribute string `json:"transport_attribute,omitempty"`
 
-	// Optional analysis cache (opt-in)
-	Cache     bool   `json:"cache,omitempty"`      // Enable SQLite analysis cache
+	// Optional response cache (opt-in): keeps GET (and stable-table data
+	// preview) answers for a while, dropped on any write. In memory when
+	// CachePath is empty; on SQLite (pkg/cache.ResponseStore) otherwise, so
+	// the next CLI run starts warm. See pkg/adt/response_cache.go.
+	Cache     bool   `json:"cache,omitempty"`      // Enable the response cache
 	CachePath string `json:"cache_path,omitempty"` // Custom cache path (default: .vsp-cache/<system>.db)
 
 	// Cookie authentication (alternative to user/password)

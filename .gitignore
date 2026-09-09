@@ -109,3 +109,6 @@ docs/
 # Local analysis artifacts (customer-specific exports, scratch scripts)
 *.xlsx
 scripts/
+
+# response cache (VSP_CACHE)
+.vsp-cache/

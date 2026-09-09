@@ -9,7 +9,9 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // --- Session-affinity harness (issue #91) ---
@@ -1025,4 +1027,42 @@ func TestWriteSourceFUNC_SourcePutStaysInTheLockSession(t *testing.T) {
 		t.Fatalf("expected a LOCK followed by a source PUT; trace:\n%v", calls)
 	}
 	assertWindowStateful(t, calls, lockAt, putAt)
+}
+
+// TestGetSource_NoCache_BypassesResponseCache pins a code-review finding on
+// the #191 (source-hash) / #199 (response cache) interaction: GetSourceOptions.
+// NoCache promises "a fresh read from SAP" for callers establishing a
+// hash baseline before a guarded write, by skipping the client's own
+// sourceCache — but without also emptying the transport's response cache
+// (VSP_CACHE), a caller with that enabled could still get a body served
+// straight out of it, silently defeating the "fresh" promise.
+func TestGetSource_NoCache_BypassesResponseCache(t *testing.T) {
+	var hits atomic.Int64
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = io.WriteString(w, "REPORT z_demo_probe.")
+	}, WithCache(time.Minute))
+
+	ctx := context.Background()
+	if _, err := client.GetSource(ctx, "PROG", "Z_DEMO_PROBE", &GetSourceOptions{}); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	// A second plain read within the TTL should not reach the server at
+	// all: sourceCache serves it first.
+	if _, err := client.GetSource(ctx, "PROG", "Z_DEMO_PROBE", &GetSourceOptions{}); err != nil {
+		t.Fatalf("second (cached) read: %v", err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("plain reads: server saw %d requests, want 1 (sourceCache should have served the second)", n)
+	}
+	// NoCache skips sourceCache — and must also bypass the response cache,
+	// or this still would not reach the server.
+	if _, err := client.GetSource(ctx, "PROG", "Z_DEMO_PROBE", &GetSourceOptions{NoCache: true}); err != nil {
+		t.Fatalf("NoCache read: %v", err)
+	}
+	if n := hits.Load(); n != 2 {
+		t.Fatalf("NoCache read: server saw %d requests total, want 2 — NoCache did not reach SAP, "+
+			"it was served from the response cache instead", n)
+	}
 }

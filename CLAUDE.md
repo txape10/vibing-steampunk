@@ -807,6 +807,90 @@ the code permanently — it is the fix, not a placeholder.
   `--transport-choice off` en vivo (mecanismo trivial — un solo `if` que corta `planTransport` antes de
   cualquier llamada de red — ya cubierto por `TestResolveWriteTransportFor`/`TestChooseTransport_*`).
 
+### 2aa. Ported upstream PR #199 — a response cache in the transport, and the `--cache`/`VSP_CACHE` flag finally does something (2026-09-09)
+- **El punto de partida**: exactamente lo que decía la propia PR upstream del suyo — `cache: true` en
+  `.vsp.json` y `VSP_CACHE` ya llegaban a `pkg/config.SystemConfig`/`systemParams` (resueltos en
+  `GetSystem`/`resolveSystemParams`) pero no hacían nada: `getClient` nunca los usaba. Ahora el transporte
+  guarda las respuestas GET (y las consultas de data preview sobre tablas estables DDIC/repositorio —
+  DD03L, TADIR, CROSS, T100, etc.) durante un TTL (10 min por defecto), y vacía todo el cache ante
+  cualquier petición que modifique el sistema. Nunca cachea peticiones `Stateful` — las secuencias
+  lock→write→unlock que ya han dado tantos quebraderos de cabeza (#91/#132/#133/#168) quedan intactas.
+- **Desviaciones deliberadas del diff literal de upstream, por las divergencias estructurales de este fork**:
+  - **A** — `Transport.Request` de este fork no tenía ningún método interno tipo `t.request` al que
+    upstream asume que puede delegar: era un único método largo que ya incluía CSRF, reintentos y
+    detección de sesión expirada (con `retryRequest` como hermano separado). Se renombró el cuerpo actual
+    a `doRequest` (elegido porque `retryRequest`/`fetchCSRFToken`/`fetchCSRFTokenFor` ya estaban ocupados);
+    `Request` pasa a ser el wrapper cache-aware que construye la clave, decide `cacheable()`, sirve el hit,
+    invalida en escrituras (salvo data preview) y cachea solo 2xx — juzgando el cacheo una sola vez, sobre
+    la respuesta final que `doRequest` devuelve, sin tocar la lógica de reintento/CSRF/sesión existente.
+  - **B** — el logging `[adt] METHOD path  FROM TABLE` reutiliza la variable `LogOutput` que YA EXISTE en
+    este fork desde el port del keep-alive (2w, `pkg/adt/features.go`) — no se creó ninguna variable nueva.
+    Como `LogOutput` en este fork nunca es `nil` (por defecto `io.Discard`), la llamada es incondicional,
+    igual que los `[KEEPALIVE]`/`[feature]` ya existentes — sin el `if LogOutput != nil` que trae el diff
+    de upstream (innecesario aquí, habría sido código muerto).
+  - **C** — `NewTransport` de este fork construye el `Transport` directamente en vez de delegar en
+    `NewTransportWithClient` (como asume upstream) — la inicialización del cache se añadió idéntica en
+    ambos constructores en lugar de una sola vez por delegación.
+  - **D** — `pkg/config.SystemConfig.Cache`/`CachePath` (y su resolución `VSP_CACHE`/`VSP_<SISTEMA>_CACHE`
+    en `GetSystem`) YA EXISTÍAN en este fork, pensados en su día para un futuro "analysis cache" SQLite (el
+    graph cache, sin wiring CLI todavía — ver prioridad 4 "Pending"). **Decisión explícita del usuario**:
+    reutilizar esos mismos campos/env vars para este cache de respuestas en vez de crear unos nuevos —
+    confirmado por grep que nada más los leía, así que no hay colisión funcional; se actualizó el comentario
+    de doc para reflejar el nuevo propósito.
+  - **E** — `pkg/cache/responses.go` usa deliberadamente un SEGUNDO driver SQLite independiente
+    (`modernc.org/sqlite`, puro Go) en el mismo paquete que ya tiene el graph cache con el driver cgo
+    `mattn/go-sqlite3` (`sqlite.go`) — es la única forma de que este store funcione en el build de Windows
+    de este proyecto con `CGO_ENABLED=0`. Verificado: `go test ./pkg/cache/... -run TestResponseStore`
+    pasa limpio; `go test ./pkg/cache/...` sin filtrar sigue fallando por el `Example_withSQLite`
+    preexistente (mismo motivo cgo de siempre, documentado ya en la sección Build & Test) — el nuevo
+    archivo no lo arregla ni lo empeora, son cosas independientes.
+  - **F** — no existe `internal/mcp/handlers_info.go` en este fork (upstream lo asume). Las stats de cache
+    se añadieron a `handleGetConnectionInfo` en `internal/mcp/handlers_system.go`, expuesto vía
+    `SAP(action="system", params={"type":"CONNECTION"})`.
+  - **G** — en `internal/mcp/server.go`, si `cache.NewResponseStore(VSP_CACHE_PATH)` falla, este fork
+    escribe un aviso a stderr y cae a cache en memoria, en vez del `if err == nil` silencioso de upstream —
+    consistente con cómo este archivo ya avisa de otras configuraciones inválidas (p.ej. `SAP_SESSION_TYPE`
+    desconocido).
+- Ported casi verbatim (sin desviación): `cacheable()`/`stableQuery()`/`stableTables`/`fromTable`,
+  `MemoryResponseStore`, `responseCache` con contadores atómicos, `CacheStats`, los 4 tests de
+  `pkg/adt/response_cache_test.go`, el test de `pkg/cache/responses_test.go`, `cmd/vsp/cli.go`
+  (`responseCacheTTL`/`lastClient`/`buildClient`), `cmd/vsp/main.go` (`PersistentPostRun`).
+- Files: `pkg/adt/response_cache.go` (nuevo), `pkg/adt/response_cache_test.go` (nuevo), `pkg/adt/config.go`
+  (`Cache`/`CacheTTL`/`CacheStore` + `WithCache`/`WithCacheStore`), `pkg/adt/http.go` (`doRequest` +
+  wrapper `Request` + logging), `pkg/cache/responses.go` (nuevo), `pkg/cache/responses_test.go` (nuevo),
+  `go.mod`/`go.sum` (+`modernc.org/sqlite v1.57.0`), `pkg/config/systems.go` (solo comentario de doc),
+  `cmd/vsp/cli.go`, `cmd/vsp/main.go`, `internal/mcp/server.go`, `internal/mcp/handlers_system.go`,
+  `.gitignore` (+`.vsp-cache/`), `README.md` (env vars + sección "Response cache").
+- **Hallazgos del code-reviewer, los 2 MEDIUM corregidos en la misma sesión** (0 CRITICAL/HIGH desde el
+  principio): (1) `cacheable()` trataba cualquier GET no-stateful como cacheable sin distinguir estado
+  externamente mutable — `GetUserTransports`/`GetTransport` (que alimentan directamente el auto-choice de
+  transportes, `chooseTransport`/`transportHoldsPackage`, añadido en esta misma sesión con el port de
+  #203) y los endpoints de `debugger/`/`st05/`/`runtime/traces/` podían servirse cacheados durante hasta
+  10 min aunque otro proceso `vsp` o SAPGUI cambiara ese estado por debajo. Fix: `neverCacheablePrefixes`
+  (`pkg/adt/response_cache.go`) — denylist explícita para `cts/`, `debugger/`, `st05/`,
+  `runtime/traces/`, comprobada antes que la regla general de "todo GET es cacheable"; test
+  `TestCacheable_NeverCacheablePrefixes`. (2) `GetSourceOptions.NoCache` (2x, port de #191) solo se
+  saltaba el `sourceCache` de nivel cliente, no el nuevo cache de respuestas HTTP — con `VSP_CACHE=true`
+  a la vez, un baseline de hash "fresco" podía en realidad servirse desde el cache HTTP, dando un
+  `SOURCE_DRIFT` confuso más adelante (no un riesgo de sobrescritura: `verifyExpectedSourceHash` relee en
+  ventana de lock, siempre `Stateful` y por tanto nunca cacheable, así que la detección de drift real
+  seguía funcionando). Fix: `GetSource` llama `c.InvalidateCache()` antes de la lectura sin caché en vez
+  de intentar enhebrar un bypass por-petición a través de cada variante de `getSourceUncached`; test
+  `TestGetSource_NoCache_BypassesResponseCache` (`pkg/adt/session_affinity_test.go`).
+- `go build ./...` limpio; `go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)` en verde
+  (incluidos los 2 tests nuevos de la corrección de code-review); `go test ./pkg/cache/... -run
+  TestResponseStore` en verde (confirma que el driver cgo-free funciona en este entorno `CGO_ENABLED=0`,
+  a diferencia del graph cache existente).
+- **Verificado en vivo (2026-09-09, misma sesión)** contra el sistema SAP real, con `VSP_CACHE_PATH` en un
+  fichero SQLite temporal: `vsp -v source CLAS ZCL_VSP_RFC_SERVICE` en frío tardó 0.687s (`[adt] GET
+  .../ZCL_VSP_RFC_SERVICE/source/main` logueado, `[cache] 0 hits, 1 misses`); el mismo comando repetido en
+  un proceso nuevo (cache persistida en SQLite entre ejecuciones) tardó 0.127s (~5.4×), sin ninguna línea
+  `[adt]` — cero peticiones reales al servidor — y `[cache] 1 hits, 0 misses`; el código fuente devuelto fue
+  byte a byte idéntico entre ambas ejecuciones (`diff` vacío). La invalidación por escritura, el bypass de
+  peticiones `Stateful` y el TTL se verificaron solo con la suite de tests `httptest` ya portada — es
+  lógica puramente local de transporte HTTP, no depende de ningún estado real de SAP, así que no se hizo
+  ninguna escritura real contra el sistema para confirmarlo.
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
@@ -1037,6 +1121,7 @@ func (s *Server) handleX(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 3. **Session issues** — some CRUD/debugger flows are session-sensitive; verify stateful/stateless before changing transport or auth logic
 4. **Auth** — use basic OR cookies, not both
 5. **ZADT_VSP** — WebSocket debug/RFC/RunReport require it installed on SAP
+6. **Response cache** (`VSP_CACHE`, `pkg/adt/response_cache.go`) keeps GET answers and stable-table data preview queries for a TTL; it is emptied on any write through the client. A change made by someone else within that window is invisible to it — delete `VSP_CACHE_PATH`'s file, or wait it out
 
 ## Security
 
