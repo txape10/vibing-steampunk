@@ -18,11 +18,21 @@ type RenameObjectResult struct {
 	Success    bool   `json:"success"`
 	Message    string `json:"message,omitempty"`
 	Errors     []string `json:"errors,omitempty"`
+	// Transport is the request the new object's source write went under, and
+	// TransportNote says how it was chosen when the caller named none.
+	Transport     string `json:"transport,omitempty"`
+	TransportNote string `json:"transportNote,omitempty"`
 }
 
 // RenameObject renames an ABAP object by creating a copy with the new name and deleting the old one.
 //
-// Workflow: GetSource → CreateNew → ActivateNew → DeleteOld
+// Workflow: GetSource → CreateNew → WriteSource → ActivateNew → DeleteOld
+//
+// Only object types with a single editable /source/main document can be renamed
+// this way: CLAS/OC, PROG/P, INTF/OI, PROG/I. A function group's source is split
+// across its top include, the UXX includes and its function modules, so a
+// copy-and-delete cannot reproduce it; DDIC and RAP types are not plain-ABAP
+// source. Those are rejected up front, before anything is locked or created.
 //
 // This is a destructive operation - use with caution!
 func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, oldName, newName, packageName, transport string) (*RenameObjectResult, error) {
@@ -30,6 +40,16 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		OldName:    oldName,
 		NewName:    newName,
 		ObjectType: string(objType),
+	}
+
+	switch objType {
+	case ObjectTypeClass, ObjectTypeProgram, ObjectTypeInterface, ObjectTypeInclude:
+		// rename-by-copy works: one editable /source/main document
+	default:
+		return nil, fmt.Errorf(
+			"RenameObject does not support object type %s: only CLAS/OC, PROG/P, "+
+				"INTF/OI and PROG/I can be renamed by copy — other types have no "+
+				"single source document to reproduce", objType)
 	}
 
 	oldURL, err := c.buildObjectURL(objType, oldName)
@@ -80,13 +100,20 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 	newSource := strings.ReplaceAll(oldSource, strings.ToUpper(oldName), strings.ToUpper(newName))
 	newSource = strings.ReplaceAll(newSource, strings.ToLower(oldName), strings.ToLower(newName))
 
-	// 3. Create new object
+	// 3. Create new object. Capture the transport CreateObject picks for a
+	// transportable target with none named, so the source PUT below (and the
+	// rollback delete of this shell, if it comes to that) go into that same
+	// request rather than letting SAP generate one per write (PR #203 / the
+	// project's transport rule). The old-object delete resolves its own
+	// request separately from the old object's lock.
+	var shellChoice TransportChoice
 	err = c.CreateObject(ctx, CreateObjectOptions{
 		ObjectType:  objType,
 		Name:        newName,
 		Description: fmt.Sprintf("Renamed from %s", oldName),
 		PackageName: packageName,
 		Transport:   transport,
+		Chosen:      &shellChoice,
 	})
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create new object: %v", err))
@@ -122,9 +149,46 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		}
 	}()
 
-	err = c.UpdateSource(ctx, newURL, newSource, lockResult.LockHandle, transport)
+	// Adopt the request the shell was created in (or the one the lock
+	// reports), re-validated against the transportable-edit policy so a
+	// request chosen here cannot bypass the gate that naming it would hit.
+	effectiveTransport, trNote, err := c.resolveWriteTransportFor(&shellChoice, transport, lockResult.CorrNr, "RenameObject")
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Transportable-edit check failed: %v", err))
+		return result, nil
+	}
+	result.Transport, result.TransportNote = effectiveTransport, trNote
+
+	// rollbackShell removes the object created in step 3 when a later step
+	// fails, so a failed rename does not leave an empty shell that blocks the
+	// retry (CreateObject would then report "already exists"). The shell is
+	// still MODIFY-locked here, so unlock before deleting; DeleteObjectWithAutoLock
+	// self-gates and locks+deletes atomically (CLAUDE.md 2ae/2af).
+	rollbackShell := func() {
+		if !newUnlocked {
+			_ = c.UnlockObject(ctx, newURL, lockResult.LockHandle)
+			newUnlocked = true
+		}
+		if delErr := c.DeleteObjectWithAutoLock(ctx, newURL, effectiveTransport); delErr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf(
+				"the partially created %s could not be rolled back (%v) — delete it manually", newName, delErr))
+		} else {
+			result.Errors = append(result.Errors, fmt.Sprintf("rolled back the partially created %s", newName))
+		}
+		// The write was undone; a transport reported here would name the
+		// request it was rolled back out of, which misleads a consumer
+		// reading Transport on a failed result.
+		result.Transport, result.TransportNote = "", ""
+	}
+
+	// The source resource is the object URL + /source/main — UpdateSource PUTs
+	// to exactly the URL it is given, and step 1 reads from the same suffix.
+	// Without it the plain ABAP body lands on the bare object URL, where SAP
+	// expects the metadata XML and answers 400 ExceptionInvalidData.
+	err = c.UpdateSource(ctx, newURL+"/source/main", newSource, lockResult.LockHandle, effectiveTransport)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to write source: %v", err))
+		rollbackShell()
 		return result, nil
 	}
 
@@ -138,6 +202,7 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 	_, err = c.Activate(ctx, newURL, newName)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to activate new object: %v", err))
+		rollbackShell()
 		return result, nil
 	}
 
@@ -180,7 +245,16 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		}
 	}()
 
-	err = c.DeleteObject(ctx, oldURL, oldLockResult.LockHandle, transport)
+	// The old object may sit in its own open request; adopt that (re-validated
+	// against policy) rather than passing the caller's transport blindly.
+	oldTransport, err := c.resolveWriteTransport(transport, oldLockResult.CorrNr, "RenameObject")
+	if err != nil {
+		result.Message = fmt.Sprintf("New object %s created successfully, but the transportable-edit check for deleting %s failed: %v. Please delete manually.", newName, oldName, err)
+		result.Success = true
+		return result, nil
+	}
+
+	err = c.DeleteObject(ctx, oldURL, oldLockResult.LockHandle, oldTransport)
 	if err != nil {
 		result.Message = fmt.Sprintf("New object %s created successfully, but failed to delete old object %s: %v. Please delete manually.", newName, oldName, err)
 		result.Success = true

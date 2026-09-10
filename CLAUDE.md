@@ -1273,6 +1273,73 @@ the code permanently — it is the fix, not a placeholder.
   **no `ZTEMP_EXEC_*` TRDIR orphans** (pre-fix, every `execute_abap` call stranded one — `ExecuteABAP`'s
   cleanup defer calls `DeleteObject`, which now unlocks).
 
+### 2ag. `RenameObject` — source write went to the bare object URL, not `…/source/main` (400 on every rename) (2026-09-10)
+- **The bug** (`task_b894bc6f`, live-confirmed): `SAP(action="edit", params={"type":"rename", …})` failed at
+  step 4 ("write source to the new object") with `400 ExceptionInvalidData` ("Elemento `abapProgram`
+  previsto") for **every** object type. `RenameObject` (`pkg/adt/workflows_fileio.go`) did
+  `newURL, _ := c.buildObjectURL(objType, newName)` then `c.UpdateSource(ctx, newURL, …)` — but
+  `buildObjectURL` returns the *bare* object URL and `UpdateSource` (`pkg/adt/crud.go`) PUTs the body to
+  exactly the URL it is given. Plain ABAP landed on `/sap/bc/adt/programs/programs/<name>` where SAP expects
+  the metadata XML → 400. Step 1 (the source GET) already used `oldURL+"/source/main"` correctly; step 4
+  just dropped the suffix. The new shell object *was* created, so a failed rename left an empty shell + the
+  original object intact.
+- **Fix** (`pkg/adt/workflows_fileio.go`): `c.UpdateSource(ctx, newURL+"/source/main", …)`. Minimal — not
+  a delegation to `WriteProgram`/`WriteClass` (no `WriteInterface` exists, so a type switch would keep the
+  hand-rolled path anyway; delegating would also add `SyntaxCheck`/`planTransport` behaviour changes). The
+  `withMutationPackageChecked` mark still matches via `canonicalizeObjectURL` (collapses `/source/main`), so
+  no new stateless hop inside the lock window (issue #91).
+- **Type allowlist guard** at the top of `RenameObject`, *before* any network call or shell creation: only
+  `CLAS/OC`, `PROG/P`, `INTF/OI`, `PROG/I` (one editable `/source/main` document). `FUGR/F` (source split
+  across the top include, `UXX` includes and function modules — a copy-and-delete cannot reproduce it),
+  `FUGR/FF` (no `parentName` param), DDIC/RAP types → rejected with a plain `error` the MCP handler
+  surfaces. MCP tool doc + handler hint now list `PROG/I` instead of the never-working `FUGR/F`.
+- **Shell rollback**: on a step-4 (source write) or step-5 (activate) failure, `rollbackShell()` unlocks the
+  new object (flipping `newUnlocked` so the deferred `releaseLockAfterFailure` no-ops) then
+  `DeleteObjectWithAutoLock(newURL)` to remove the empty shell; reports the rollback outcome in
+  `result.Errors`, clears `result.Transport`/`TransportNote`, keeps `Success=false`. Avoids an orphan shell
+  that would block a retry with "already exists".
+- **Transport correctness (the golden rule)**: the hand-rolled step 4/5 passed the raw `transport` param
+  straight through — a transportable rename with `transport=""` let SAP auto-generate a "Generated Request
+  for Change Recording" per write. Now `CreateObject` gets `Chosen: &shellChoice` to capture the request it
+  picked for the shell; step 4 calls `resolveWriteTransportFor(&shellChoice, transport, lockResult.CorrNr,
+  "RenameObject")` (mirrors `WriteProgram` `workflows.go:99-107`) and writes the source under that
+  `effectiveTransport`; step 6 (old-object delete) calls `resolveWriteTransport(transport,
+  oldLockResult.CorrNr, "RenameObject")` to adopt the *old* object's own open request. New
+  `Transport`/`TransportNote` fields on `RenameObjectResult`.
+- **Step 6 (old-object delete) reached + verified for the first time**: the `gateAndMark(OpDelete, oldURL)`
+  fix from commit `25220db` / CLAUDE.md 2ae had never executed end-to-end because step 4 always failed
+  first. Live traces now show `LOCK MODIFY <old> → DELETE <old> → UNLOCK` with nothing between the lock and
+  the DELETE, and `ENQUEUE_READ` sweeps clean.
+- Tests (`pkg/adt/session_affinity_test.go`): `TestRenameObject_SourcePutTargetsSourceMain` (asserts the
+  PUT path is `newURL+"/source/main"`, `assertWindowStateful`, no `informationsystem/search` in the window,
+  order source-PUT < activate < delete-old), `TestRenameObject_RejectsUnsupportedType` (FUGR/F → error,
+  zero wire calls), `TestRenameObject_RollsBackShellWhenSourceWriteFails` (400 on the source PUT → a DELETE
+  for the new shell, none for the old object, `Success=false`),
+  `TestRenameObject_TransportableRename_AdoptsChosenRequest` (transportable package, `transport=""`, single
+  candidate `TR-A` → `result.Transport=="TR-A"` and source PUT `corrNr=="TR-A"`). Existing
+  `TestRenameObject_ReleasesOldLockWhenDeleteFails` unchanged and still green.
+- Files: `pkg/adt/workflows_fileio.go`, `pkg/adt/session_affinity_test.go`,
+  `internal/mcp/tools_register.go`, `internal/mcp/handlers_fileio.go`.
+- `go build ./...` clean; `go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)` green.
+- Code-reviewed: 1 pass, APPROVE, 0 CRITICAL/HIGH. 1 MEDIUM (Phase 2 had no test coverage) — **fixed**
+  (`TestRenameObject_TransportableRename_AdoptsChosenRequest`). 3 LOW: comment overstated where the
+  old-object delete's transport comes from — **fixed**; `result.Transport` left populated after a rollback —
+  **fixed** (cleared); pre-existing `gofmt`/CRLF non-compliance in the file — noted, not this change's.
+- **Verified live (2026-09-10)** against the real SAP system, both ways:
+  - **Throwaway Go program** (`cmd/verifyrnm/`, deleted — not committed) driving `pkg/adt.Client` with
+    `VSP_HTTP_TRACE=1`: PROG `ZVSP_TST_RNM_A`→`_B` and CLAS `ZCL_VSP_TST_RNM_A`→`_B` in `$TMP` both
+    succeeded (new object has the substituted name, old object 404s), the trace showed every source PUT
+    going to `…/source/main` and step 6 deleting the old object with no request between LOCK and DELETE,
+    `FUGR/F` rejected before any call, `ENQUEUE_READ` sweep `SWEEP=[]`, zero `423` in the whole trace.
+  - **Deployed MCP tool** after a Claude Desktop restart: `SAP(action="edit", params={"type":"rename",
+    "objType":"PROG/P"|"CLAS/OC", …})` on the same throwaway names → `success:true`, new object reads back
+    with the substituted name, old object 404s; `FUGR/F` → `RenameObject failed: … only CLAS/OC, PROG/P,
+    INTF/OI and PROG/I …`; `ENQUEUE_READ` sweeps `SWEEP=[]` / `FINAL=[]`; both `_B` objects deleted clean.
+- **Known limitation, documented not fixed** (pre-existing, flagged by code review): the name substitution
+  is `strings.ReplaceAll(source, oldName, newName)` — a short old name that is a substring of another
+  identifier (`ZCL_A` inside `ZCL_ABC`) would be mangled. Out of scope for this fix; use non-substring
+  names.
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)

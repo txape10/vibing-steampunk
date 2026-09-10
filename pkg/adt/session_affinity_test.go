@@ -866,6 +866,207 @@ func TestRenameObject_ReleasesOldLockWhenDeleteFails(t *testing.T) {
 	}
 }
 
+// --- RenameObject source-write target (task_b894bc6f) ---
+//
+// Step 4 PUT the new object's source to the *bare* object URL instead of
+// …/source/main, so SAP answered 400 ExceptionInvalidData ("abapProgram
+// previsto") and every rename failed after creating an empty shell.
+
+// renameHappyRoute answers the requests a $TMP PROG rename makes, with the
+// source PUT succeeding. override runs first; if it returns true the request
+// is considered handled and the default switch is skipped.
+func renameHappyRoute(override func(http.ResponseWriter, *http.Request) bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if override != nil && override(w, r) {
+			return
+		}
+		switch {
+		case strings.Contains(r.URL.Path, "informationsystem/search"):
+			_, _ = io.WriteString(w, searchXMLFor(
+				"/sap/bc/adt/programs/programs/zdemo_old", "ZDEMO_OLD", "$TMP"))
+		case strings.Contains(r.URL.Path, "nodestructure"):
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA/></asx:values></asx:abap>`)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/source/main"):
+			_, _ = io.WriteString(w, "REPORT zdemo_old.\n")
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}
+}
+
+func TestRenameObject_SourcePutTargetsSourceMain(t *testing.T) {
+	const newURL = "/sap/bc/adt/programs/programs/zdemo_new"
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, renameHappyRoute(nil), WithAllowedPackages("$TMP"))
+
+	result, err := client.RenameObject(context.Background(), ObjectTypeProgram,
+		"ZDEMO_OLD", "ZDEMO_NEW", "$TMP", "")
+	if err != nil {
+		t.Fatalf("RenameObject: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("rename did not succeed: %+v", result)
+	}
+
+	calls := rec.snapshot()
+
+	putAt := indexOfCall(calls, isSourcePut)
+	if putAt < 0 {
+		dumpCalls(t, calls)
+		t.Fatal("no source PUT ended in /source/main — the write went to the bare object URL (the bug)")
+	}
+	if got := calls[putAt].path; got != newURL+"/source/main" {
+		t.Errorf("source PUT path = %q, want %q", got, newURL+"/source/main")
+	}
+
+	// The lock window the PUT sits in must stay stateful, and no networked
+	// package lookup may sit between the LOCK and the PUT (issue #91).
+	lockAt := -1
+	for i := putAt; i >= 0; i-- {
+		if isLock(calls[i]) {
+			lockAt = i
+			break
+		}
+	}
+	if lockAt < 0 {
+		t.Fatal("no LOCK before the source PUT")
+	}
+	assertWindowStateful(t, calls, lockAt, putAt)
+	for _, c := range calls[lockAt+1 : putAt] {
+		if strings.Contains(c.path, "informationsystem/search") {
+			t.Errorf("package SearchObject inside the lock window: %s (issue #91)", c)
+		}
+	}
+
+	// Order: source PUT (new) → activation → DELETE (old).
+	activateAt := indexOfCall(calls, func(c wireCall) bool {
+		return c.method == http.MethodPost && strings.Contains(c.path, "/activation")
+	})
+	deleteAt := indexOfCall(calls, func(c wireCall) bool { return c.method == http.MethodDelete })
+	if putAt >= activateAt || activateAt >= deleteAt {
+		dumpCalls(t, calls)
+		t.Errorf("expected order source-PUT(%d) < activate(%d) < delete-old(%d)", putAt, activateAt, deleteAt)
+	}
+	if deleteAt >= 0 && !strings.EqualFold(calls[deleteAt].path, "/sap/bc/adt/programs/programs/zdemo_old") {
+		t.Errorf("DELETE path = %q, want the old object", calls[deleteAt].path)
+	}
+}
+
+func TestRenameObject_RejectsUnsupportedType(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}, WithAllowedPackages("$TMP"))
+
+	_, err := client.RenameObject(context.Background(), ObjectTypeFunctionGroup,
+		"ZDEMO_FG_OLD", "ZDEMO_FG_NEW", "$TMP", "")
+	if err == nil {
+		t.Fatal("renaming a function group should be rejected up front")
+	}
+	if !strings.Contains(err.Error(), "FUGR/F") {
+		t.Errorf("error should name the rejected type: %v", err)
+	}
+	if calls := rec.snapshot(); len(calls) != 0 {
+		dumpCalls(t, calls)
+		t.Errorf("a rejected type must not reach the network (no shell created): %d calls", len(calls))
+	}
+}
+
+func TestRenameObject_RollsBackShellWhenSourceWriteFails(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, renameHappyRoute(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/source/main") {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, "ExceptionInvalidData")
+			return true
+		}
+		return false
+	}), WithAllowedPackages("$TMP"))
+
+	result, err := client.RenameObject(context.Background(), ObjectTypeProgram,
+		"ZDEMO_OLD", "ZDEMO_NEW", "$TMP", "")
+	if err != nil {
+		t.Fatalf("RenameObject: %v", err)
+	}
+	if result.Success {
+		t.Error("a rename whose source write failed must not report success")
+	}
+
+	calls := rec.snapshot()
+	rolledBack := indexOfCall(calls, func(c wireCall) bool {
+		return c.method == http.MethodDelete &&
+			strings.EqualFold(c.path, "/sap/bc/adt/programs/programs/zdemo_new")
+	}) >= 0
+	if !rolledBack {
+		dumpCalls(t, calls)
+		t.Error("the partially created ZDEMO_NEW shell was left behind — no DELETE for it")
+	}
+	if indexOfCall(calls, func(c wireCall) bool {
+		return c.method == http.MethodDelete &&
+			strings.EqualFold(c.path, "/sap/bc/adt/programs/programs/zdemo_old")
+	}) >= 0 {
+		t.Error("the old object was deleted even though the rename failed")
+	}
+}
+
+// A transportable rename with no request named must land the new object's
+// source in a real open request (chosen the way the editor would), not let
+// SAP auto-generate one per write — the project's transport golden rule.
+func TestRenameObject_TransportableRename_AdoptsChosenRequest(t *testing.T) {
+	checkXML := transportCheckXML(true, "ZDEMO_PKG", "ZDEMO_NEW",
+		checkCandidate{"TR-A", "TESTUSER", "feature A", "D"})
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "cts/transportchecks"):
+			_, _ = io.WriteString(w, checkXML)
+		case strings.Contains(r.URL.Path, "informationsystem/search"):
+			_, _ = io.WriteString(w, searchXMLFor(
+				"/sap/bc/adt/programs/programs/zdemo_old", "ZDEMO_OLD", "ZDEMO_PKG"))
+		case strings.Contains(r.URL.Path, "nodestructure"):
+			_, _ = io.WriteString(w, `<?xml version="1.0"?><asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA><OBJECT/></DATA></asx:values></asx:abap>`)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/source/main"):
+			_, _ = io.WriteString(w, "REPORT zdemo_old.\n")
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithAllowTransportableEdits())
+
+	result, err := client.RenameObject(context.Background(), ObjectTypeProgram,
+		"ZDEMO_OLD", "ZDEMO_NEW", "ZDEMO_PKG", "")
+	if err != nil {
+		t.Fatalf("RenameObject: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("rename did not succeed: %+v", result)
+	}
+	if result.Transport != "TR-A" {
+		t.Errorf("result.Transport = %q, want TR-A (the chosen open request)", result.Transport)
+	}
+	if result.TransportNote == "" {
+		t.Error("result.TransportNote should explain how TR-A was chosen")
+	}
+
+	calls := rec.snapshot()
+	putAt := indexOfCall(calls, isSourcePut)
+	if putAt < 0 {
+		dumpCalls(t, calls)
+		t.Fatal("no source PUT")
+	}
+	if got := calls[putAt].query.Get("corrNr"); got != "TR-A" {
+		dumpCalls(t, calls)
+		t.Errorf("source PUT corrNr = %q, want TR-A — the write did not go into the chosen request", got)
+	}
+}
+
 func TestReleaseLockAfterFailure_RunsOnACancelledContext(t *testing.T) {
 	// A mutation that fails *because* the context was cancelled or timed out
 	// must still release its lock. Reusing the dead context, as every

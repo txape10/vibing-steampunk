@@ -1640,7 +1640,7 @@ func (s *Server) registerFileTools(shouldRegister func(string) bool) {
 			mcp.WithDescription("Rename ABAP object by creating copy with new name and deleting old one. Useful for fixing naming conventions. Workflow: GetSource → Replace names → CreateNew → ActivateNew → DeleteOld"),
 			mcp.WithString("objType",
 				mcp.Required(),
-				mcp.Description("Object type: CLAS/OC (class), PROG/P (program), INTF/OI (interface), FUGR/F (function group)"),
+				mcp.Description("Object type: CLAS/OC (class), PROG/P (program), INTF/OI (interface), PROG/I (program include). Other types have no single source document and are rejected."),
 			),
 			mcp.WithString("oldName",
 				mcp.Required(),

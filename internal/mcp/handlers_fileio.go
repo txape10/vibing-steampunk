@@ -163,7 +163,7 @@ func (s *Server) handleSaveToFile(ctx context.Context, request mcp.CallToolReque
 func (s *Server) handleRenameObject(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	objTypeStr, ok := request.GetArguments()["objType"].(string)
 	if !ok || objTypeStr == "" {
-		return newToolResultError("objType is required (e.g., CLAS/OC, PROG/P, INTF/OI, FUGR/F)"), nil
+		return newToolResultError("objType is required (e.g., CLAS/OC, PROG/P, INTF/OI, PROG/I)"), nil
 	}
 
 	oldName, ok := request.GetArguments()["oldName"].(string)
