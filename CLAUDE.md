@@ -1155,17 +1155,11 @@ the code permanently — it is the fix, not a placeholder.
   below 423'd on exactly this). `DeleteObjectWithAutoLock` locks and deletes atomically in one session
   and is always the right thing here. A passed `lock_handle` is noted-and-dropped in the response. The
   now-unused exported `PrepareDelete` helper was removed with it.
-- **Not fixed — a PROG delete strands a `TRDIR`/`ESRDIRE` enqueue on this system** even though the
-  `DELETE` returns 200 with a valid lock handle. Found while live-verifying 2ae. **Pre-existing, not a
-  regression from the MODIFY-first switch**: `accessMode=DELETE` and `accessMode=MODIFY` LOCK return the
-  *identical* handle for a PROG (unlike CLAS, where DELETE-mode returns 200-empty), so the final `DELETE`
-  request is byte-for-byte the same as before — SAP just keeps the enqueue. Independently confirmed by
-  the `ZTEMP_EXEC_*` orphans every `SAP(action="analyze", params={"type":"execute_abap"})` call leaves
-  behind (`workflows_execute.go`'s cleanup path, untouched here). Same family as the MSAG limitation
-  (2v — "any LOCK→…→DELETE cycle leaves orphaned enqueues even when every step reports success"). Much
-  lower severity than the CLAS `SEOCLSENQ` strand 2ae fixes: the program is already deleted, so the
-  orphan only matters as SM12 noise and a name-reuse edge case, and SAP's session reaper clears it
-  (~60 min). Flagged as a follow-up task.
+- **A PROG delete strands a `TRDIR`/`ESRDIRE` enqueue on this system** even though the `DELETE` returns
+  200 with a valid lock handle. Found while live-verifying 2ae; **fixed in 2af below.** Pre-existing, not
+  a regression from the MODIFY-first switch (`accessMode=DELETE` and `accessMode=MODIFY` LOCK return the
+  identical handle for a PROG, so the final `DELETE` request was byte-for-byte the same as before — SAP
+  just keeps the enqueue). Same family as the MSAG limitation (2v).
 - **`isLockConflictError` hardened** (`pkg/adt/crud.go`): it only matched the EN substring
   `"currently editing"`, but this system renders the 403 in the logon language ("El usuario X ya está
   tratando Y") — a real MODIFY conflict would have been read as a flat refusal and fallen through to a
@@ -1223,6 +1217,61 @@ the code permanently — it is the fix, not a placeholder.
     old-object delete, never reached). The failed rename cleaned up its own locks (zero stranded
     enqueues — the `newUnlocked`/`oldReleased` defers from 2t/2u). Bug B's mechanism is covered by the
     Go-level `gateAndMark→LOCK→DELETE` verification above and `TestRenameObject_ReleasesOldLockWhenDeleteFails`.
+
+### 2af. Object delete — best-effort `UNLOCK` after a successful DELETE, to release the PROG `TRDIR`/`ESRDIRE` enqueue (2026-09-10)
+- **The bug** (found while live-verifying 2ae, flagged there as a follow-up): deleting an ABAP **program**
+  via ADT on this S/4HANA (2023 FPS03) leaves the `ESRDIRE`/`TRDIR` enqueue that `LockObject`'s
+  `accessMode=MODIFY` LOCK acquired stranded in SM12. The `DELETE` returns 200 and the program is genuinely
+  gone, but ADT's *program* delete handler does not dequeue that lock. It is released only by an explicit
+  `UNLOCK` or when the stateful ADT session ends. A long-running MCP server clears it on its next stateless
+  request (any later tool call) — which is why `SAP(action="delete")` immediately followed by an
+  `ENQUEUE_READ` check showed nothing; a one-shot `vsp` CLI that deletes and exits leaves it until SAP's
+  session reaper (~60 min).
+- **Live diagnosis** (throwaway `cmd/deltrace` Go program driving `pkg/adt.Client` directly with
+  `VSP_HTTP_TRACE=1`, holding the session open 30 s while an `ENQUEUE_READ`-in-`execute_abap` inspected the
+  lock table; deleted after, not committed):
+  - PROG delete, nothing after → `TRDIR/<PROG>/X` enqueue stranded, **persists after the client process
+    exits** (TCP close / process exit does not release it — the stateful ADT session survives the
+    disconnect via `sap-contextid`).
+  - PROG delete → explicit `POST {objectURL}?_action=UNLOCK&lockHandle=<same handle>` (stateful): SAP
+    returns **200 with no error** even though the DELETE already consumed the handle, and the enqueue is
+    **released**.
+  - PROG delete → any stateless request (`GET /sap/bc/adt/compatibility/graph`, abap-adt-api's
+    `dropSession`): session retired, enqueue also released — but a session-retiring hop is the wrong tool
+    in a long-running server (it would drop other in-flight lock windows).
+  - **CLAS / INTF / TABL delete → never strand** — their ADT delete handlers dequeue their own enqueue.
+    This is PROG-specific, not general to non-CLAS.
+  - `marcellourbani/abap-adt-api` (`src/api/delete.ts`) sends no post-delete `UNLOCK` either — but Eclipse
+    keeps one long session and eventually `logout()`s (`/sap/public/bc/icf/logoff`), so it never notices.
+- **Fix**: new `(*Client).bestEffortUnlockAfterDelete(ctx, objectURL, lockHandle)` (`pkg/adt/lock_release.go`)
+  — a detached-context (`context.WithoutCancel` + 30 s, same pattern as `releaseLockAfterFailure`) `UNLOCK`
+  whose error is logged to `LogOutput` (`[adt] post-delete unlock failed …`) but never returned. Called
+  after a successful `DELETE` in **`DeleteObject`** (covers `cleanupPartialObject`, `RenameObject`'s
+  old-object delete, and `ExecuteABAP`'s cleanup defer — the last also closes the `ZTEMP_EXEC_*`
+  orphan-enqueue leak 2ae listed as untouched) and in **`DeleteObjectWithAutoLock`** (its own inline
+  DELETE), before the existing `noteLockClosed`. Stateful, same session as the DELETE, scoped to one
+  handle — no effect on other concurrent operations. Harmless for CLAS/INTF/TABL (200 on the
+  already-consumed handle here; a 404 on a stricter system is swallowed).
+- Tests (`pkg/adt/session_affinity_test.go`): `TestDeleteObjectWithAutoLock_UnlocksAfterDelete`,
+  `TestDeleteObject_UnlocksAfterDelete`, `TestDeleteObjectWithAutoLock_UnlockFailureDoesNotFailDelete`,
+  `TestBestEffortUnlockAfterDelete_EmptyHandleSkipsTheUnlock`,
+  `TestBestEffortUnlockAfterDelete_RunsOnACancelledContext`.
+- Files: `pkg/adt/lock_release.go`, `pkg/adt/crud.go` (`DeleteObject`, `DeleteObjectWithAutoLock`),
+  `pkg/adt/session_affinity_test.go`.
+- `go build ./...` clean; `go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)` green.
+- Code-reviewed: 1 pass, APPROVE, 0 CRITICAL/HIGH/MEDIUM. 3 LOW: (1) log the swallowed UNLOCK error —
+  **applied**; (2) the synchronous UNLOCK can add up to 30 s to a delete's return on a hung session —
+  noted, matches the existing `releaseLockAfterFailure` tradeoff, not changed; (3) add empty-handle and
+  cancelled-context tests — **applied**.
+- **Verified live (2026-09-10)**: rebuilt `cmd/deltrace` against the fixed `pkg/adt`, ran a PROG
+  `DeleteObjectWithAutoLock` on throwaway `$TMP` `ZVSP_TST_DELPROG`; the trace showed `LOCK MODIFY → DELETE
+  → POST _action=UNLOCK` (same handle, `err=nil`), and an `ENQUEUE_READ` during the 30 s session-hold
+  returned **zero** enqueues (`TOTAL=0`) — the case that showed `TRDIR/ZVSP_TST_DELPROG/X` before the fix.
+  Also verified through the **deployed MCP tool** after a Claude Desktop restart: `SAP(action="edit",
+  target="PROG ZVSP_TST_DELPROG")` then `SAP(action="delete", ...)` → `"Object deleted successfully"`, the
+  program gone, and an `ENQUEUE_READ` sweep clean — and the chain of `execute_abap` checks around it left
+  **no `ZTEMP_EXEC_*` TRDIR orphans** (pre-fix, every `execute_abap` call stranded one — `ExecuteABAP`'s
+  cleanup defer calls `DeleteObject`, which now unlocks).
 
 ## Known Open Issues (Not Fixed)
 

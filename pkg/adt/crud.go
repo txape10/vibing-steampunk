@@ -991,6 +991,11 @@ func (c *Client) DeleteObject(ctx context.Context, objectURL string, lockHandle 
 		return fmt.Errorf("deleting object: %w", err)
 	}
 
+	// ADT's program delete handler leaves the ESRDIRE/TRDIR enqueue held on
+	// some S/4HANA systems; an explicit UNLOCK releases it. Best-effort — the
+	// object is gone, an error here is not actionable.
+	c.bestEffortUnlockAfterDelete(ctx, objectURL, lockHandle)
+
 	// A delete consumes the handle without an UNLOCK ever being sent, which is
 	// how a lock-window counter ends up permanently non-zero.
 	c.noteLockClosed(lockHandle)
@@ -1078,9 +1083,12 @@ func (c *Client) DeleteObjectWithAutoLock(ctx context.Context, objectURL string,
 	}
 
 	// This function issues its own inline DELETE above rather than delegating
-	// to DeleteObject, so DeleteObject's own noteLockClosed never runs for it —
-	// this fork-specific happy path needs its own hook (issue #168 upstream has
-	// no equivalent function to cover).
+	// to DeleteObject, so DeleteObject's own post-delete UNLOCK and
+	// noteLockClosed never run for it — this fork-specific happy path needs
+	// its own hooks. The UNLOCK releases the ESRDIRE/TRDIR enqueue ADT's
+	// program delete handler leaves held on some S/4HANA systems (best-effort:
+	// the object is gone). #168 upstream has no equivalent function to cover.
+	c.bestEffortUnlockAfterDelete(ctx, objectURL, lock.LockHandle)
 	c.noteLockClosed(lock.LockHandle)
 
 	return nil

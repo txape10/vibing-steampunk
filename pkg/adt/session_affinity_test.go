@@ -1103,6 +1103,134 @@ func TestDeleteObject_AfterExternalLock_NoSearchInsideWindow(t *testing.T) {
 	assertWindowStateful(t, calls, lockAt, deleteAt)
 }
 
+// ADT's program delete handler leaves the ESRDIRE/TRDIR enqueue held on some
+// S/4HANA systems (2023 FPS03 confirmed live): the DELETE returns 200 and the
+// program is gone, but the lock the MODIFY LOCK took is not released until an
+// explicit UNLOCK or the stateful session ends. Both delete paths now send a
+// best-effort UNLOCK right after a successful DELETE.
+
+func TestDeleteObjectWithAutoLock_UnlocksAfterDelete(t *testing.T) {
+	const objectURL = "/sap/bc/adt/programs/programs/ZDEMO_DELUNLOCK"
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK" {
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	if err := client.DeleteObjectWithAutoLock(context.Background(), objectURL, ""); err != nil {
+		t.Fatalf("DeleteObjectWithAutoLock: %v", err)
+	}
+
+	calls := rec.snapshot()
+	deleteAt := indexOfCall(calls, func(c wireCall) bool { return c.method == http.MethodDelete })
+	unlockAt := indexOfCall(calls, isUnlock)
+	if deleteAt < 0 {
+		dumpCalls(t, calls)
+		t.Fatal("no DELETE reached the server")
+	}
+	if unlockAt < 0 || unlockAt < deleteAt {
+		dumpCalls(t, calls)
+		t.Fatal("expected an UNLOCK after the DELETE — ADT's program delete leaves the " +
+			"ESRDIRE/TRDIR enqueue held until the lock is released explicitly")
+	}
+	if got := calls[unlockAt].query.Get("lockHandle"); got != "HANDLE-1" {
+		t.Errorf("post-delete UNLOCK used lockHandle %q, want the handle the LOCK returned", got)
+	}
+	if calls[unlockAt].sessionType != "stateful" {
+		t.Errorf("post-delete UNLOCK is %q, want stateful (it must reach the session the "+
+			"lock lives in, not retire it)", calls[unlockAt].sessionType)
+	}
+	if client.lockOutstanding() {
+		t.Error("lock window still open after DeleteObjectWithAutoLock + UNLOCK")
+	}
+}
+
+func TestDeleteObject_UnlocksAfterDelete(t *testing.T) {
+	const objectURL = "/sap/bc/adt/programs/programs/ZDEMO_DOUNLOCK"
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	if err := client.DeleteObject(context.Background(), objectURL, "EXT-HANDLE", ""); err != nil {
+		t.Fatalf("DeleteObject: %v", err)
+	}
+
+	calls := rec.snapshot()
+	deleteAt := indexOfCall(calls, func(c wireCall) bool { return c.method == http.MethodDelete })
+	unlockAt := indexOfCall(calls, isUnlock)
+	if deleteAt < 0 || unlockAt < 0 || unlockAt < deleteAt {
+		dumpCalls(t, calls)
+		t.Fatal("DeleteObject should send a best-effort UNLOCK after the DELETE")
+	}
+	if got := calls[unlockAt].query.Get("lockHandle"); got != "EXT-HANDLE" {
+		t.Errorf("post-delete UNLOCK used lockHandle %q, want the caller's handle", got)
+	}
+}
+
+func TestDeleteObjectWithAutoLock_UnlockFailureDoesNotFailDelete(t *testing.T) {
+	const objectURL = "/sap/bc/adt/programs/programs/ZDEMO_DELUNLOCKFAIL"
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "UNLOCK":
+			// A stricter system that rejects the already-consumed handle.
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+
+	if err := client.DeleteObjectWithAutoLock(context.Background(), objectURL, ""); err != nil {
+		t.Fatalf("a failed post-delete UNLOCK must not fail the delete: %v", err)
+	}
+	if indexOfCall(rec.snapshot(), isUnlock) < 0 {
+		t.Error("the post-delete UNLOCK was never attempted")
+	}
+}
+
+func TestBestEffortUnlockAfterDelete_EmptyHandleSkipsTheUnlock(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	client.bestEffortUnlockAfterDelete(context.Background(), "/sap/bc/adt/programs/programs/ZDEMO_NOHANDLE", "")
+
+	if idx := indexOfCall(rec.snapshot(), isUnlock); idx >= 0 {
+		t.Error("bestEffortUnlockAfterDelete issued an UNLOCK for an empty lock handle")
+	}
+}
+
+func TestBestEffortUnlockAfterDelete_RunsOnACancelledContext(t *testing.T) {
+	// Same property as releaseLockAfterFailure: the caller's ctx being done
+	// (MCP client timeout, Ctrl-C) must not stop the compensating UNLOCK.
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client.bestEffortUnlockAfterDelete(ctx, "/sap/bc/adt/programs/programs/ZDEMO_DELCANCEL", "HANDLE-1")
+
+	if idx := indexOfCall(rec.snapshot(), isUnlock); idx < 0 {
+		t.Errorf("no UNLOCK reached the server after the context was cancelled — "+
+			"the PROG enqueue would be stranded until SAP reaps the session; trace: %v", rec.snapshot())
+	}
+}
+
 func TestIsLockConflictError_LanguageIndependent(t *testing.T) {
 	// The real S/4HANA 403 — message rendered in ES, lock keyed by EU/510.
 	esBody := `403 at /x: <exc:exception><type id="ExceptionResourceNoAccess"/>` +

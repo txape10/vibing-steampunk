@@ -37,6 +37,39 @@ func (c *Client) releaseLockAfterFailure(ctx context.Context, objectURL, lockHan
 	return c.UnlockObject(releaseCtx, objectURL, lockHandle)
 }
 
+// bestEffortUnlockAfterDelete releases the lock a successful DELETE was issued
+// under.
+//
+// A DELETE consumes the lock handle server-side, so no UNLOCK is normally
+// needed — and on most object types SAP's delete handler dequeues the object's
+// own ENQUEUE as part of the delete. ADT's *program* delete handler on some
+// S/4HANA systems does not: it leaves the ESRDIRE/TRDIR enqueue that LockObject
+// acquired held until the lock is released explicitly or the stateful ADT
+// session ends. A long-running MCP server clears it on its next stateless
+// request; a one-shot CLI invocation that deletes and exits leaves it in SM12
+// until SAP's session reaper runs (~60 min). An explicit UNLOCK right after the
+// delete closes that gap.
+//
+// It is best-effort by design: the object is already gone, so an error here
+// ("handle already consumed" on a stricter system, or a transient network
+// failure) is not actionable and must not turn a successful delete into a
+// failure. Runs on a context detached from the caller's cancellation, same as
+// releaseLockAfterFailure, so a caller ctx that is already done does not stop
+// the release from going out.
+func (c *Client) bestEffortUnlockAfterDelete(ctx context.Context, objectURL, lockHandle string) {
+	if lockHandle == "" {
+		return
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unlockAfterFailureTimeout)
+	defer cancel()
+	if err := c.UnlockObject(releaseCtx, objectURL, lockHandle); err != nil {
+		// Best-effort, so not returned — but the whole reason this call exists
+		// is a system-specific ADT quirk, and a future system where the
+		// compensating UNLOCK also fails should not be a silent dead end.
+		fmt.Fprintf(LogOutput, "[adt] post-delete unlock failed for %s: %v\n", objectURL, err)
+	}
+}
+
 // joinLockReleaseErr appends a stranded-lock advice string to the error a
 // mutation is already returning. When that error is nil (the mutation
 // itself succeeded but a *later* step's compensating unlock failed — a
