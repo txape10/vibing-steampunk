@@ -141,7 +141,24 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		return result, nil
 	}
 
-	// 6. Delete old object
+	// 6. Delete old object. Gate + mark the context for oldURL *before* its
+	// lock: the old object's package was never checked above (only the new
+	// object's), so this is a real gate, and it must run here rather than
+	// inside DeleteObject, where its SearchObject would be a stateless hop in
+	// the lock window (issue #91). No lock is open at this point — the new
+	// object was already unlocked and activated.
+	ctx, err = c.gateAndMark(ctx, MutationContext{
+		Op:        OpDelete,
+		OpName:    "RenameObject",
+		ObjectURL: oldURL,
+		Transport: transport,
+	})
+	if err != nil {
+		result.Message = fmt.Sprintf("New object %s created successfully, but the old object %s cannot be deleted: %v. Please delete manually.", newName, oldName, err)
+		result.Success = true
+		return result, nil
+	}
+
 	oldLockResult, err := c.LockObject(ctx, oldURL, "MODIFY")
 	if err != nil {
 		result.Message = fmt.Sprintf("New object %s created successfully, but failed to lock old object %s for deletion: %v. Please delete manually.", newName, oldName, err)

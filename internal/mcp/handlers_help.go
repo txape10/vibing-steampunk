@@ -99,7 +99,10 @@ High-level create (with source):
 	case "delete":
 		return mcp.NewToolResultText(`SAP(action="delete") - Delete objects
 
-  SAP(action="delete", target="OBJECT", params={"object_url": "/sap/bc/adt/oo/classes/zcl_test", "lock_handle": "..."})`)
+  SAP(action="delete", target="OBJECT", params={"object_url": "/sap/bc/adt/oo/classes/zcl_test"})
+
+  Pass only object_url. The delete locks and deletes atomically in one session;
+  a lock_handle from a separate call is ignored (it cannot be reused, issue #169).`)
 
 	case "search":
 		return mcp.NewToolResultText(`SAP(action="search") - Search for objects

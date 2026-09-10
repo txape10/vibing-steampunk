@@ -54,7 +54,17 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 
 	result, err := parseLockResult(resp.Body)
 	if err != nil {
+		if errors.Is(err, errLockNoHandle) {
+			return nil, fmt.Errorf("locking object (accessMode %s): %w — server answered 2xx with body %q",
+				accessMode, errLockNoHandle, truncateRunes(strings.TrimSpace(string(resp.Body)), 256))
+		}
 		return nil, err
+	}
+	if result.LockHandle == "" {
+		// A 2xx with a parseable body but no LOCK_HANDLE is the same hazard as
+		// an empty body: the enqueue may be held with no way to release it.
+		return nil, fmt.Errorf("locking object (accessMode %s): %w — parsed response carried no LOCK_HANDLE",
+			accessMode, errLockNoHandle)
 	}
 
 	// MODIFICATION_SUPPORT carries SAP-side policy metadata about how the
@@ -83,7 +93,18 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 	return result, nil
 }
 
+// errLockNoHandle marks a LOCK the server answered 2xx but without a usable
+// lock handle — an empty or handle-less body. Seen for accessMode=DELETE on
+// some S/4HANA systems, where the POST returns 200 with no content yet the
+// SEOCLSENQ enqueue is still taken server-side. Callers must not read this as
+// "not locked" (see DeleteObjectWithAutoLock).
+var errLockNoHandle = errors.New("LOCK returned no lock handle")
+
 func parseLockResult(data []byte) (*LockResult, error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, errLockNoHandle
+	}
+
 	// Parse the ABAP serialization XML format
 	type lockData struct {
 		LockHandle string `xml:"LOCK_HANDLE"`
@@ -326,13 +347,37 @@ func (c *Client) tryCleanupOrphanLock(ctx context.Context, objectURL string) {
 	_ = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle)
 }
 
-// isLockConflictError checks if an error is a lock conflict (HTTP 403 "is currently editing")
+// isLockConflictError reports whether err is SAP's "the object is already being
+// edited" 403 — the object is enqueued by someone (often the caller's own
+// stranded lock from an earlier failed attempt).
+//
+// The rendered message is in the session language (this project logs on in ES,
+// where it reads "El usuario X ya está tratando Y"), so the reliable marker is
+// the language-independent message key EU/510, with the ADT exception-type id
+// and a few rendered phrasings as fallbacks.
 func isLockConflictError(err error) bool {
 	if err == nil {
 		return false
 	}
-	errStr := err.Error()
-	return strings.Contains(errStr, "403") && strings.Contains(errStr, "currently editing")
+	s := err.Error()
+	if !strings.Contains(s, "403") {
+		return false
+	}
+	if strings.Contains(s, `T100KEY-ID">EU`) && strings.Contains(s, `T100KEY-NO">510`) {
+		return true
+	}
+	for _, marker := range []string{
+		"ExceptionResourceNoAccess", // the ADT exception type for a locked resource
+		"currently editing",         // rendered message, EN
+		"already editing",
+		"is being edited",
+		"ya está tratando", // rendered message, ES (this project's logon language)
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // PartialCreateError is returned by CreateObject when the SAP backend
@@ -449,6 +494,28 @@ func (c *Client) cleanupPartialObject(ctx context.Context, objectURL, pkg, trans
 		Package:   pkg,
 		Transport: transport,
 	}
+
+	// Gate and mark the context before any lock: the delete below would
+	// otherwise resolve the package via SearchObject inside the lock window
+	// (issue #91). Package is known here (the half-created object was aimed at
+	// pkg), so checkMutationPackage validates it directly without a lookup;
+	// the mark then lets DeleteObject skip its own.
+	gatedCtx, gErr := c.gateAndMark(ctx, MutationContext{
+		Op:        OpDelete,
+		OpName:    "cleanupPartialObject",
+		ObjectURL: objectURL,
+		Package:   pkg,
+		Transport: transport,
+	})
+	if gErr != nil {
+		pce.CleanupActions = append(pce.CleanupActions,
+			fmt.Sprintf("mutation gate refused the cleanup delete: %v", gErr))
+		pce.ManualSteps = []string{
+			"delete the half-created object via SE80 once you have confirmed it should not exist",
+		}
+		return pce
+	}
+	ctx = gatedCtx
 
 	// Step 1: orphan lock cleanup (cheap; reuses the existing helper).
 	c.tryCleanupOrphanLock(ctx, objectURL)
@@ -935,29 +1002,50 @@ func (c *Client) DeleteObject(ctx context.Context, objectURL string, lockHandle 
 // session. This avoids the session-affinity problem where a lock acquired in one MCP call is
 // invalidated before the delete call in a separate MCP call (issue #88 / lock handle rejected).
 //
-// Some SAP systems require accessMode="DELETE" for the lock; others only accept "MODIFY".
-// The function tries "DELETE" first and falls back to "MODIFY" on failure.
+// Lock access mode: MODIFY is tried first, accessMode="DELETE" only as a fallback. On some
+// S/4HANA systems a "DELETE"-mode LOCK returns 200 with an empty body — no handle for the caller,
+// yet the SEOCLSENQ enqueue is taken server-side; the old "DELETE first" order then 403'd on the
+// MODIFY retry and stranded that enqueue on every delete of a class. MODIFY returns a usable
+// handle on every system tested and the subsequent DELETE accepts it, so it is the safe default;
+// "DELETE" mode is kept only for a system that rejects a MODIFY lock for deletion.
 func (c *Client) DeleteObjectWithAutoLock(ctx context.Context, objectURL string, transport string) error {
-	if err := c.checkMutation(ctx, MutationContext{
+	ctx, err := c.gateAndMark(ctx, MutationContext{
 		Op:        OpDelete,
 		OpName:    "DeleteObjectWithAutoLock",
 		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	// No inner checkMutation call sits between here and the DELETE below —
-	// this function issues its own inline request rather than delegating to
-	// DeleteObject — so there is nothing for a context mark to skip.
+	// gateAndMark ran the full gate and marked the context, so any helper this
+	// function may grow that calls checkMutation for the same object skips only
+	// the networked package lookup (issue #91). The DELETE below is inline, so
+	// nothing between the lock and the request re-resolves the package.
 
-	// Try DELETE access mode first; some systems require it, others only support MODIFY.
-	lock, err := c.LockObject(ctx, objectURL, "DELETE")
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
 	if err != nil {
-		lock, err = c.LockObject(ctx, objectURL, "MODIFY")
-		if err != nil {
-			return fmt.Errorf("acquiring lock for delete: %w", err)
+		// A stranded enqueue from an earlier failed attempt shows as a lock
+		// conflict here — say so, rather than falling through to a DELETE-mode
+		// attempt that would strand a second one.
+		if isLockConflictError(err) {
+			return fmt.Errorf("acquiring lock for delete: %w — %s", err, strandedLockAdvice(objectURL, err))
+		}
+		modifyErr := err
+		var deleteModeErr error
+		lock, deleteModeErr = c.LockObject(ctx, objectURL, "DELETE")
+		if deleteModeErr != nil {
+			if errors.Is(deleteModeErr, errLockNoHandle) {
+				// The DELETE-mode LOCK took an enqueue we cannot release.
+				return fmt.Errorf("acquiring lock for delete: MODIFY was refused (%v) and DELETE mode: %w — %s",
+					modifyErr, deleteModeErr, strandedLockAdvice(objectURL, deleteModeErr))
+			}
+			return fmt.Errorf("acquiring lock for delete: MODIFY (%v) and DELETE mode (%w)", modifyErr, deleteModeErr)
 		}
 	}
+	// LockObject never returns a nil error together with an empty handle, so
+	// lock is usable from here. The stale MODIFY error (if the fallback ran) is
+	// never read again — resolveWriteTransport reassigns err next.
 
 	effectiveTransport, err := c.resolveWriteTransport(transport, lock.CorrNr, "DeleteObjectWithAutoLock")
 	if err != nil {

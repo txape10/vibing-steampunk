@@ -392,9 +392,12 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
   `transport.Request` with no `Stateful` field, so creating a DDIC table 423'd every single time,
   independent of any policy flag — and `WriteMessageClassTexts`' PUT (`pkg/adt/i18n.go`), missing the same
   `Stateful: true`. `CreateTable` also gained the package-ownership check it never had (`checkSafety` alone
-  before, no `AllowedPackages` enforcement at all) — a behavior change confirmed inert on this project's own
-  config (`--allowed-packages` is not set for the `abap-adt` MCP server here, verified by reading
-  `claude_desktop_config.json`'s `args` directly, no secrets involved).
+  before, no `AllowedPackages` enforcement at all) — thought at the time to be inert on this project's
+  config. **Correction (2026-09-10, see 2ae)**: this checked `claude_desktop_config.json`'s `args` and
+  missed that the config sets `env.SAP_ALLOWED_PACKAGES=Z*,$TMP`, which `vsp` reads via viper's `SAP`
+  env prefix. `--allowed-packages` **is** effectively active here, so `CreateTable`'s new package check
+  (and every "inert because AllowedPackages is not set" claim in 2t/2z) does run against `Z*,$TMP` in
+  practice — benign for Z*/$TMP work, but not the no-op it was described as.
 - **A CSRF-refetch hop no configuration gated**: `pkg/adt/http.go`'s token-refresh logic (triggered by no
   cached token, a 403, a session-expiry retry, or a 401) only ever consulted the client-wide
   `SessionType` default, never the statefulness of the in-flight request that triggered it. A stateful write
@@ -1093,16 +1096,133 @@ the code permanently — it is the fix, not a placeholder.
   - **The attribute-insert branch could not be exercised live** — SAP requires a description at object
     creation, so a document with no `adtcore:description` never occurs. Covered by the unit test
     `TestSetDescription_InsertsAttributeWhenAbsent`.
-- **Known caveat — CLAS/INTF can leave a stranded `SEOCLSENQ` lock on this S/4 system**: cleaning up the
-  throwaway `ZCL_VSP_TST_DESC` hit a 403 "user is already editing" on DELETE even though every HTTP step
-  (LOCK/PUT/UNLOCK) had reported success and the description change was readable. It reproduces with a
-  plain `EDITSOURCE` on the same class and could not be cleared by any ADT unlock (own session or a
-  fresh one) — it is the **same class-family enqueue behaviour already documented for MSAG** (see the
-  `WriteMessageClassTexts` entry under Known Open Issues and `docs/message-class-write-investigation.md`),
-  **not introduced by this port**, and only SM12 or the owning process's death clears it.
-  `verifyDescriptionWrite` does not (and cannot cheaply) detect a stranded lock — an immediate re-LOCK
-  to check would itself strand. `SetDescription` on a class is therefore no safer and no worse than
-  `EditSource` on a class, which ships. Documented, not fixed.
+- **Stranded `SEOCLSENQ` lock hit while cleaning up the throwaway `ZCL_VSP_TST_DESC` — root-caused and
+  fixed in 2ae**: the DELETE of that class kept 403'ing "user is already editing" with a stranded enqueue.
+  Follow-up work (2ae) traced it to `DeleteObjectWithAutoLock` trying an `accessMode=DELETE` LOCK first,
+  which on this system returns `200` with an empty body — no handle for the caller, yet the enqueue is
+  taken — after which the MODIFY retry 403'd and orphaned it. `SetDescription`'s own LOCK/PUT/UNLOCK was
+  not the culprit; the `EDITSOURCE` that also reproduced it was going through the same
+  `DeleteObjectWithAutoLock` path during cleanup, not the edit itself. Fixed in 2ae by trying MODIFY
+  first. `verifyDescriptionWrite` still does not detect a stranded lock (an immediate re-LOCK to check
+  would itself strand), but with 2ae the delete path no longer creates one.
+
+### 2ae. Object delete — `accessMode=DELETE` lock strands an enqueue on every class delete; `SearchObject` inside the delete lock window (2026-09-10)
+- **Bug A — `DeleteObjectWithAutoLock` stranded a `SEOCLSENQ` enqueue on every class delete**
+  (`SAP(action="delete", target="OBJECT")` with no `lock_handle`). The function tried
+  `LockObject(objectURL, "DELETE")` first, falling back to `"MODIFY"` on error. Confirmed live with
+  `VSP_HTTP_TRACE=1` on a throwaway `$TMP` class: `POST …?_action=LOCK&accessMode=DELETE` returns
+  **HTTP 200 with an empty body** on this S/4HANA (2023 FPS03) — `parseLockResult` fails (`EOF`),
+  `LockObject` returns an error, the caller discards it — **but the `SEOCLSENQ` X-lock is granted
+  server-side** (verified via `ENQUEUE_READ`). The `"MODIFY"` retry then 403s "user is already editing"
+  against that just-granted lock, and the enqueue is orphaned because no handle ever reached the client.
+  A bare `DELETE` without a handle 423s ("invalid lock handle: ()"), so the handle-less DELETE-mode lock
+  is unusable here. `MODIFY`-mode LOCK, by contrast, returns a normal handle and the subsequent `DELETE`
+  accepts it — verified by deleting two throwaway classes cleanly that way.
+  - **Fix**: `DeleteObjectWithAutoLock` now tries **`MODIFY` first**, and `accessMode=DELETE` only if
+    `MODIFY` is refused with something other than a lock conflict (a flat rejection — for a hypothetical
+    system that needs DELETE-mode). A `MODIFY` lock conflict returns `strandedLockAdvice` (SM12 / wait
+    for the session timeout / it is your own user) instead of falling through to a second strand.
+    Not chosen: making `parseLockResult` tolerate the DELETE-mode "shape" — there is no shape, the body
+    is empty; `tryCleanupOrphanLock` before the retry — it takes a `MODIFY` lock, which is exactly what
+    the DELETE-mode enqueue blocks.
+  - **`parseLockResult` + `LockObject` guard**: an empty/whitespace body now returns the sentinel
+    `errLockNoHandle`; `LockObject` also rejects a 2xx whose parsed body carries no `LOCK_HANDLE`. A
+    handle-less "success" was previously propagated as a valid `*LockResult{LockHandle:""}` — every
+    caller then did a handle-less write that 403/423'd. One test mock (`TestClient_WriteSource_Create`)
+    relied on that tolerance and was given a real `testLockXML` lock response.
+- **Bug B — `DeleteObject` ran `SearchObject` inside the caller's lock window** (`checkMutation` →
+  `checkObjectPackageSafety` → `getObjectPackage` → `SearchObject`, an unconditional stateless GET for
+  any object, `$TMP` included, whenever a package whitelist is configured). **This system's MCP server
+  has one**: `claude_desktop_config.json` sets `env.SAP_ALLOWED_PACKAGES=Z*,$TMP`, and `vsp` (launched
+  with no args) reads it via viper's `SAP` env prefix into `cfg.AllowedPackages` → `safety.AllowedPackages`.
+  So Bug B is **live-exposed here, not latent** — 2t's claim that `--allowed-packages` "is not set for
+  the `abap-adt` MCP server here" checked the CLI `args` and missed the `env`; corrected below.
+  The victims are the code paths that lock an object then call `DeleteObject` in the same session:
+  `RenameObject` (deletes the old object after building the new one — MCP tool `RenameObject`) and
+  `cleanupPartialObject` (runs automatically after a half-failed create — MCP tool `RecoverFailedCreate`).
+  On this system, before the fix, both `SearchObject` between LOCK and DELETE → session retired → the
+  DELETE 423s (`ExceptionResourceInvalidLockHandle`) → "delete manually" + a stranded lock.
+  - **Fix**: `gateAndMark` (the existing `checkMutation` + per-object marker, see 2t) runs the package
+    lookup **above** the lock and marks the context; `DeleteObject`'s own `checkMutation` then skips the
+    networked step for that object. Applied in `RenameObject`'s old-object delete
+    (`pkg/adt/workflows_fileio.go` — a real gate: the old object's package was never checked, only the
+    new one's), `cleanupPartialObject` (`pkg/adt/crud.go` — with `Package` known, so no lookup at all),
+    and `DeleteObjectWithAutoLock` (was already `checkMutation` above its own lock; now `gateAndMark`).
+    `ExecuteABAP`'s cleanup defer already marked its context — unchanged.
+- **The MCP `delete` tool now ignores `lock_handle`** (`handleDeleteObject`, `internal/mcp/handlers_crud.go`).
+  A handle only ever reaches that handler from a prior MCP `LOCK` call, and a lock handle cannot be
+  reused across two tool calls (**issue #169** — each is its own server-side session; the live test
+  below 423'd on exactly this). `DeleteObjectWithAutoLock` locks and deletes atomically in one session
+  and is always the right thing here. A passed `lock_handle` is noted-and-dropped in the response. The
+  now-unused exported `PrepareDelete` helper was removed with it.
+- **Not fixed — a PROG delete strands a `TRDIR`/`ESRDIRE` enqueue on this system** even though the
+  `DELETE` returns 200 with a valid lock handle. Found while live-verifying 2ae. **Pre-existing, not a
+  regression from the MODIFY-first switch**: `accessMode=DELETE` and `accessMode=MODIFY` LOCK return the
+  *identical* handle for a PROG (unlike CLAS, where DELETE-mode returns 200-empty), so the final `DELETE`
+  request is byte-for-byte the same as before — SAP just keeps the enqueue. Independently confirmed by
+  the `ZTEMP_EXEC_*` orphans every `SAP(action="analyze", params={"type":"execute_abap"})` call leaves
+  behind (`workflows_execute.go`'s cleanup path, untouched here). Same family as the MSAG limitation
+  (2v — "any LOCK→…→DELETE cycle leaves orphaned enqueues even when every step reports success"). Much
+  lower severity than the CLAS `SEOCLSENQ` strand 2ae fixes: the program is already deleted, so the
+  orphan only matters as SM12 noise and a name-reuse edge case, and SAP's session reaper clears it
+  (~60 min). Flagged as a follow-up task.
+- **`isLockConflictError` hardened** (`pkg/adt/crud.go`): it only matched the EN substring
+  `"currently editing"`, but this system renders the 403 in the logon language ("El usuario X ya está
+  tratando Y") — a real MODIFY conflict would have been read as a flat refusal and fallen through to a
+  DELETE-mode attempt that strands a second `SEOCLSENQ`. Now keys on the language-independent message
+  key `EU/510` (plus the ADT exception-type id and several rendered phrasings as fallbacks).
+- Tests (`pkg/adt/session_affinity_test.go`): `TestParseLockResult_EmptyBodyIsNoHandle`,
+  `TestLockObject_TwoHundredWithNoHandle_IsError`,
+  `TestDeleteObjectWithAutoLock_ModifyFirst_NeverTriesDeleteMode`,
+  `TestDeleteObjectWithAutoLock_FallsBackToDeleteModeWhenModifyRefused`,
+  `TestDeleteObjectWithAutoLock_ModifyConflict_GivesStrandedAdvice` (realistic ES + EU/510 body),
+  `TestIsLockConflictError_LanguageIndependent`,
+  `TestDeleteObject_AfterExternalLock_NoSearchInsideWindow` (marker + `assertWindowStateful` with
+  `WithAllowedPackages`).
+- **Cleanup technique learned**: an orphaned `SEOCLSENQ` (owner session dead) is cleared by
+  `ENQUE_DELETE` — the FM SM12 uses — called from `SAP(action="analyze", params={"type":"execute_abap"})`
+  (which has the exact in-memory `SEQG3` row, no JSON round-trip of the `0xFF`-padded `GARG`). `ENQUEUE_READ`
+  + filter + `ENQUE_DELETE` in one throwaway report. `RS_ACCESS_PERMISSION` and `DEQUEUE_ESEOCLASS` via
+  `CALL_RFC` do **not** work (the former has a `REF TO IF_ADT_LOCK_HANDLE` param the RFC bridge can't
+  bind — same class of issue as 2y; the latter is session-scoped and won't touch another session's lock).
+- Files: `pkg/adt/crud.go` (`parseLockResult`, `LockObject`, `isLockConflictError`,
+  `DeleteObjectWithAutoLock`, `cleanupPartialObject`), `pkg/adt/workflows_fileio.go` (`RenameObject`),
+  `internal/mcp/handlers_crud.go` (`handleDeleteObject` — ignores `lock_handle`),
+  `internal/mcp/tools_register.go` + `internal/mcp/handlers_help.go` (`lock_handle` doc),
+  `pkg/adt/session_affinity_test.go`, `pkg/adt/workflows_test.go` (mock lock XML).
+- `go build ./...` clean; `go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)` green.
+- Code-reviewed: two passes, both APPROVE, 0 CRITICAL/HIGH. Pass 2's 1 MEDIUM — `isLockConflictError`
+  matched only the EN message text and would misclassify the ES-rendered 403 this system sends — was
+  fixed (EU/510 key). LOW, not changed: the stale MODIFY `err` after a DELETE-mode fallback is captured
+  as `modifyErr` for the messages and never read as live state; `cleanupPartialObject` returns before
+  the orphan-lock sweep when the gate refuses (not taking a lock policy forbids is more correct).
+- **Verified live (2026-09-10)** against the real SAP system, twice — first with a throwaway Go program
+  (`cmd/verify2ae/`, deleted) driving the real `pkg/adt.Client` directly, then through the **deployed MCP
+  tool** after a Claude Desktop restart — on a throwaway `$TMP` class `ZCL_VSP_TST_DELLOCK`:
+  - **Auto-lock path** (Go: `DeleteObjectWithAutoLock`; MCP: `SAP(action="delete", target="OBJECT",
+    params={"object_url": ".../zcl_vsp_tst_dellock"})` with no `lock_handle`): Go trace showed `LOCK
+    accessMode=MODIFY` → 200, `DELETE` → 200, `err=nil`, **no `accessMode=DELETE` LOCK issued**; the MCP
+    call returned `"Object deleted successfully"` on the **first** try (this is the exact call that 403'd
+    "user is already editing" over and over in the 2ad session). `ENQUEUE_READ` after each: **zero
+    `SEOCLSENQ`** — the strand that used to happen on every class delete is gone.
+  - **Bug B path (Go)** (`gateAndMark(OpDelete)` → `LockObject(MODIFY)` → `DeleteObject`, client built
+    with `WithAllowedPackages` — what `RenameObject`/`cleanupPartialObject` now do): trace showed the
+    `informationsystem/search` package lookup fire *before* the LOCK, then `LOCK` → 200, `DELETE` → 200
+    with **no request between them**, `err=nil`, zero stranded enqueues. The pre-fix shape (`DeleteObject`
+    running that search itself, after the caller's lock) is what 423'd.
+  - **`lock_handle` ignored (MCP)**: before the `handleDeleteObject` change, `SAP(action="edit",
+    target="LOCK")` then `SAP(action="delete", ..., "lock_handle": ...)` in a separate call →
+    **423 `ExceptionResourceInvalidLockHandle`** (issue #169 — the handle's session is gone by the
+    second call). After the change the handler ignores the handle and auto-locks, so the same two calls
+    delete cleanly; a `LOCK` left dangling by the caller still needs its own `UNLOCK` (or it is a
+    self-conflict the MODIFY-first delete reports via `strandedLockAdvice`).
+  - **`RenameObject` live (Bug B, MCP)**: could not be exercised end to end — `SAP(action="edit",
+    params={"type":"rename", "objType":"PROG/P", ...})` on a throwaway `$TMP` program fails at step 4
+    (write source to the new shell) with `400 ExceptionInvalidData` "Elemento abapProgram previsto" — a
+    **separate pre-existing `RenameObject`/PROG bug**, unrelated to Bug B (which is step 6, the
+    old-object delete, never reached). The failed rename cleaned up its own locks (zero stranded
+    enqueues — the `newUnlocked`/`oldReleased` defers from 2t/2u). Bug B's mechanism is covered by the
+    Go-level `gateAndMark→LOCK→DELETE` verification above and `TestRenameObject_ReleasesOldLockWhenDeleteFails`.
 
 ## Known Open Issues (Not Fixed)
 

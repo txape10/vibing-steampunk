@@ -178,7 +178,10 @@ WRITE: 'Hello, World!'.`
 				Header:     http.Header{},
 			},
 			"/sap/bc/adt/programs/programs/ZTEST/source/main": newWorkflowTestResponse("OK"),
-			"/sap/bc/adt/checkruns":                           newWorkflowTestResponse("OK"),
+			// The LOCK (and UNLOCK) POST to the object URL — must carry a real
+			// LOCK_HANDLE now that LockObject rejects a handle-less 2xx.
+			"POST /sap/bc/adt/programs/programs/ZTEST": newWorkflowTestResponse(testLockXML),
+			"/sap/bc/adt/checkruns":                    newWorkflowTestResponse("OK"),
 			// parseActivationResult treats an empty body as a successful activation;
 			// a non-empty non-XML body like "OK" is parsed as an activation error.
 			"/sap/bc/adt/activation": newWorkflowTestResponse(""),

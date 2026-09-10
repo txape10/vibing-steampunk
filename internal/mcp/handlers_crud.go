@@ -927,26 +927,27 @@ func (s *Server) handleDeleteObject(ctx context.Context, request mcp.CallToolReq
 		transport = t
 	}
 
-	// lock_handle is optional. When not provided, DeleteObjectWithAutoLock acquires
-	// the lock and deletes atomically in a single stateful session, avoiding the
-	// session-affinity problem where a lock from a prior MCP call is invalidated
-	// before the delete call reaches SAP (issue #88 / "lock handle rejected").
-	lockHandle, _ := request.GetArguments()["lock_handle"].(string)
-	if lockHandle != "" {
-		// Caller already holds a lock — use it directly.
-		err := s.adtClient.DeleteObject(ctx, objectURL, lockHandle, transport)
-		if err != nil {
-			return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
-		}
-	} else {
-		// Auto-lock + delete atomically.
-		err := s.adtClient.DeleteObjectWithAutoLock(ctx, objectURL, transport)
-		if err != nil {
-			return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
-		}
+	// lock_handle is accepted for backward compatibility but deliberately
+	// ignored. A handle reaches this handler only from a prior MCP LOCK call,
+	// and a lock handle is bound to a server-side ADT session that a separate
+	// tool call does not reliably resume (issue #169) — using it returns 423
+	// ExceptionResourceInvalidLockHandle. DeleteObjectWithAutoLock locks and
+	// deletes atomically in one session (MODIFY-first, see pkg/adt), which is
+	// always the right thing here.
+	lockHandleIgnored := false
+	if lh, _ := request.GetArguments()["lock_handle"].(string); lh != "" {
+		lockHandleIgnored = true
 	}
 
-	return mcp.NewToolResultText("Object deleted successfully"), nil
+	if err := s.adtClient.DeleteObjectWithAutoLock(ctx, objectURL, transport); err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
+	}
+
+	msg := "Object deleted successfully"
+	if lockHandleIgnored {
+		msg += " (lock_handle ignored — the delete takes and releases its own lock in one session; a handle from a separate call cannot be reused, issue #169)"
+	}
+	return mcp.NewToolResultText(msg), nil
 }
 
 func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

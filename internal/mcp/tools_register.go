@@ -1339,14 +1339,15 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("DeleteObject") {
 		s.mcpServer.AddTool(mcp.NewTool("DeleteObject",
-			mcp.WithDescription("Delete an ABAP object (requires lock)"),
+			mcp.WithDescription("Delete an ABAP object. The handler locks and deletes atomically in one "+
+				"session — pass only object_url (and transport for a transportable object)."),
 			mcp.WithString("object_url",
 				mcp.Required(),
 				mcp.Description("ADT URL of the object (e.g., /sap/bc/adt/programs/programs/ZTEST)"),
 			),
 			mcp.WithString("lock_handle",
-				mcp.Required(),
-				mcp.Description("Lock handle from LockObject"),
+				mcp.Description("Ignored. A lock handle from a separate call cannot be reused (issue #169); "+
+					"the delete takes its own lock."),
 			),
 			mcp.WithString("transport",
 				mcp.Description("Transport request number (optional for local packages)"),

@@ -2,6 +2,7 @@ package adt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -902,6 +903,225 @@ func TestStrandedLockAdvice_SaysWhatTheUserNeeds(t *testing.T) {
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("advice does not mention %q:\n%s", want, msg)
+		}
+	}
+}
+
+// --- The class-delete stranded lock (task_45f386ec) ---
+//
+// LOCK accessMode=DELETE on a class returns 200 with an empty body on this
+// project's S/4HANA: no handle, but the SEOCLSENQ enqueue is taken. The old
+// "DELETE mode first" order in DeleteObjectWithAutoLock then 403'd on the
+// MODIFY retry and stranded that enqueue on every class delete.
+
+func TestParseLockResult_EmptyBodyIsNoHandle(t *testing.T) {
+	for _, body := range []string{"", "   ", "\n\t\n"} {
+		if _, err := parseLockResult([]byte(body)); err == nil || !errors.Is(err, errLockNoHandle) {
+			t.Errorf("parseLockResult(%q): want errLockNoHandle, got %v", body, err)
+		}
+	}
+	got, err := parseLockResult([]byte(testLockXML))
+	if err != nil {
+		t.Fatalf("parseLockResult(testLockXML): %v", err)
+	}
+	if got.LockHandle != "HANDLE-1" {
+		t.Errorf("parseLockResult(testLockXML): want HANDLE-1, got %q", got.LockHandle)
+	}
+}
+
+func TestLockObject_TwoHundredWithNoHandle_IsError(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		// LOCK POST -> 200 OK, empty body (the accessMode=DELETE shape).
+		w.WriteHeader(http.StatusOK)
+	})
+
+	_, err := client.LockObject(context.Background(), "/sap/bc/adt/oo/classes/ZCL_DEMO_EMPTY", "DELETE")
+	if err == nil || !errors.Is(err, errLockNoHandle) {
+		t.Fatalf("LockObject on a 2xx-with-no-handle response: want errLockNoHandle, got %v", err)
+	}
+	if client.lockOutstanding() {
+		t.Error("LockObject recorded a lock window for a response that carried no handle")
+	}
+}
+
+// delModeLockSeen reports whether the trace contains a LOCK with accessMode=DELETE.
+func delModeLockSeen(calls []wireCall) bool {
+	return indexOfCall(calls, func(c wireCall) bool {
+		return isLock(c) && c.query.Get("accessMode") == "DELETE"
+	}) >= 0
+}
+
+func isLockReqMode(r *http.Request, mode string) bool {
+	return r.Method == http.MethodPost &&
+		r.URL.Query().Get("_action") == "LOCK" &&
+		r.URL.Query().Get("accessMode") == mode
+}
+
+func TestDeleteObjectWithAutoLock_ModifyFirst_NeverTriesDeleteMode(t *testing.T) {
+	const objectURL = "/sap/bc/adt/oo/classes/ZCL_DEMO_DEL"
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case isLockReqMode(r, "DELETE"):
+			// If we ever get here the reorder regressed: this is the response
+			// that strands the enqueue (200, empty body).
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+
+	if err := client.DeleteObjectWithAutoLock(context.Background(), objectURL, ""); err != nil {
+		t.Fatalf("DeleteObjectWithAutoLock: %v", err)
+	}
+
+	calls := rec.snapshot()
+	if delModeLockSeen(calls) {
+		dumpCalls(t, calls)
+		t.Fatal("DeleteObjectWithAutoLock issued a LOCK accessMode=DELETE — on this system that " +
+			"returns 200 with no handle and strands the SEOCLSENQ enqueue; MODIFY must be tried first")
+	}
+	if indexOfCall(calls, func(c wireCall) bool { return c.method == http.MethodDelete }) < 0 {
+		dumpCalls(t, calls)
+		t.Fatal("no DELETE reached the server")
+	}
+}
+
+func TestDeleteObjectWithAutoLock_FallsBackToDeleteModeWhenModifyRefused(t *testing.T) {
+	const objectURL = "/sap/bc/adt/oo/classes/ZCL_DEMO_DELFB"
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case isLockReqMode(r, "MODIFY"):
+			// A system that will not grant a MODIFY lock for a delete (not a
+			// lock conflict — a flat refusal).
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_, _ = io.WriteString(w, "MODIFY not allowed for delete")
+		case isLockReqMode(r, "DELETE"):
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+
+	if err := client.DeleteObjectWithAutoLock(context.Background(), objectURL, ""); err != nil {
+		t.Fatalf("DeleteObjectWithAutoLock (DELETE-mode fallback): %v", err)
+	}
+	calls := rec.snapshot()
+	if !delModeLockSeen(calls) {
+		dumpCalls(t, calls)
+		t.Fatal("MODIFY was refused but the DELETE-mode fallback was never tried")
+	}
+}
+
+func TestDeleteObjectWithAutoLock_ModifyConflict_GivesStrandedAdvice(t *testing.T) {
+	const objectURL = "/sap/bc/adt/oo/classes/ZCL_DEMO_DELCONF"
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK" {
+			w.WriteHeader(http.StatusForbidden)
+			// The real S/4HANA body: message rendered in the session language
+			// (ES here), lock identified by the language-independent key EU/510.
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="utf-8"?><exc:exception xmlns:exc="http://www.sap.com/abapxml/types/communicationframework"><namespace id="com.sap.adt"/><type id="ExceptionResourceNoAccess"/><message lang="EN">El usuario TESTUSER ya está tratando ZCL_DEMO_DELCONF .</message><localizedMessage lang="ES">El usuario TESTUSER ya está tratando ZCL_DEMO_DELCONF .</localizedMessage><properties><entry key="T100KEY-ID">EU</entry><entry key="T100KEY-NO">510</entry><entry key="T100KEY-V1">TESTUSER</entry><entry key="T100KEY-V2">ZCL_DEMO_DELCONF</entry></properties></exc:exception>`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	err := client.DeleteObjectWithAutoLock(context.Background(), objectURL, "")
+	if err == nil {
+		t.Fatal("expected an error when the MODIFY lock reports a conflict")
+	}
+	if !strings.Contains(err.Error(), "SM12") {
+		t.Errorf("a lock conflict on delete should carry the stranded-lock advice; got: %v", err)
+	}
+	calls := rec.snapshot()
+	if delModeLockSeen(calls) {
+		dumpCalls(t, calls)
+		t.Error("a MODIFY lock conflict must not fall through to a DELETE-mode attempt " +
+			"(that would strand a second enqueue)")
+	}
+}
+
+func TestDeleteObject_AfterExternalLock_NoSearchInsideWindow(t *testing.T) {
+	const objectURL = "/sap/bc/adt/programs/programs/ZDEMO_EXTDEL"
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "informationsystem/search"):
+			_, _ = io.WriteString(w, searchXMLFor(
+				"/sap/bc/adt/programs/programs/zdemo_extdel", "ZDEMO_EXTDEL", "$TMP"))
+		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
+			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
+			_, _ = io.WriteString(w, testLockXML)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithAllowedPackages("$TMP"))
+
+	// The pkg/adt callers that lock-then-DeleteObject (RenameObject,
+	// cleanupPartialObject) gate + mark the context above the lock. Simulate
+	// that here and assert DeleteObject's own gate then issues no SearchObject
+	// inside the window.
+	ctx, err := client.gateAndMark(context.Background(), MutationContext{
+		Op: OpDelete, OpName: "DeleteObject", ObjectURL: objectURL,
+	})
+	if err != nil {
+		t.Fatalf("gateAndMark: %v", err)
+	}
+	lock, err := client.LockObject(ctx, objectURL, "MODIFY")
+	if err != nil {
+		t.Fatalf("LockObject: %v", err)
+	}
+	if err := client.DeleteObject(ctx, objectURL, lock.LockHandle, ""); err != nil {
+		t.Fatalf("DeleteObject: %v", err)
+	}
+
+	calls := rec.snapshot()
+	lockAt := indexOfCall(calls, isLock)
+	deleteAt := indexOfCall(calls, func(c wireCall) bool { return c.method == http.MethodDelete })
+	if lockAt < 0 || deleteAt < 0 || deleteAt < lockAt {
+		t.Fatalf("expected a LOCK then a DELETE; trace:\n%v", calls)
+	}
+	for _, c := range calls[lockAt+1 : deleteAt] {
+		if strings.Contains(c.path, "informationsystem/search") {
+			dumpCalls(t, calls)
+			t.Fatal("a package-resolving search ran between the external LOCK and the DELETE — " +
+				"it retires the session the lock handle lives in (issue #91); the caller must " +
+				"gateAndMark above the lock so DeleteObject's checkMutation skips the lookup")
+		}
+	}
+	assertWindowStateful(t, calls, lockAt, deleteAt)
+}
+
+func TestIsLockConflictError_LanguageIndependent(t *testing.T) {
+	// The real S/4HANA 403 — message rendered in ES, lock keyed by EU/510.
+	esBody := `403 at /x: <exc:exception><type id="ExceptionResourceNoAccess"/>` +
+		`<message lang="EN">El usuario TESTUSER ya está tratando ZCL_X .</message>` +
+		`<properties><entry key="T100KEY-ID">EU</entry><entry key="T100KEY-NO">510</entry></properties></exc:exception>`
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"ES message + EU/510", fmt.Errorf("locking object: ADT API error: status %s", esBody), true},
+		{"EN currently editing", fmt.Errorf("status 403: user is currently editing ZCL_X"), true},
+		{"nil", nil, false},
+		{"403 but not a lock", fmt.Errorf("status 403: ExceptionResourceNotFound"), false},
+		{"lock text but no 403", fmt.Errorf("ya está tratando"), false},
+	}
+	for _, c := range cases {
+		if got := isLockConflictError(c.err); got != c.want {
+			t.Errorf("%s: isLockConflictError = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
