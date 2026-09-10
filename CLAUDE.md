@@ -891,6 +891,137 @@ the code permanently — it is the fix, not a placeholder.
   lógica puramente local de transporte HTTP, no depende de ningún estado real de SAP, así que no se hizo
   ninguna escritura real contra el sistema para confirmarlo.
 
+### 2ab. Ported upstream PRs #200/#201/#202 — native ADT REST text pool (read + diff-based write) (2026-09-10)
+- **The gap**: the fork's only text-pool path was the WebSocket bridge (`GET/SET_TEXT_ELEMENTS`,
+  ZADT_VSP, see 2m). The pre-existing `GetTextPoolInLanguage` (`pkg/adt/i18n.go`, from PR #42) hit
+  `/sap/bc/adt/programs/programs/{name}/textelements` — a 404 "No suitable resource found" on this
+  system (documented in 2g) — so it had never returned a text to anybody here. The text pool is its
+  own ADT resource, a container of three plain-text documents:
+  `/sap/bc/adt/textelements/programs/{name}/source/{symbols|selections|headings}` (and
+  `/classes/{name}/...` for a class's text symbols), each under its own vocabulary Accept type.
+- **Ported**:
+  - `pkg/adt/textpool.go` (new) — `TextPoolTarget` (PROG default, CLAS), `textDocument`
+    parser/serializer (selection-text keys padded to 8, symbol/heading keys **not** — SAP answers
+    "Cannot parse the source code" to a padded symbol; `@MaxLength`/`@DDICReference` directives on an
+    untouched entry survive a whole-document rewrite), plan taxonomy
+    (`TextPoolPlan`/`KindPlan`: added / changed old→new / unchanged / unknown (not on the screen) /
+    refused (with reason) / removed / untouched), `WriteTextPool`, `MasterLanguage` (TADIR
+    `MASTERLANG` via `RunQuery`), `TextPoolGaps`/`symbolsUsed`, local `spras` (ISO→SAP 1-char).
+  - `pkg/adt/i18n.go` — `GetTextPoolInLanguage` rewritten to the three-document resource (one missing
+    kind is not a missing pool — a report with no selection screen just has no selection texts) +
+    `parseTextPoolSource` (keeps empty values: `columnHeader_1=` means "exists, untranslated").
+  - `pkg/adt/client.go` — `Language()` accessor (the session language is the default target).
+  - MCP: `internal/mcp/handlers_i18n_route.go` (new) revives `s.i18nTypes()` + `routeI18nAction`,
+    wired into the universal route chain — `SAP(action="i18n", params={"op": "texts_get"|"texts_set"|
+    "data_element_labels"|"write_labels"|"message_class_texts"|"compare_languages"|...})`. This makes
+    the whole i18n domain reachable from the hyperfocused single-tool surface (the mode that ships),
+    which it was not before. New `TextsGet`/`TextsSet` standalone tools too (expert/focused;
+    `TextsSet` is not in focused — writes are not). `textPoolHint`/`withHint` appended to the
+    happy-path of `handleWriteSource` for PROG/CLAS (a hint about screen fields with no selection
+    text and `TEXT-xxx` used but undefined — never a write).
+  - CLI: `cmd/vsp/texts.go` (new) — `vsp texts get|set` with `--kind --lang --json --transport
+    --delete --dry-run --allow-unknown`.
+- **Session-affinity discipline (issue #91)**: `WriteTextPool` reads the documents once before the
+  lock (for the plan, stateless) and again under the lock (`Stateful: true`) for the write; the PUT
+  is `Stateful: true`; `gateAndMark` runs the package gate above the lock so nothing networked hops
+  inside the window. The compensating unlock uses `releaseLockAfterFailure`/`strandedLockAdvice` +
+  an `unlocked bool` (plain `UnlockObject` on the happy path). Transport is chosen via
+  `planTransport`/`resolveWriteTransportFor` (consistent with 2z).
+- **The #201 fix carried over**: a text-pool PUT lands as an INACTIVE version and activating the
+  *program* does not carry it — `WriteTextPool` calls `c.Activate(t.resource(), t.Name)` on the
+  text-elements resource itself, after the unlock. (Same "PUT that doesn't really activate" shape as
+  the closed MSAG investigation — noted there as a possible hint.)
+- **Master-language guard**: writing a language whose SAP key differs from the object's TADIR
+  `MASTERLANG` is a translation and is refused unless `AnyLanguage` (MCP: `language` named) /
+  `--lang` (CLI) is set.
+- **Fork⇄upstream deviations**: `sqlQuote`/`cell` → this fork's `escapeQuote`/`getString`; `spras`
+  added locally (upstream's lives in an un-ported cluster PR); the MCP surface is this fork's
+  individual-tools + a revived router rather than upstream's router-only; `docsClient(cmd)` → this
+  fork's `resolveSystemParams`/`getClient`. **Out of scope** (bundled in #201 upstream, their own
+  items): `vsp update` (self-updater), `vsp description`/`set_description`. The `~t:`
+  selection-text-from-comment convention from #200 was removed by upstream in #201 — not ported.
+- Tests: `pkg/adt/textpool_test.go` (the 4 pure-function tests ported verbatim + `spras` +
+  `parseTextPoolSource`), `internal/mcp/handlers_i18n_route_test.go` (the `action="i18n"` route,
+  against a recording stub — `texts_get` hits the native REST resource, an unknown op lists the
+  valid ones). `pkg/adt/i18n_test.go` — the two existing wire-format tests rewritten for the new
+  resource shapes.
+- `go build ./...` clean; `go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)` green.
+  Code-reviewed: 0 CRITICAL/HIGH, 2 MEDIUM + 5 LOW (see 2ac for the shared ones — length guard, nil
+  err wrap, master-lang guard when no language configured — fixed same session).
+- **Verified live (2026-09-10)** against the real SAP system via the deployed `vsp` CLI:
+  `vsp texts get ZTESTRCG1` listed the native REST text pool (selection text `PA_IDOC`, symbol
+  `001`, the five heading keys); a `--dry-run` then a real `vsp texts set ZTESTRCG1 --kind I
+  002="VSP item6 test"` reported "1 text written … text elements activated"; a REST re-read
+  confirmed `002` landed; `vsp texts set ZTESTRCG1 --kind I --delete 002` reverted it and a final
+  re-read confirmed `ZTESTRCG1` is back to only symbol `001`.
+
+### 2ac. `WriteDataElementLabels` — proper read-modify-write, beyond upstream + `GetDataElementLabels` 406 fix (2026-09-10)
+- **`GetDataElementLabels` (`pkg/adt/i18n.go`)**: sent `Accept: application/xml`, which
+  `/sap/bc/adt/ddic/dataelements/{name}` answers 406 "The message content is not acceptable" on
+  every name — so it had never returned a label here (matches upstream's #201 diagnosis and issues
+  #153/#154). Fixed to `application/vnd.sap.adt.dataelements.v2+xml`; the response is a `blue:wbobj`
+  carrying the whole element, labels as `dtel:shortFieldLabel`/`mediumFieldLabel`/`longFieldLabel`/
+  `headingFieldLabel` children of `dtel:dataElement`. Dead `xml:"...,attr"` tags dropped from
+  `DataElementLabels` (a struct a caller holds; the wire shape is `dataElementDoc`'s business).
+- **`WriteDataElementLabels` rewritten as read-modify-write** — upstream neuters it to a
+  "not implemented" error; this fork implements it properly (a deliberate scope extension the user
+  chose). New signature: `func (c *Client) WriteDataElementLabels(ctx, name, lang string, patch
+  DataElementLabelPatch, transport string) error` — **auto-locking, no caller lock handle** (mirrors
+  `WriteMessageClassTextsAutoLock`). `DataElementLabelPatch` has `*string` fields: a nil pointer
+  leaves that label unchanged, a non-nil one (including a pointer to `""`) sets it.
+  - The resource serves and takes the element's **whole** representation — domain, type, lengths, a
+    dozen flags, search help, `atom:link`s. A four-field PUT would be rejected or, worse, accepted as
+    a replacement for everything. So: GET the document, substitute **only** the requested
+    `dtel:*FieldLabel` values **in the raw XML bytes** (`replaceDataElementLabel` — regex over both
+    `<dtel:x>old</dtel:x>` and self-closing `<dtel:x/>`, `$` in a value escaped so it is not a
+    regexp group ref, a missing label element → error **before** the LOCK), PUT the whole document
+    back (`ContentType: application/*` — the value `CreateDataElement`'s whole-`wbobj` PUT proves
+    against this same resource — `Accept` the versioned type). A struct remarshal was rejected
+    precisely because it would drop the unmodelled elements.
+  - Session-affinity: pre-GET stateless before the lock (also fails early on a missing label
+    element); `gateAndMark` above the lock; re-GET under the lock `Stateful: true`; PUT
+    `Stateful: true`; `releaseLockAfterFailure`/`strandedLockAdvice` + `unlocked bool` on the
+    failure path. Activate as its own object after the unlock (a PUT lands inactive).
+  - `verifyDataElementLabelWrite` — read back and turn a silent no-op (label did not land,
+    trailing-space-tolerant) **and** a whole-object replacement (`typeName`/`dataTypeLength` moved)
+    into a returned error. Best-effort: a read-back that itself fails is not a write failure.
+  - `patch.checkLengths()` refuses a label past the fixed DDIC width (short 10, medium 20, long 40,
+    heading 55) before any lock is taken.
+- **Non-master-language behaviour, documented not guarded**: SAP serves untranslated labels in the
+  master language, so patching only Short in a non-master language copies the master-language
+  Medium/Long/Heading into that language's row. A caller translating an element should pass all four
+  labels. (Planner's open question #1 — resolved as document-and-ship.)
+- **MCP** (`internal/mcp/handlers_i18n.go`, `tools_register.go`): `handleWriteDataElementLabels`
+  drops the required `lock_handle`, builds the patch from the args present (`v, ok :=
+  args["short"].(string)`), requires at least one label. `routeI18nAction` fills `name` from a
+  `target="DTEL ZED_X"` form as well as `object_name`.
+- Tests: `pkg/adt/dataelement_labels_test.go` — `replaceDataElementLabel` (paired / self-closing /
+  `$` literal / missing element), `applyDataElementLabelPatch` preserves the unmodelled elements
+  (`atom:link`, `typeName`, `dataTypeLength`, an untouched label), and end-to-end against the
+  recording stub: window stateful (LOCK→GET→PUT all stateful), GET+PUT carry `sap-language`, a
+  separate activation POST after the unlock, element-not-found aborts before the LOCK, a failed PUT
+  still releases the lock, the read-back detects a whole-object replacement, an over-long label is
+  refused before the lock. `pkg/adt/i18n_test.go` `TestGetDataElementLabels` rewritten for the
+  `blue:wbobj` shape.
+- Code review (shared with 2ab): 0 CRITICAL/HIGH. Fixed same session — the `application/*` PUT now
+  also sends the versioned `Accept`; `verifyDataElementLabelWrite` compares trailing-space-tolerant;
+  `patch.checkLengths()` added; `joinLockReleaseErr` hardens the deferred-unlock error wrap against
+  a nil base error; the master-language guard is skipped when no language is resolvable; the i18n
+  router fills `name` from `target=`.
+- **Verified live (2026-09-10)** against the real SAP system, end to end, via a throwaway program
+  driving the deployed `pkg/adt.Client` directly (`cmd/verifyitem6/`, deleted after the run — not
+  committed; same technique as 2w's #178 verification):
+  - `GetDataElementLabels` with `Accept: application/vnd.sap.adt.dataelements.v2+xml` returned the
+    full `blue:wbobj` with all four populated `dtel:*FieldLabel` children (the same request with
+    `application/xml` 406s).
+  - Created scratch `ZVSP_TST_DTEL_LBL` in `$TMP` (`predefinedAbapType` CHAR10). Read the labels.
+  - **Partial RMW** — patched `short` + `heading` only: read back
+    `short="new-s" medium="orig-medium" long="orig-long" heading="new-heading"` — the two untouched
+    labels survived. A raw `blue:wbobj` GET confirmed `dtel:dataType`, `dtel:dataTypeLength` and the
+    field-max-lengths were all unchanged (no whole-object replacement).
+  - **Full patch** — all four labels set, read back correct.
+  - Deleted the scratch DTEL; a follow-up GET returned 404.
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)

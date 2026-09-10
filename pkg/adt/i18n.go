@@ -6,17 +6,93 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
 // --- i18n Types ---
 
-// DataElementLabels holds the text labels of a data element in a specific language.
+// DataElementLabels holds the text labels of a data element in a specific
+// language.
+//
+// The xml tags this carried — shortDescription, mediumDescription,
+// longDescription and heading, all as attributes of the root element —
+// described a response that does not exist. On a live 7.5x the labels are
+// child elements of dtel:dataElement, named shortFieldLabel,
+// mediumFieldLabel, longFieldLabel and headingFieldLabel. Nothing had ever
+// matched, and nothing could: the request that would have carried the
+// answer was refused with 406 before any parsing happened (Accept was the
+// generic application/xml, not the versioned vocabulary type).
+//
+// The tags are gone rather than corrected, because this is the type a
+// caller holds and the wire format is not its business. dataElementDoc
+// below is the wire format.
 type DataElementLabels struct {
-	Short   string `json:"short" xml:"shortDescription,attr"`
-	Medium  string `json:"medium" xml:"mediumDescription,attr"`
-	Long    string `json:"long" xml:"longDescription,attr"`
-	Heading string `json:"heading" xml:"heading,attr"`
+	Short   string `json:"short"`
+	Medium  string `json:"medium"`
+	Long    string `json:"long"`
+	Heading string `json:"heading"`
+}
+
+// DataElementLabelPatch is a partial update of a data element's labels: a
+// nil pointer leaves that label unchanged, a non-nil one (including a
+// pointer to "") sets it.
+type DataElementLabelPatch struct {
+	Short   *string `json:"short,omitempty"`
+	Medium  *string `json:"medium,omitempty"`
+	Long    *string `json:"long,omitempty"`
+	Heading *string `json:"heading,omitempty"`
+}
+
+// checkLengths refuses a label past the fixed DDIC width for its kind
+// (short 10, medium 20, long 40, heading 55) before any lock is taken —
+// SAP would reject the PUT for the whole document anyway.
+func (p DataElementLabelPatch) checkLengths() error {
+	for _, f := range []struct {
+		name string
+		v    *string
+		max  int
+	}{
+		{"short", p.Short, 10},
+		{"medium", p.Medium, 20},
+		{"long", p.Long, 40},
+		{"heading", p.Heading, 55},
+	} {
+		if f.v != nil && len([]rune(*f.v)) > f.max {
+			return fmt.Errorf("%s field label %q is %d characters; the DDIC limit is %d", f.name, *f.v, len([]rune(*f.v)), f.max)
+		}
+	}
+	return nil
+}
+
+// dataElementDoc is the representation ADT actually serves for a data
+// element: a blue:wbobj carrying the whole element. Only the four labels
+// plus the read-only type facts the verify step compares are mapped —
+// mapping the domain, the flags and the search help would be inventing a
+// feature under cover of a bug fix, and the write path never round-trips
+// through this struct (it substitutes the labels in the raw bytes) so the
+// unmapped elements are not at risk.
+type dataElementDoc struct {
+	XMLName     xml.Name `xml:"wbobj"`
+	DataElement struct {
+		Short          string `xml:"shortFieldLabel"`
+		Medium         string `xml:"mediumFieldLabel"`
+		Long           string `xml:"longFieldLabel"`
+		Heading        string `xml:"headingFieldLabel"`
+		TypeKind       string `xml:"typeKind"`
+		TypeName       string `xml:"typeName"`
+		DataType       string `xml:"dataType"`
+		DataTypeLength string `xml:"dataTypeLength"`
+	} `xml:"dataElement"`
+}
+
+func (d dataElementDoc) labels() *DataElementLabels {
+	return &DataElementLabels{
+		Short:   d.DataElement.Short,
+		Medium:  d.DataElement.Medium,
+		Long:    d.DataElement.Long,
+		Heading: d.DataElement.Heading,
+	}
 }
 
 // TextPoolEntry represents a single text pool entry (text element/symbol) of a program.
@@ -69,26 +145,45 @@ func (c *Client) GetDataElementLabels(ctx context.Context, name, lang string) (*
 		return nil, err
 	}
 
-	name = strings.ToUpper(name)
-	lang = strings.ToUpper(lang)
+	doc, _, err := c.getDataElementDoc(ctx, name, lang, false)
+	if err != nil {
+		return nil, err
+	}
+	// An element with no translation in the requested language answers in
+	// its master language rather than empty, so a caller cannot read "these
+	// are the English labels" out of a successful call. That is ADT's
+	// behaviour and not something to paper over here.
+	return doc.labels(), nil
+}
 
-	path := fmt.Sprintf("/sap/bc/adt/ddic/dataelements/%s", url.PathEscape(name))
-	resp, err := c.transport.Request(ctx, path, &RequestOptions{
+// dataElementResourceURL is the ADT resource that serves and takes a data
+// element's whole representation.
+func dataElementResourceURL(name string) string {
+	return fmt.Sprintf("/sap/bc/adt/ddic/dataelements/%s", url.PathEscape(strings.ToUpper(name)))
+}
+
+// getDataElementDoc GETs the blue:wbobj document of a data element and
+// returns both the parsed view and the raw bytes. stateful must be true
+// for the read that happens inside a lock window (issue #91).
+//
+// The versioned vocabulary type is required: the generic application/xml
+// is refused with 406 "The message content is not acceptable" on every
+// name, so this call had never returned a label to anybody.
+func (c *Client) getDataElementDoc(ctx context.Context, name, lang string, stateful bool) (dataElementDoc, []byte, error) {
+	resp, err := c.transport.Request(ctx, dataElementResourceURL(name), &RequestOptions{
 		Method:           http.MethodGet,
-		Accept:           "application/xml",
-		OverrideLanguage: lang,
+		Accept:           "application/vnd.sap.adt.dataelements.v2+xml",
+		OverrideLanguage: strings.ToUpper(lang),
+		Stateful:         stateful,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("get data element labels: %w", err)
+		return dataElementDoc{}, nil, fmt.Errorf("get data element %s: %w", strings.ToUpper(name), err)
 	}
-
-	// Parse the XML - data element labels are attributes on the root element
-	var labels DataElementLabels
-	if err := xml.Unmarshal(resp.Body, &labels); err != nil {
-		return nil, fmt.Errorf("parse data element labels: %w", err)
+	var doc dataElementDoc
+	if err := xml.Unmarshal(resp.Body, &doc); err != nil {
+		return dataElementDoc{}, resp.Body, fmt.Errorf("parse data element %s: %w", strings.ToUpper(name), err)
 	}
-
-	return &labels, nil
+	return doc, resp.Body, nil
 }
 
 // GetMessageClassTexts retrieves all messages of a message class in a specific language.
@@ -363,50 +458,264 @@ func (c *Client) WriteMessageClassTextsAutoLock(ctx context.Context, name, lang 
 	return nil
 }
 
-// WriteDataElementLabels updates data element labels in a specific language.
-// Requires a lock handle from LockObject and optionally a transport request number.
-func (c *Client) WriteDataElementLabels(ctx context.Context, name, lang string, labels *DataElementLabels, lockHandle, transport string) error {
+// WriteDataElementLabels sets one or more of a data element's four field
+// labels in a language, taking and releasing its own lock.
+//
+// It is read-modify-write, going beyond upstream (which neuters this to a
+// "not implemented" error): the resource at /sap/bc/adt/ddic/dataelements/
+// {name} serves and takes the element's *whole* blue:wbobj — domain, type,
+// lengths, a dozen flags, search help, atom:links — and a PUT of a
+// four-field document would either be rejected or, worse, accepted as a
+// replacement for everything the element has. So the current document is
+// GET first and only the four dtel:*FieldLabel values are substituted in
+// the raw bytes; the unmodelled elements are carried through untouched
+// because the bytes are never remarshalled from a struct.
+//
+// patch is partial: a nil field is left as it is, a non-nil one (including
+// a pointer to "") is set. A label element the document does not contain is
+// an error raised before the LOCK, so a doomed write never takes an
+// ENQUEUE.
+//
+// Non-master-language behaviour: SAP serves untranslated labels in the
+// master language, so patching e.g. only Short in German copies the
+// master-language Medium/Long/Heading into the German row. That is
+// documented, not guarded — a caller translating an element should pass all
+// four labels.
+func (c *Client) WriteDataElementLabels(ctx context.Context, name, lang string, patch DataElementLabelPatch, transport string) (err error) {
 	name = strings.ToUpper(name)
 	lang = strings.ToUpper(lang)
+	objectURL := dataElementResourceURL(name)
 
-	// Unified mutation policy gate (op type + package + transport)
-	if err := c.checkMutation(ctx, MutationContext{
+	if lerr := patch.checkLengths(); lerr != nil {
+		return lerr
+	}
+
+	// Gate above the lock and mark the object so the pre-write re-read
+	// under the lock does not trigger a session-fatal package lookup
+	// (issue #91).
+	ctx, err = c.gateAndMark(ctx, MutationContext{
 		Op:        OpUpdate,
 		OpName:    "WriteDataElementLabels",
-		ObjectURL: fmt.Sprintf("/sap/bc/adt/ddic/dataelements/%s", url.PathEscape(name)),
+		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 
-	body, err := xml.Marshal(labels)
+	// Read the whole document before the lock, for the plan and to fail
+	// early on a missing label element. This read is stateless on purpose —
+	// it is before the lock window.
+	_, preRaw, err := c.getDataElementDoc(ctx, name, lang, false)
 	if err != nil {
-		return fmt.Errorf("marshal data element labels: %w", err)
+		return err
+	}
+	if _, subErr := applyDataElementLabelPatch(preRaw, patch); subErr != nil {
+		return subErr
 	}
 
-	path := fmt.Sprintf("/sap/bc/adt/ddic/dataelements/%s", url.PathEscape(name))
+	trPlan := c.planTransport(ctx, transport, objectURL, "")
+
+	var lockResult *LockResult
+	lockResult, err = c.LockObject(ctx, objectURL, "MODIFY")
+	if err != nil {
+		return fmt.Errorf("failed to lock data element %s: %w", name, err)
+	}
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lockResult.LockHandle); unlockErr != nil {
+				err = joinLockReleaseErr(err, strandedLockAdvice(objectURL, unlockErr))
+			}
+		}
+	}()
+
+	var effectiveTransport string
+	if effectiveTransport, _, err = c.resolveWriteTransportFor(trPlan, transport, lockResult.CorrNr, "WriteDataElementLabels"); err != nil {
+		return err
+	}
+
+	// Re-read inside the lock window (Stateful) so the substitution runs on
+	// exactly what SAP holds now, not the pre-lock snapshot.
+	underDoc, underRaw, err := c.getDataElementDoc(ctx, name, lang, true)
+	if err != nil {
+		return err
+	}
+	newBody, err := applyDataElementLabelPatch(underRaw, patch)
+	if err != nil {
+		return err
+	}
 
 	params := url.Values{}
-	params.Set("lockHandle", lockHandle)
-	if transport != "" {
-		params.Set("corrNr", transport)
+	params.Set("lockHandle", lockResult.LockHandle)
+	if effectiveTransport != "" {
+		params.Set("corrNr", effectiveTransport)
 	}
 
-	_, err = c.transport.Request(ctx, path, &RequestOptions{
-		Method:           http.MethodPut,
-		Query:            params,
-		Body:             body,
-		ContentType:      "application/xml",
+	if _, err = c.transport.Request(ctx, objectURL, &RequestOptions{
+		Method: http.MethodPut,
+		Query:  params,
+		Body:   newBody,
+		// application/* is the ContentType CreateDataElement's whole-wbobj
+		// PUT uses against this same resource and is proven to work; the
+		// Accept matches the GET's versioned vocabulary type (the generic
+		// one is 406'd here).
+		ContentType:      "application/*",
+		Accept:           "application/vnd.sap.adt.dataelements.v2+xml",
 		OverrideLanguage: lang,
-	})
-	if err != nil {
+		// The lock handle came from a stateful LOCK a few lines up; without
+		// this the PUT that consumes it goes out stateless and cannot match
+		// its own lock (issue #91).
+		Stateful: true,
+	}); err != nil {
 		return fmt.Errorf("write data element labels: %w", err)
 	}
 
+	err = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
+	unlocked = true
+	if err != nil {
+		return fmt.Errorf("data element labels written but unlock failed: %w", err)
+	}
+
+	// Activate as its own object, after the unlock — a PUT lands as an
+	// inactive version.
+	activateCtx := context.WithoutCancel(ctx)
+	if res, aerr := c.Activate(activateCtx, objectURL, name); aerr != nil {
+		return fmt.Errorf("data element labels written but activation failed: %w", aerr)
+	} else if res != nil && !res.Success {
+		return fmt.Errorf("data element labels written but activation reported failure: %s", strings.Join(activationMessages(res), "; "))
+	}
+
+	// Read back and turn a silent no-op or a whole-object replacement into
+	// an error. Best-effort: a read-back that itself fails is not a write
+	// failure. underDoc is the pre-PUT state read under the lock.
+	if verr := c.verifyDataElementLabelWrite(activateCtx, name, lang, patch, underDoc); verr != nil {
+		return verr
+	}
 	return nil
 }
 
-// GetTextPoolInLanguage retrieves the text pool (text elements/symbols) of a program in a specific language.
+// dtelFieldLabelElements maps a patch field to its dtel element name.
+var dtelFieldLabelElements = []struct {
+	name  string
+	value func(DataElementLabelPatch) *string
+}{
+	{"shortFieldLabel", func(p DataElementLabelPatch) *string { return p.Short }},
+	{"mediumFieldLabel", func(p DataElementLabelPatch) *string { return p.Medium }},
+	{"longFieldLabel", func(p DataElementLabelPatch) *string { return p.Long }},
+	{"headingFieldLabel", func(p DataElementLabelPatch) *string { return p.Heading }},
+}
+
+// applyDataElementLabelPatch substitutes the requested dtel:*FieldLabel
+// values in the raw blue:wbobj bytes, leaving every other element — the
+// domain, the flags, the search help, the atom:links — exactly as served.
+// A requested label whose element is not in the document is an error
+// (returned before any LOCK is taken).
+func applyDataElementLabelPatch(raw []byte, patch DataElementLabelPatch) ([]byte, error) {
+	out := raw
+	for _, f := range dtelFieldLabelElements {
+		v := f.value(patch)
+		if v == nil {
+			continue
+		}
+		next, err := replaceDataElementLabel(out, f.name, *v)
+		if err != nil {
+			return nil, err
+		}
+		out = next
+	}
+	return out, nil
+}
+
+// replaceDataElementLabel replaces the text content of one
+// <dtel:LABEL>…</dtel:LABEL> element (or expands a self-closing
+// <dtel:LABEL/>) with value, XML-escaped. The dtel: prefix is matched
+// loosely (any or no prefix) so a differently-namespaced document still
+// works. Not found → error.
+func replaceDataElementLabel(xmlBytes []byte, elem, value string) ([]byte, error) {
+	s := string(xmlBytes)
+	esc := escapeXML(value)
+
+	// <prefix:elem ...>old</prefix:elem>  or  <elem>old</elem>
+	pair := regexp.MustCompile(`(?s)<((?:[A-Za-z_][\w.-]*:)?` + regexp.QuoteMeta(elem) + `)(\s[^>]*)?>.*?</((?:[A-Za-z_][\w.-]*:)?` + regexp.QuoteMeta(elem) + `>)`)
+	if loc := pair.FindStringSubmatchIndex(s); loc != nil {
+		return []byte(pair.ReplaceAllString(s, `<$1$2>`+regexpEscapeReplacement(esc)+`</$3`)), nil
+	}
+
+	// <prefix:elem ... />  self-closing
+	selfClose := regexp.MustCompile(`<((?:[A-Za-z_][\w.-]*:)?` + regexp.QuoteMeta(elem) + `)(\s[^>]*?)?/>`)
+	if selfClose.MatchString(s) {
+		return []byte(selfClose.ReplaceAllString(s, `<$1$2>`+regexpEscapeReplacement(esc)+`</$1>`)), nil
+	}
+
+	return nil, fmt.Errorf("data element document has no <%s> element to set — the resource shape is not what this expects; use SE11", elem)
+}
+
+// regexpEscapeReplacement escapes the "$" that regexp.ReplaceAllString
+// treats as a group reference, so an arbitrary label text is inserted
+// literally.
+func regexpEscapeReplacement(s string) string {
+	return strings.ReplaceAll(s, "$", "$$")
+}
+
+// verifyDataElementLabelWrite reads the element back and asserts the
+// patched labels landed and the type facts did not move (a
+// whole-object-replacement detector). Best-effort: a read-back failure is
+// not itself a write failure. before is the pre-PUT document read under
+// the lock.
+func (c *Client) verifyDataElementLabelWrite(ctx context.Context, name, lang string, patch DataElementLabelPatch, before dataElementDoc) error {
+	after, _, err := c.getDataElementDoc(ctx, name, lang, false)
+	if err != nil {
+		return nil
+	}
+	got := map[string]string{
+		"shortFieldLabel":   after.DataElement.Short,
+		"mediumFieldLabel":  after.DataElement.Medium,
+		"longFieldLabel":    after.DataElement.Long,
+		"headingFieldLabel": after.DataElement.Heading,
+	}
+	for _, f := range dtelFieldLabelElements {
+		v := f.value(patch)
+		if v == nil {
+			continue
+		}
+		// DDIC labels are fixed-width; SAP may serve one space-padded on the
+		// right. Compare trailing-space-insensitive so a write that landed is
+		// not reported as a failure over padding alone.
+		if strings.TrimRight(got[f.name], " ") != strings.TrimRight(*v, " ") {
+			return fmt.Errorf(
+				"write data element labels: PUT returned success but %s reads %q after read-back, expected %q — the write did not take effect",
+				f.name, got[f.name], *v)
+		}
+	}
+	if before.DataElement.TypeName != "" && after.DataElement.TypeName != before.DataElement.TypeName {
+		return fmt.Errorf(
+			"write data element labels: the element's type changed from %q to %q after the write — the PUT was accepted as a whole-object replacement, not a label edit; check %s in SE11",
+			before.DataElement.TypeName, after.DataElement.TypeName, name)
+	}
+	if before.DataElement.DataTypeLength != "" && after.DataElement.DataTypeLength != before.DataElement.DataTypeLength {
+		return fmt.Errorf(
+			"write data element labels: the element's length changed from %q to %q after the write — the PUT was accepted as a whole-object replacement; check %s in SE11",
+			before.DataElement.DataTypeLength, after.DataElement.DataTypeLength, name)
+	}
+	return nil
+}
+
+// GetTextPoolInLanguage retrieves the text pool (text elements/symbols) of
+// a program in a specific language.
+//
+// The address used to be /programs/programs/{name}/textelements, which
+// answers 404 "No suitable resource found" — so this had never returned a
+// text to anybody. The text pool is not a sub-resource of the program; it
+// is its own resource, a container of three:
+//
+//	/sap/bc/adt/textelements/programs/{name}/source/symbols
+//	                                        /source/selections
+//	                                        /source/headings
+//
+// Each answers plain text — `key=value` per line, with an @MaxLength
+// directive at the top of the symbols one — under its own vocabulary type.
+// Asking with */* gets an HTML rendering that would parse to an empty pool.
 func (c *Client) GetTextPoolInLanguage(ctx context.Context, programName, lang string) ([]TextPoolEntry, error) {
 	if err := c.checkSafety(OpRead, "GetTextPoolInLanguage"); err != nil {
 		return nil, err
@@ -415,25 +724,61 @@ func (c *Client) GetTextPoolInLanguage(ctx context.Context, programName, lang st
 	programName = strings.ToUpper(programName)
 	lang = strings.ToUpper(lang)
 
-	path := fmt.Sprintf("/sap/bc/adt/programs/programs/%s/textelements", url.PathEscape(programName))
-	resp, err := c.transport.Request(ctx, path, &RequestOptions{
-		Method:           http.MethodGet,
-		Accept:           "application/xml",
-		OverrideLanguage: lang,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("get text pool: %w", err)
+	var entries []TextPoolEntry
+	for _, sub := range []struct{ name, id string }{
+		{"symbols", "I"},
+		{"selections", "S"},
+		{"headings", "H"},
+	} {
+		path := fmt.Sprintf("/sap/bc/adt/textelements/programs/%s/source/%s",
+			url.PathEscape(programName), sub.name)
+		resp, err := c.transport.Request(ctx, path, &RequestOptions{
+			Method:           http.MethodGet,
+			Accept:           "application/vnd.sap.adt.textelements." + sub.name + ".v1",
+			OverrideLanguage: lang,
+		})
+		if err != nil {
+			// One missing kind is not a missing text pool: a report with
+			// no selection screen has no selection texts, and that is an
+			// answer. Treating the first 404 as fatal would lose the kinds
+			// that did answer.
+			if IsNotFoundError(err) {
+				continue
+			}
+			return nil, fmt.Errorf("get text pool (%s): %w", sub.name, err)
+		}
+		entries = append(entries, parseTextPoolSource(sub.id, string(resp.Body))...)
 	}
 
-	type textPool struct {
-		Entries []TextPoolEntry `xml:"entry"`
-	}
-	var tp textPool
-	if err := xml.Unmarshal(resp.Body, &tp); err != nil {
-		return nil, fmt.Errorf("parse text pool XML: %w", err)
-	}
+	return entries, nil
+}
 
-	return tp.Entries, nil
+// parseTextPoolSource turns one text-element document into entries. Empty
+// values are kept: "columnHeader_1=" means the heading exists and is
+// untranslated, the single most useful thing a translation report can say.
+func parseTextPoolSource(id, body string) []TextPoolEntry {
+	var out []TextPoolEntry
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		// @MaxLength:8 and friends are directives about the document, not
+		// entries in it.
+		if strings.HasPrefix(strings.TrimSpace(line), "@") {
+			continue
+		}
+		eq := strings.Index(line, "=")
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		if key == "" {
+			continue
+		}
+		out = append(out, TextPoolEntry{ID: id, Key: key, Text: line[eq+1:]})
+	}
+	return out
 }
 
 // CompareObjectLanguages compares the text content of an object in two languages.

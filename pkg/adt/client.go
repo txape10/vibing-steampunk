@@ -256,6 +256,13 @@ func (c *Client) Safety() *SafetyConfig {
 	return &c.config.Safety
 }
 
+// Language is the SAP session language the client was configured with
+// (ISO code, e.g. "EN", "ES"). Used as the default target language for the
+// text-pool and label handlers when the caller names none.
+func (c *Client) Language() string {
+	return c.config.Language
+}
+
 // AllowPackageTemporarily adds a package to the allowed list for the duration of
 // an install/bootstrap operation. Returns a cleanup function that removes it.
 // This is used by install tools (InstallZADTVSP, InstallAbapGit) which are

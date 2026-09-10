@@ -96,6 +96,7 @@ func (s *Server) handleUniversalTool(ctx context.Context, request mcp.CallToolRe
 		s.routeAnalysisAction,
 		s.routeContextAction,
 		s.routeServiceBindingAction,
+		s.routeI18nAction,
 	}
 
 	for _, route := range routes {

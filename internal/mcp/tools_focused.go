@@ -169,6 +169,7 @@ func focusedToolSet() map[string]bool {
 		"GetDataElementLabels":     true, // Get data element labels in specific language
 		"GetMessageClassTexts":     true, // Get message class texts in specific language
 		"GetTextPool":              true, // Get text pool entries in specific language
+		"TextsGet":                 true, // Read a program's/class's text pool over native ADT REST
 		"CompareLanguages":         true, // Compare object texts between two languages
 	}
 }

@@ -37,6 +37,18 @@ func (c *Client) releaseLockAfterFailure(ctx context.Context, objectURL, lockHan
 	return c.UnlockObject(releaseCtx, objectURL, lockHandle)
 }
 
+// joinLockReleaseErr appends a stranded-lock advice string to the error a
+// mutation is already returning. When that error is nil (the mutation
+// itself succeeded but a *later* step's compensating unlock failed — a
+// path that should not exist today but might be added), it becomes the
+// error on its own rather than rendering as "%!w(<nil>) — ...".
+func joinLockReleaseErr(err error, advice string) error {
+	if err == nil {
+		return fmt.Errorf("%s", advice)
+	}
+	return fmt.Errorf("%w — %s", err, advice)
+}
+
 // strandedLockAdvice explains an unlock that failed, in the terms a user
 // needs to act on it.
 //

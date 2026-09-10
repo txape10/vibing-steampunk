@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
@@ -306,7 +307,17 @@ func (s *Server) handleWriteSource(ctx context.Context, request mcp.CallToolRequ
 	}
 
 	output, _ := json.MarshalIndent(result, "", "  ")
-	return mcp.NewToolResultText(string(output)), nil
+	res := mcp.NewToolResultText(string(output))
+
+	// After a program or class is written, add a hint (never a write) about
+	// screen fields with no selection text and TEXT-xxx symbols the source
+	// uses but the pool does not define. Best-effort — a failure is silent.
+	if ot := strings.ToUpper(objectType); (ot == "PROG" || ot == "CLAS") && result != nil && result.Success {
+		if hint := s.textPoolHint(ctx, adt.TextPoolTarget{Type: ot, Name: name}, source); hint != "" {
+			res = withHint(res, hint)
+		}
+	}
+	return res, nil
 }
 
 // registerGrepObjects registers the unified GrepObjects tool

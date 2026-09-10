@@ -297,6 +297,32 @@ File operations:
   SAP(action="system", params={"type": "save_to_file", "object_type": "CLAS", "object_name": "ZCL_TEST", "output_dir": "/tmp"})
   SAP(action="system", params={"type": "rename", "objType": "CLAS/OC", "oldName": "ZCL_OLD", "newName": "ZCL_NEW", "packageName": "$TMP"})`)
 
+	case "i18n", "translation", "texts":
+		return mcp.NewToolResultText(`SAP(action="i18n") - Translation / text pool over native ADT REST
+
+  SAP(action="i18n", params={"op": "texts_get", "program_name": "ZDEMO_RUN"})
+  SAP(action="i18n", params={"op": "texts_get", "class_name": "ZCL_DEMO"})
+  SAP(action="i18n", params={"op": "texts_set", "program_name": "ZDEMO_RUN",
+        "texts": {"P_DEVC": "Package to scan", "S_OBJ": "Object names"}, "dry_run": true})
+  SAP(action="i18n", params={"op": "texts_set", "program_name": "ZDEMO_RUN",
+        "texts": {"symbols": {"001": "Nothing found"}, "headings": {"listHeader": "Objects"}}})
+  SAP(action="i18n", params={"op": "texts_set", "program_name": "ZDEMO_RUN",
+        "texts": {"P_MODE": null}})                       # null removes the key
+  SAP(action="i18n", params={"op": "texts_set", "program_name": "ZDEMO_RUN",
+        "texts": {"P_DEVC": "Zu prüfendes Paket"}, "language": "DE"})   # a named translation
+
+  SAP(action="i18n", params={"op": "data_element_labels", "name": "ZED_DEMO", "language": "EN"})
+  SAP(action="i18n", params={"op": "write_labels", "name": "ZED_DEMO", "language": "ES",
+        "short": "Texto", "heading": "Cabecera"})          # read-modify-write, own lock
+  SAP(action="i18n", params={"op": "message_class_texts", "name": "ZDEMO_MC", "language": "EN"})
+  SAP(action="i18n", params={"op": "compare_languages", "object_url": "...",
+        "source_language": "EN", "target_language": "DE"})
+
+texts_set is a plan first: added / changed (old->new) / unchanged / unknown (not on the
+screen) / refused (with reason) / removed. Nothing is locked when nothing differs. The
+session language is written unless "language" names another. The text-pool PUT lands
+inactive and is activated as its own object afterwards.`)
+
 	case "tips", "best_practices", "workflows", "best":
 		return mcp.NewToolResultText(`SAP Best Practices & Workflows
 
@@ -360,6 +386,7 @@ Actions:
   analyze  - Syntax check, call graph, code intelligence, profiler, dumps, boundary analysis
   debug    - Breakpoints, stepping, variables, RFC calls, report execution
   system   - System info, transports, git, install tools, file operations
+  i18n     - Text pool (selection texts / symbols / headings), data element labels, message texts, language compare
   help     - This help. Use SAP(action="help", target="<action>") for details.
 
 Quick examples:
@@ -400,8 +427,11 @@ func getUnhandledErrorMessage(action, objectType, objectName string) string {
 	case "debug":
 		sb.WriteString("Supported debug targets: SET_BREAKPOINT, GET_BREAKPOINTS, DELETE_BREAKPOINT, LISTEN, ATTACH, DETACH, STEP, GET_STACK, GET_VARIABLES, CALL_RFC, RFC_SEARCH, RFC_METADATA, MOVE, RUN_REPORT, GET_VARIANTS, GET_TEXT_ELEMENTS, SET_TEXT_ELEMENTS, AMDP_*\n")
 		sb.WriteString("Use SAP(action=\"help\", target=\"debug\") for examples.")
+	case "i18n":
+		sb.WriteString("Supported i18n ops (params.op): texts_get, texts_set, data_element_labels, write_labels, message_class_texts, write_message_texts, compare_languages, texts\n")
+		sb.WriteString("Use SAP(action=\"help\", target=\"i18n\") for examples.")
 	default:
-		sb.WriteString("Valid actions: read, edit, create, delete, search, query, grep, test, analyze, debug, system, help\n")
+		sb.WriteString("Valid actions: read, edit, create, delete, search, query, grep, test, analyze, debug, system, i18n, help\n")
 		sb.WriteString("Use SAP(action=\"help\") for full documentation.")
 	}
 

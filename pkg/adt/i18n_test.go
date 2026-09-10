@@ -31,8 +31,20 @@ func TestGetObjectTextsInLanguage(t *testing.T) {
 }
 
 func TestGetDataElementLabels(t *testing.T) {
+	// The real resource: a blue:wbobj carrying the whole element, labels as
+	// dtel:*FieldLabel children of dtel:dataElement.
 	xmlResp := `<?xml version="1.0" encoding="UTF-8"?>
-<dataElement shortDescription="Court" mediumDescription="Moyen" longDescription="Long texte" heading="En-tête"/>`
+<blue:wbobj xmlns:blue="http://www.sap.com/wbobj/dictionary/dtel" xmlns:dtel="http://www.sap.com/dictionary/dtel">
+  <dtel:dataElement>
+    <dtel:typeName>CHAR10</dtel:typeName>
+    <dtel:dataType>CHAR</dtel:dataType>
+    <dtel:dataTypeLength>000010</dtel:dataTypeLength>
+    <dtel:shortFieldLabel>Court</dtel:shortFieldLabel>
+    <dtel:mediumFieldLabel>Moyen</dtel:mediumFieldLabel>
+    <dtel:longFieldLabel>Long texte</dtel:longFieldLabel>
+    <dtel:headingFieldLabel>En-tête</dtel:headingFieldLabel>
+  </dtel:dataElement>
+</blue:wbobj>`
 
 	mock := &mockTransportClient{
 		responses: map[string]*http.Response{
@@ -106,15 +118,14 @@ func TestGetMessageClassTexts(t *testing.T) {
 }
 
 func TestGetTextPoolInLanguage(t *testing.T) {
-	xmlResp := `<?xml version="1.0" encoding="UTF-8"?>
-<textPool>
-  <entry id="I" key="001" entry="Texte un"/>
-  <entry id="I" key="002" entry="Texte deux"/>
-</textPool>`
+	// The text pool is its own resource, a container of three plain-text
+	// documents. Selections and headings 404 here (no selection screen) and
+	// must not be fatal.
+	symbols := "@MaxLength:40\n001=Texte un\n002=Texte deux\n"
 
 	mock := &mockTransportClient{
 		responses: map[string]*http.Response{
-			"/sap/bc/adt/programs/programs/ZTEST/textelements": newTestResponse(xmlResp),
+			"/sap/bc/adt/textelements/programs/ZTEST/source/symbols": newTestResponse(symbols),
 			"discovery": newTestResponse("OK"),
 		},
 	}
@@ -360,7 +371,8 @@ func TestWriteOperationsCheckSafety(t *testing.T) {
 	}
 
 	// WriteDataElementLabels should be blocked by safety (OpUpdate)
-	err = client.WriteDataElementLabels(context.Background(), "ZTEST_DTEL", "FR", &DataElementLabels{}, "lock123", "")
+	short := "x"
+	err = client.WriteDataElementLabels(context.Background(), "ZTEST_DTEL", "FR", DataElementLabelPatch{Short: &short}, "")
 	if err == nil {
 		t.Error("WriteDataElementLabels should fail in read-only mode")
 	}
