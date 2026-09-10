@@ -70,6 +70,7 @@ func (s *Server) handleUniversalTool(ctx context.Context, request mcp.CallToolRe
 	type routeFunc func(ctx context.Context, action, objectType, objectName string, params map[string]any) (*mcp.CallToolResult, bool, error)
 
 	routes := []routeFunc{
+		s.routeDescriptionAction,
 		s.routeSourceAction,
 		s.routeReadAction,
 		s.routeSearchAction,

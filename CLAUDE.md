@@ -1022,6 +1022,88 @@ the code permanently — it is the fix, not a placeholder.
   - **Full patch** — all four labels set, read back correct.
   - Deleted the scratch DTEL; a follow-up GET returned 404.
 
+### 2ad. Ported upstream PR #201 (the `set_description` half) — change an existing object's SE80/SE11 short text without rewriting source (2026-09-10)
+- **The gap**: both forks set `adtcore:description` in the shell POST when an object is *created*, but
+  neither could change it afterwards — this fork's `WriteSourceOptions.Description` is only read on
+  `WriteSource`'s create branch (`workflows_source.go`), the update branch ignores it, and there was no
+  `SetDescription`/`UpdateDescription` anywhere in `pkg/adt/` (grep: zero). Closing that gap is the whole
+  of this port. The `vsp update` self-updater bundled into the same upstream PR is **deliberately not
+  ported** — it would overwrite this fork's binary with upstream's.
+- **The resource**: the description is an attribute (`adtcore:description`, plus an optional
+  `adtcore:descriptionTextLimit`) on the object's own metadata document — which is the object's whole
+  representation (type, package, flags, `atom:link`s). A struct remarshal would drop everything not
+  modelled, so `SetDescription` does the same **read-modify-write on raw bytes** discipline as
+  `WriteDataElementLabels` (2ac): GET the document → substitute only the `adtcore:description` attribute
+  value in the raw XML → PUT the whole document back → UNLOCK → activate → verify read-back. All
+  substitution is confined to the root element's opening tag (`rootOpenTag`/`tagCloseIndex`, quote-aware)
+  so a child element carrying its own `description=` is never touched; when the root has no description
+  attribute at all it is inserted after `name="..."` (the insert branch — see the live-verification note
+  below). Files: `pkg/adt/description.go` (new), `pkg/adt/description_test.go` (new).
+- **Types**: upstream #201's set of 8 — PROG, INCL, CLAS, INTF, FUGR, FUNC (needs parent), TABL, DDLS.
+  DOMA/DTEL/TTYP/ENQU (this fork's own DDIC creators) are **not** included: their "description" is the
+  `ddtext` inside a per-type `blue:wbobj`, a different shape needing its own investigation, and DTEL's is
+  easily confused with `WriteDataElementLabels`' field labels (2ac).
+- **Session-affinity (issue #91)**: `gateAndMark` runs the package gate above the lock and marks the
+  context so the re-read under the lock skips the networked package lookup; the pre-write re-read is
+  `Stateful: true`, the PUT is `Stateful: true`; `planTransport`/`resolveWriteTransportFor` choose the
+  transport before/after the lock (consistent with 2z — no transport for a `$TMP` object); the
+  compensating unlock uses `releaseLockAfterFailure`/`strandedLockAdvice` + an `unlocked bool`, plain
+  `UnlockObject` on the happy path. **No `--lang`**: the description is written in the session language,
+  it is not a translation (matches upstream — no master-language guard). **No-op without a lock**: when
+  the current text already equals the requested one, `SetDescription` returns `Changed:false` and takes
+  no lock.
+- **`verifyDescriptionWrite`**: reads the object back and turns both a silent no-op (the text did not
+  land — trailing-space-tolerant) and a whole-object replacement (`rootLocalName` changed — the PUT was
+  accepted as a replace-everything, not a description edit) into a returned error. A read-back that
+  itself fails is not treated as a write failure. Activation after the write is best-effort (a note, not
+  an error) — whether a description-only PUT even needs activation is unconfirmed.
+- **MCP**: `routeDescriptionAction` (`internal/mcp/handlers_description.go`, new) is registered **first**
+  in `handlers_universal.go`'s route chain — `routeSourceAction`'s `action=="read"` branch calls
+  `handleGetSource` unconditionally for PROG/CLAS/etc. and would shadow a description read otherwise. The
+  guards are strict (exact `action` + exact `params.type` of `description`/`set_description`).
+  `SAP(action="read", target="PROG ZX", params={"type":"description"})` /
+  `SAP(action="edit", target="PROG ZX", params={"type":"set_description","description":"..."})`.
+  `handleSetDescription` requires a non-empty `description` (to clear one, use SE80/SE11). New standalone
+  tools `GetDescription`/`SetDescription` (`tools_register.go`); `GetDescription` in focused mode,
+  `SetDescription` not (it is a write). CLI: `vsp description [TYPE] NAME ["new text"]`
+  (`cmd/vsp/description.go`, new). Help text in `handlers_help.go`.
+- **Fork⇄upstream deviations**: `docsClient(cmd)` → `resolveSystemParams`/`getClient`; `pkg/adt/textpool.go`
+  and `pkg/adt/description.go` do not overlap the way upstream's diff assumes (this fork's text pool went
+  in via 2ab); the MCP surface is this fork's individual-tools + a first-in-chain router rather than
+  upstream's router-only. **Out of scope, bundled in #201 upstream**: `vsp update`; the `fileparser`
+  `withDescription()` integration point (deferred — a separate follow-up); touching
+  `WriteSourceOptions.Description`'s update branch (kept orthogonal).
+- Code-reviewed: 2 passes, both APPROVE, 0 CRITICAL/HIGH/MEDIUM in the final state. Fixed across the
+  passes: regex anchored to the root element (`rootOpenTag`), whole-object-replacement detection
+  (`rootLocalName`/`rootBefore`), `tagCloseIndex` quote-awareness so a literal `>` in a root attribute
+  value cannot cut the tag short, `vsp description` prints `Notes` to stderr even on the error path.
+- **Verified live (2026-09-10)** against the real SAP system with a throwaway Go program
+  (`cmd/verifydesc/`, deleted after the run — not committed; same technique as 2w/2ac) driving the real
+  `pkg/adt.Client`:
+  - **PROG `ZTESTRCG1`**: read (`"Prueba BDC"`, limit 70) → change → read-back correct → restore to
+    `"Prueba BDC"` → read-back confirms. A fresh no-cache client confirms the final state. (SE80's quick
+    search index lagged the change — an async index, not a code fault; the authoritative ADT metadata
+    resource was always correct.)
+  - **Read-only GET** on `CLAS ZCL_VSP_RFC_SERVICE`, `INTF ZIF_VSP_SERVICE`, `FUGR ZFG_AGRICULTORES`,
+    `DDLS ZCDS_PEDIDO`: `Accept: application/*` does **not** 406 on any of them; descriptions and limits
+    (60/60/40/0) read correctly.
+  - **Throwaway `$TMP` writes**: `PROG ZVSP_TST_DESC`, `CLAS ZCL_VSP_TST_DESC`, `TABL ZVSP_TST_DESC_T` —
+    all three reported `Changed:true` and the read-back matched the new text. The DDIC resource shape
+    (`/sap/bc/adt/ddic/tables/`) and the CLAS path (previously structure-only-verified) are confirmed.
+  - **The attribute-insert branch could not be exercised live** — SAP requires a description at object
+    creation, so a document with no `adtcore:description` never occurs. Covered by the unit test
+    `TestSetDescription_InsertsAttributeWhenAbsent`.
+- **Known caveat — CLAS/INTF can leave a stranded `SEOCLSENQ` lock on this S/4 system**: cleaning up the
+  throwaway `ZCL_VSP_TST_DESC` hit a 403 "user is already editing" on DELETE even though every HTTP step
+  (LOCK/PUT/UNLOCK) had reported success and the description change was readable. It reproduces with a
+  plain `EDITSOURCE` on the same class and could not be cleared by any ADT unlock (own session or a
+  fresh one) — it is the **same class-family enqueue behaviour already documented for MSAG** (see the
+  `WriteMessageClassTexts` entry under Known Open Issues and `docs/message-class-write-investigation.md`),
+  **not introduced by this port**, and only SM12 or the owning process's death clears it.
+  `verifyDescriptionWrite` does not (and cannot cheaply) detect a stranded lock — an immediate re-LOCK
+  to check would itself strand. `SetDescription` on a class is therefore no safer and no worse than
+  `EditSource` on a class, which ships. Documented, not fixed.
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)

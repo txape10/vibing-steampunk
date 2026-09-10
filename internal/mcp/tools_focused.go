@@ -171,5 +171,8 @@ func focusedToolSet() map[string]bool {
 		"GetTextPool":              true, // Get text pool entries in specific language
 		"TextsGet":                 true, // Read a program's/class's text pool over native ADT REST
 		"CompareLanguages":         true, // Compare object texts between two languages
+
+		// Object metadata (read-only in focused mode; SetDescription is a write)
+		"GetDescription": true, // Read an object's SE80/SE11 short description
 	}
 }

@@ -75,6 +75,7 @@ func (s *Server) registerTools(mode string, disabledGroups string, toolsConfig m
 	s.registerSearchTools(shouldRegister)
 	s.registerDevTools(shouldRegister)
 	s.registerCRUDTools(shouldRegister)
+	s.registerDescriptionTools(shouldRegister)
 	s.registerClassIncludeTools(shouldRegister)
 	s.registerWorkflowTools(shouldRegister)
 	s.registerFileTools(shouldRegister)
@@ -2725,5 +2726,50 @@ func (s *Server) registerI18NTools(shouldRegister func(string) bool) {
 				mcp.Description("Write selection texts for keys the screen does not declare"),
 			),
 		), s.handleTextsSet)
+	}
+}
+
+// registerDescriptionTools registers the read/write tools for an object's
+// SE80/SE11 short description (adtcore:description).
+func (s *Server) registerDescriptionTools(shouldRegister func(string) bool) {
+	objectTypeDesc := "Object type: PROG, INCL, CLAS, INTF, FUGR, FUNC (needs parent), TABL, DDLS. Defaults to PROG."
+
+	if shouldRegister("GetDescription") {
+		s.mcpServer.AddTool(mcp.NewTool("GetDescription",
+			mcp.WithDescription("Read an object's short description (the text SE80/SE11 shows next to its name) plus, when ADT states it, the character limit. No lock, no source read."),
+			mcp.WithString("name",
+				mcp.Required(),
+				mcp.Description("Object name"),
+			),
+			mcp.WithString("object_type",
+				mcp.Description(objectTypeDesc),
+			),
+			mcp.WithString("parent",
+				mcp.Description("Function group name (required only for FUNC)"),
+			),
+		), s.handleGetDescription)
+	}
+
+	if shouldRegister("SetDescription") {
+		s.mcpServer.AddTool(mcp.NewTool("SetDescription",
+			mcp.WithDescription("Change an object's short description without rewriting its source. Read-modify-write: GETs the metadata document, substitutes only adtcore:description, PUTs it back — type/package/flags are preserved. Takes and releases its own lock; a no-op (and no lock) when the description already matches. Written in the session (logon) language."),
+			mcp.WithString("name",
+				mcp.Required(),
+				mcp.Description("Object name"),
+			),
+			mcp.WithString("description",
+				mcp.Required(),
+				mcp.Description("New short description"),
+			),
+			mcp.WithString("object_type",
+				mcp.Description(objectTypeDesc),
+			),
+			mcp.WithString("parent",
+				mcp.Description("Function group name (required only for FUNC)"),
+			),
+			mcp.WithString("transport",
+				mcp.Description("Transport request number; auto-chosen when omitted for a transportable object"),
+			),
+		), s.handleSetDescription)
 	}
 }
