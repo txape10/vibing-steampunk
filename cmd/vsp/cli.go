@@ -47,6 +47,15 @@ type systemParams struct {
 
 	Cache     bool
 	CachePath string
+
+	ReadOnly        bool
+	AllowedPackages []string
+
+	EnableTransports        bool
+	TransportReadOnly       bool
+	AllowedTransports       []string
+	AllowTransportableEdits bool
+	BlockFreeSQL            bool
 }
 
 // resolveSystemParams resolves system parameters from --system flag or env vars.
@@ -108,6 +117,15 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 			TransportAttribute: sys.TransportAttribute,
 			Cache:              sys.Cache,
 			CachePath:          sys.CachePath,
+
+			ReadOnly:        sys.ReadOnly || envFlag("SAP_READ_ONLY"),
+			AllowedPackages: firstNonEmptyList(sys.AllowedPackages, splitList(os.Getenv("SAP_ALLOWED_PACKAGES"))),
+
+			EnableTransports:        sys.EnableTransports || envFlag("SAP_ENABLE_TRANSPORTS"),
+			TransportReadOnly:       sys.TransportReadOnly || envFlag("SAP_TRANSPORT_READ_ONLY"),
+			AllowedTransports:       firstNonEmptyList(sys.AllowedTransports, splitList(os.Getenv("SAP_ALLOWED_TRANSPORTS"))),
+			AllowTransportableEdits: sys.AllowTransportableEdits || envFlag("SAP_ALLOW_TRANSPORTABLE_EDITS"),
+			BlockFreeSQL:            sys.BlockFreeSQL || envFlag("SAP_BLOCK_FREE_SQL"),
 		}, nil
 	}
 
@@ -139,7 +157,54 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 		TransportAttribute: resolveTransportAttributeFromEnv(),
 		Cache:              cacheEnabled,
 		CachePath:          cachePath,
+
+		ReadOnly:        strings.EqualFold(os.Getenv("SAP_READ_ONLY"), "true"),
+		AllowedPackages: splitList(os.Getenv("SAP_ALLOWED_PACKAGES")),
+
+		EnableTransports:        envFlag("SAP_ENABLE_TRANSPORTS"),
+		TransportReadOnly:       envFlag("SAP_TRANSPORT_READ_ONLY"),
+		AllowedTransports:       splitList(os.Getenv("SAP_ALLOWED_TRANSPORTS")),
+		AllowTransportableEdits: envFlag("SAP_ALLOW_TRANSPORTABLE_EDITS"),
+		BlockFreeSQL:            envFlag("SAP_BLOCK_FREE_SQL"),
 	}, nil
+}
+
+// splitList splits a comma-separated env var value into a trimmed,
+// non-empty list of items (e.g. "Z*, $TMP" -> ["Z*", "$TMP"]).
+func splitList(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// envFlag reports whether the named env var holds a truthy value
+// ("true", "1", "yes", "on", case-insensitive).
+func envFlag(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// firstNonEmptyList returns configured if it has any entries, else fromEnv —
+// so a named system's .vsp.json list wins, but a SAP_* env var still applies
+// when the system config didn't set one.
+func firstNonEmptyList(configured, fromEnv []string) []string {
+	if len(configured) > 0 {
+		return configured
+	}
+	return fromEnv
 }
 
 func resolveTransportAttributeFromEnv() string {
@@ -181,6 +246,45 @@ func buildClient(params *systemParams) (*adt.Client, error) {
 	if params.Insecure {
 		opts = append(opts, adt.WithInsecureSkipVerify())
 	}
+
+	// A declared safety policy (--read-only, --allowed-packages, or the
+	// equivalent per-system .vsp.json / SAP_* env settings) is otherwise
+	// unreachable on this CLI code path, which builds its client via
+	// systemParams/getClient rather than the root command's cfg struct.
+	safety := adt.UnrestrictedSafetyConfig()
+	restricted := false
+	if params.ReadOnly {
+		safety.ReadOnly = true
+		restricted = true
+	}
+	if len(params.AllowedPackages) > 0 {
+		safety.AllowedPackages = params.AllowedPackages
+		restricted = true
+	}
+	if params.BlockFreeSQL {
+		safety.BlockFreeSQL = true
+		restricted = true
+	}
+	if params.EnableTransports {
+		safety.EnableTransports = true
+		restricted = true
+	}
+	if params.TransportReadOnly {
+		safety.TransportReadOnly = true
+		restricted = true
+	}
+	if len(params.AllowedTransports) > 0 {
+		safety.AllowedTransports = params.AllowedTransports
+		restricted = true
+	}
+	if params.AllowTransportableEdits {
+		safety.AllowTransportableEdits = true
+		restricted = true
+	}
+	if restricted {
+		opts = append(opts, adt.WithSafety(safety))
+	}
+
 	// The response cache: GET (and stable-table data preview) answers kept
 	// for a while, dropped on any write. In memory by default; on SQLite
 	// when a path is configured, so the next CLI run starts warm.

@@ -1615,3 +1615,167 @@ func TestGetSource_NoCache_BypassesResponseCache(t *testing.T) {
 			"it was served from the response cache instead", n)
 	}
 }
+
+// --- Debugger REST domain (pkg/adt/debugger.go): session affinity ---
+//
+// None of Attach/Step/GetStack/GetVariables/GetChildVariables/GoToStack/
+// SetVariableValue/Listen/CheckListener/StopListener/BatchRequest sent
+// Stateful: true before this fix. DebuggerAttach pins a session server-side;
+// any follow-up call without Stateful lands on a different ADT session, and
+// SAP answers "noSessionAttached" (SY/530) — confirmed live against the real
+// system. These tests pin that every wire call in this domain now carries
+// X-sap-adt-sessiontype: stateful. Deliberately excluded: the deprecated
+// /debugger/breakpoints* functions (SetExternalBreakpoint,
+// GetExternalBreakpoints, DeleteExternalBreakpoint,
+// DeleteAllExternalBreakpoints, ValidateBreakpointCondition) — superseded by
+// the ZADT_VSP WebSocket handler, not part of this fix.
+
+func TestDebuggerSession_TierOneCallsAreStateful(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(c *Client)
+	}{
+		{"Attach", func(c *Client) {
+			_, _ = c.DebuggerAttach(context.Background(), "DBG123", "")
+		}},
+		{"Step", func(c *Client) {
+			_, _ = c.DebuggerStep(context.Background(), DebugStepOver, "")
+		}},
+		{"GetStack", func(c *Client) {
+			_, _ = c.DebuggerGetStack(context.Background(), false)
+		}},
+		{"GetVariables", func(c *Client) {
+			_, _ = c.DebuggerGetVariables(context.Background(), []string{"@ROOT"})
+		}},
+		{"GetChildVariables", func(c *Client) {
+			_, _ = c.DebuggerGetChildVariables(context.Background(), []string{"@ROOT"})
+		}},
+		{"GoToStack", func(c *Client) {
+			_ = c.DebuggerGoToStack(context.Background(), "/sap/bc/adt/debugger/stack/type/ABAP/position/1")
+		}},
+		{"SetVariableValue", func(c *Client) {
+			_, _ = c.DebuggerSetVariableValue(context.Background(), "LV_X", "1")
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &adtRecorder{}
+			client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+
+			tt.call(client)
+
+			calls := rec.snapshot()
+			if len(calls) == 0 {
+				t.Fatal("expected at least one outbound request")
+			}
+			last := calls[len(calls)-1]
+			if last.sessionType != "stateful" {
+				t.Errorf("X-sap-adt-sessiontype = %q, want \"stateful\" — a follow-up call in the same "+
+					"debug session (e.g. GetStack after Attach) would land on a different ADT session and "+
+					"SAP would answer noSessionAttached (SY/530), issue #91: %s", last.sessionType, last)
+				dumpCalls(t, calls)
+			}
+		})
+	}
+}
+
+func TestDebuggerListen_IsStateful(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	if _, err := client.DebuggerListen(context.Background(), &ListenOptions{TimeoutSeconds: 1, User: "TESTUSER"}); err != nil {
+		t.Fatalf("DebuggerListen: %v", err)
+	}
+
+	// The stub has no cached CSRF token yet, so a leading token-fetch request
+	// (never stateful) may precede the real POST — assert on the listeners
+	// call itself, not on call count.
+	calls := rec.snapshot()
+	listenAt := indexOfCall(calls, func(c wireCall) bool {
+		return c.method == http.MethodPost && strings.Contains(c.path, "/debugger/listeners")
+	})
+	if listenAt < 0 {
+		t.Fatalf("expected a POST to /debugger/listeners; trace:\n%v", calls)
+	}
+	if got := calls[listenAt].sessionType; got != "stateful" {
+		t.Errorf("Listen X-sap-adt-sessiontype = %q, want \"stateful\" — the DebuggerAttach that follows "+
+			"a caught debuggee must land on the same session Listen pinned", got)
+		dumpCalls(t, calls)
+	}
+}
+
+func TestDebuggerCheckListener_IsStateful(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	if _, err := client.DebuggerCheckListener(context.Background(), &ListenOptions{User: "TESTUSER"}); err != nil {
+		t.Fatalf("DebuggerCheckListener: %v", err)
+	}
+
+	calls := rec.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly one outbound request, got %d", len(calls))
+	}
+	if got := calls[0].sessionType; got != "stateful" {
+		t.Errorf("CheckListener X-sap-adt-sessiontype = %q, want \"stateful\"", got)
+	}
+}
+
+func TestDebuggerStopListener_IsStateful(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	if err := client.DebuggerStopListener(context.Background(), &ListenOptions{User: "TESTUSER"}); err != nil {
+		t.Fatalf("DebuggerStopListener: %v", err)
+	}
+
+	// A leading CSRF token-fetch request (never stateful) may precede the
+	// real DELETE — assert on the listeners call itself, not on call count.
+	calls := rec.snapshot()
+	stopAt := indexOfCall(calls, func(c wireCall) bool {
+		return c.method == http.MethodDelete && strings.Contains(c.path, "/debugger/listeners")
+	})
+	if stopAt < 0 {
+		t.Fatalf("expected a DELETE to /debugger/listeners; trace:\n%v", calls)
+	}
+	if got := calls[stopAt].sessionType; got != "stateful" {
+		t.Errorf("StopListener X-sap-adt-sessiontype = %q, want \"stateful\"", got)
+		dumpCalls(t, calls)
+	}
+}
+
+func TestDebuggerBatchRequest_IsStateful(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "multipart/mixed; boundary=resp")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	_, _ = client.DebuggerBatchRequest(context.Background(), []DebugBatchOperation{
+		{Method: "GET", Path: "/sap/bc/adt/debugger/stack"},
+	})
+
+	// A leading CSRF token-fetch request (never stateful) may precede the
+	// real POST — assert on the batch call itself, not on call count.
+	calls := rec.snapshot()
+	batchAt := indexOfCall(calls, func(c wireCall) bool {
+		return c.method == http.MethodPost && strings.Contains(c.path, "/debugger/batch")
+	})
+	if batchAt < 0 {
+		t.Fatalf("expected a POST to /debugger/batch; trace:\n%v", calls)
+	}
+	if got := calls[batchAt].sessionType; got != "stateful" {
+		t.Errorf("BatchRequest X-sap-adt-sessiontype = %q, want \"stateful\" — dead code today, but the "+
+			"same defect as its siblings if it is ever wired up", got)
+		dumpCalls(t, calls)
+	}
+}

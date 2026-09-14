@@ -49,21 +49,10 @@ func init() {
 }
 
 func runLua(cmd *cobra.Command, args []string) error {
-	// Resolve configuration (same as MCP server)
-	resolveConfig(cmd.Parent())
-
-	// Validate we have auth
-	if err := validateConfig(); err != nil {
+	client, err := createADTClientFor(cmd)
+	if err != nil {
 		return err
 	}
-
-	// Process cookie auth
-	if err := processCookieAuth(cmd.Parent()); err != nil {
-		return err
-	}
-
-	// Create ADT client
-	client := createADTClient()
 
 	// Create Lua engine
 	engine := scripting.NewLuaEngine(client)

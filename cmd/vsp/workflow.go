@@ -86,21 +86,15 @@ func init() {
 func runWorkflow(cmd *cobra.Command, args []string) error {
 	workflowFile := args[0]
 
-	// Resolve configuration (same as MCP server)
-	resolveConfig(cmd.Parent().Parent())
-
-	// Validate we have auth
-	if err := validateConfig(); err != nil {
+	// Process cookie auth (kept: some workflow steps read cfg.Cookies directly)
+	if err := processCookieAuth(cmd); err != nil {
 		return err
 	}
 
-	// Process cookie auth
-	if err := processCookieAuth(cmd.Parent().Parent()); err != nil {
+	client, err := createADTClientFor(cmd)
+	if err != nil {
 		return err
 	}
-
-	// Create ADT client
-	client := createADTClient()
 
 	// Create workflow engine
 	engine := dsl.NewWorkflowEngine(client)
@@ -147,19 +141,15 @@ func runWorkflow(cmd *cobra.Command, args []string) error {
 func runTestWorkflow(cmd *cobra.Command, args []string) error {
 	packagePattern := args[0]
 
-	// Resolve configuration
-	resolveConfig(cmd.Parent().Parent())
-
-	if err := validateConfig(); err != nil {
+	// Process cookie auth (kept: some workflow steps read cfg.Cookies directly)
+	if err := processCookieAuth(cmd); err != nil {
 		return err
 	}
 
-	if err := processCookieAuth(cmd.Parent().Parent()); err != nil {
+	client, err := createADTClientFor(cmd)
+	if err != nil {
 		return err
 	}
-
-	// Create ADT client
-	client := createADTClient()
 
 	fmt.Fprintf(os.Stderr, "Discovering tests in: %s\n", packagePattern)
 
@@ -238,6 +228,39 @@ func runTestWorkflow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// backfillGlobalConfig copies a resolved system's connection details into the
+// global cfg struct, for the handful of call sites (debugSession.printInfo,
+// lua.go's verbose banner, lsp.go) that still read cfg.* directly instead of
+// taking a systemParams.
+func backfillGlobalConfig(params *systemParams) {
+	cfg.BaseURL = params.URL
+	cfg.Username = params.User
+	cfg.Password = params.Password
+	if params.Client != "" {
+		cfg.Client = params.Client
+	}
+	if params.Language != "" {
+		cfg.Language = params.Language
+	}
+	cfg.InsecureSkipVerify = cfg.InsecureSkipVerify || params.Insecure
+}
+
+// createADTClientFor resolves system parameters for cmd (--system flag,
+// .vsp.json default, or bare SAP_* env vars) and builds a client from them —
+// the -s-aware replacement for createADTClient, which only ever reads the
+// global cfg (never populated by -s on this code path).
+func createADTClientFor(cmd *cobra.Command) (*adt.Client, error) {
+	params, err := resolveSystemParams(cmd)
+	if err != nil {
+		return nil, err
+	}
+	backfillGlobalConfig(params)
+	return getClient(params)
+}
+
+// Deprecated: use createADTClientFor, which resolves -s/.vsp.json system
+// parameters correctly. Kept for the LSP path (lsp.go), which this port
+// deliberately leaves untouched — see CLAUDE.md.
 func createADTClient() *adt.Client {
 	opts := []adt.Option{
 		adt.WithClient(cfg.Client),

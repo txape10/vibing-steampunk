@@ -78,26 +78,29 @@ type debugSession struct {
 }
 
 func runDebug(cmd *cobra.Command, args []string) error {
-	// Resolve configuration (same as MCP server)
-	resolveConfig(cmd.Parent())
-
-	// Validate we have auth
-	if err := validateConfig(); err != nil {
+	// Resolve via -s/.vsp.json/env, same as every other -s-aware command
+	// (texts, description, ...). The old resolveConfig/validateConfig/
+	// createADTClient() path read only the global cfg, which a named system
+	// never populates — "vsp debug -s a4h" reported "SAP URL is required"
+	// while "vsp deploy -s a4h" worked on the same system.
+	params, err := resolveSystemParams(cmd)
+	if err != nil {
 		return err
 	}
 
-	// Process cookie auth
-	if err := processCookieAuth(cmd.Parent()); err != nil {
+	client, err := getClient(params)
+	if err != nil {
 		return err
 	}
-
-	// Create ADT client
-	client := createADTClient()
+	// debugSession.printInfo() reads cfg.BaseURL directly rather than params
+	// (a pre-existing minor gap, not restructured here to avoid double-
+	// resolving resolveSystemParams and duplicating its verbose logging).
+	backfillGlobalConfig(params)
 
 	// Get user for debugging
 	user := debugUser
 	if user == "" {
-		user = cfg.Username
+		user = params.User
 	}
 
 	// Set terminal ID for this session
@@ -118,11 +121,11 @@ func runDebug(cmd *cobra.Command, args []string) error {
 
 	// Create WebSocket client for breakpoints
 	wsClient := adt.NewDebugWebSocketClient(
-		cfg.BaseURL,
-		cfg.Client,
-		cfg.Username,
-		cfg.Password,
-		cfg.InsecureSkipVerify,
+		params.URL,
+		params.Client,
+		params.User,
+		params.Password,
+		params.Insecure,
 	)
 
 	// Try to connect WebSocket (optional - falls back to HTTP if unavailable)
@@ -158,7 +161,7 @@ func runDebug(cmd *cobra.Command, args []string) error {
 	}
 
 	// Print banner
-	printDebugBanner(user, cfg.BaseURL, wsConnected)
+	printDebugBanner(user, params.URL, wsConnected)
 
 	// Enter REPL
 	return session.repl()

@@ -1340,6 +1340,209 @@ the code permanently — it is the fix, not a placeholder.
   identifier (`ZCL_A` inside `ZCL_ABC`) would be mangled. Out of scope for this fix; use non-substring
   names.
 
+### 2ah. `vsp debug ui` — local web UI for the ABAP debugger, ported from upstream #186-190 (own WebSocket bridge) + `pkg/adt/debugger.go` session-affinity fix (2026-09-11)
+- **Scope decision (made explicitly, before implementation)**: upstream's own rewrite of this prototype
+  (PRs #187/#188) moves the debugger session onto a new `pkg/saprfc` — classic RFC via
+  `github.com/oisee/open-rfc-go`, a pure-Go but self-described "early" library — with its own parallel
+  ADT-over-RFC debugger session, replacing the WebSocket (ZADT_VSP) bridge this fork already has and relies
+  on throughout (breakpoints, RunReport/RunRFC triggering, text pool, RFC search/metadata — see 2h, 2g,
+  2ab). **Only the UI was ported, not that dependency**: `cmd/vsp/debug_ui.go` drives exactly the two
+  clients `cmd/vsp/debug.go`'s existing REPL already uses — `*adt.Client`'s `Debugger*` methods
+  (`pkg/adt/debugger.go`) for the session itself (listen, attach, step, stack, variables, detach), and
+  `*adt.DebugWebSocketClient` (ZADT_VSP) for breakpoints and for triggering a report/function module. No
+  new dependency, no second parallel debugger implementation.
+- **What was built**: `cmd/vsp/debug_ui.go` (a `//go:embed`-ed static page + a small JSON API, no build
+  step, no CDN — works on a laptop behind a proxy), `cmd/vsp/debug_ui.html`, `cmd/vsp/debug_ui_test.go` (8
+  tests: embed actually serves content, unknown paths 404, detached-state shape, step-type allowlist, the
+  bespoke read-only guard blocks `/api/bp` before touching a nil `wsClient`, read-only still allows Listen,
+  `tryStart`/`finish` serialize concurrent sessions, a missing `object` param reports a note instead of
+  reaching a nil client). `vsp debug ui [--port 7799] [--user DEVELOPER]`.
+- **Deliberate differences from upstream's own UI PR**, each a consequence of the WebSocket-bridge
+  decision above: no `/api/sys` (system listing — this fork resolves via `-s`/`.vsp.json`/env like every
+  other command, not a runtime system switcher); `Run report`/`Run RFC` are two distinct endpoints
+  (`/api/run/report`, `/api/run/rfc`), not one generic "run" that upstream's `pkg/saprfc` session can
+  dispatch by target type; a bespoke `readOnly` guard (`debugUIServer.readOnly`) blocks only the
+  SAP-side-action handlers (`/api/bp`, `/api/run/*`) — stepping/stack/detach are never blocked, since this
+  domain has no object URL/package for `pkg/adt/safety.go`'s `checkMutation` to gate, so the usual mutation
+  gate does not apply here.
+- **`-s` (named system) fix in `cmd/vsp/debug.go`**, found while building the UI (the REPL and the new UI
+  share `runDebug`'s system-resolution path): `vsp debug -s a4h` reported "SAP URL is required" while `vsp
+  deploy -s a4h` worked against the same system. Root cause: `runDebug` read only the global `cfg`
+  (`resolveConfig`/`validateConfig`/`createADTClient()`), which a named `-s` system never populates — every
+  other `-s`-aware command (`texts`, `description`, ...) instead calls `resolveSystemParams(cmd)` +
+  `getClient(params)`. Fixed by switching `runDebug` to that same pattern; `wsClient`/`printDebugBanner`
+  updated to read from `params` instead of `cfg`.
+- **Code review of the UI itself** (before this session's live verification): 0 CRITICAL/HIGH, 1 MEDIUM + 1
+  LOW fixed — `triggerAndCatch`'s listener goroutine is explicitly waited-for on every exit path (including
+  a fast trigger failure) rather than left to outlive the request, since the caller's deferred `finish()`
+  releasing the "busy" guard while that goroutine is still live against SAP could let a retry start a second
+  concurrent listener on the same debug session; `ensureBreakpoint`'s fail-open-on-`GetBreakpoints`-error
+  behavior got an explanatory comment (both share the same WS transport, so a connection problem serious
+  enough to matter almost always fails the following `SetLineBreakpoint` too — failing open on the read
+  alone, not the write, keeps a transient hiccup from blocking a Run it would not otherwise have blocked).
+- **Timeout-margin bug found live, fixed** (own new code, no user approval needed — a direct correctness
+  fix to files already in this task's own deliverable): `handleRunReport`/`handleRunRFC` used
+  `TimeoutSeconds: 60` and `handleListen` defaulted `seconds` to 60, colliding with `pkg/adt/config.go`'s
+  hard `Config.Timeout = 60 * time.Second` (`http.Client.Timeout`, an absolute per-request cutoff Go
+  enforces regardless of any context deadline or the `timeout` query param sent to SAP) — a `TimeoutSeconds`
+  at or above 60 always loses that race, surfacing as `"context deadline exceeded (Client.Timeout exceeded
+  while awaiting headers)"` after a ~70s wait instead of the clean "nobody stopped within Ns" a Listen
+  timeout is meant to return. `cmd/vsp/debug.go`'s `runProgram` had already hit the same ceiling and backs
+  off to 30s for exactly this reason — the new UI code just hadn't copied that margin. Fixed with a new
+  `maxListenSeconds = 45` constant (standalone Listen) and `30` (trigger-and-catch, matching `runProgram`'s
+  own value) for `handleRunReport`/`handleRunRFC`; `debug_ui.html`'s matching UI copy updated. Confirmed
+  live: after the fix, "Listen only" + an external trigger (`execute_abap`) produced a genuine catch
+  (`{"attached":true,...,"note":"stopped at ZVSP_TST_DBGUI:11"}`) instead of the timeout.
+- **The main fix this session — `pkg/adt/debugger.go` had the #91 session-affinity defect, never fixed
+  anywhere on this line**: live verification of the new UI (breakpoint set on a throwaway `$TMP` report,
+  caught via `execute_abap` as the trigger — sidesteps the documented `RUN_REPORT`/#113
+  `APC_ILLEGAL_STATEMENT` bug entirely, since breakpoints fire regardless of which session/mechanism
+  executes the target code) got past `DebuggerListen`/`DebuggerAttach` cleanly, but the very next call
+  (`DebuggerGetStack`, invoked internally by the UI's `snapshot()`) failed with HTTP 404 / SAP error
+  `noSessionAttached` (T100 key `SY/530`). None of the debugger domain's HTTP methods ever set
+  `Stateful: true` in their `RequestOptions` — the same #91 defect this codebase has fixed repeatedly
+  elsewhere (CLAUDE.md §1, 2t, 2w, 2x, 2z, 2ab-2ag) had simply never been applied to this REST surface.
+  Confirmed pre-existing (not introduced by the new UI code) and confirmed to affect the already-deployed
+  production MCP tool too, identically, via `SAP(action="debug", target="GET_STACK")`.
+  - **Fix**: added `Stateful: true` to the `RequestOptions` literal in 11 methods, in three tiers — **Tier
+    1** (proven necessary by the live failure): `DebuggerAttach`, `DebuggerStep` (also backs
+    `DebuggerDetach`), `DebuggerGetStack`, `DebuggerGetVariables`, `DebuggerGetChildVariables`,
+    `DebuggerGoToStack`, `DebuggerSetVariableValue`. **Tier 2** (same domain, consistency —
+    `DebuggerListen` got a code comment on its own tradeoff: a long Listen now holds a dedicated stateful
+    session for up to `TimeoutSeconds+30s` instead of sharing the pool): `DebuggerListen`,
+    `DebuggerCheckListener`, `DebuggerStopListener`. **Tier 3** (dead code, no caller anywhere in the
+    codebase — fixed to avoid a future landmine): `DebuggerBatchRequest`. **Deliberately not touched**: the
+    five `/debugger/breakpoints*` functions in the same file (`SetExternalBreakpoint`,
+    `GetExternalBreakpoints`, `DeleteExternalBreakpoint`, `DeleteAllExternalBreakpoints`,
+    `ValidateBreakpointCondition`) — already marked `DEPRECATED` in favor of ZADT_VSP, out of scope.
+  - Tests: `pkg/adt/session_affinity_test.go` — `TestDebuggerSession_TierOneCallsAreStateful`
+    (table-driven, all 7 Tier-1 methods), `TestDebuggerListen_IsStateful`,
+    `TestDebuggerCheckListener_IsStateful`, `TestDebuggerStopListener_IsStateful`,
+    `TestDebuggerBatchRequest_IsStateful`. A POST/DELETE with no cached CSRF token triggers a leading
+    token-fetch request first (correctly never stateful), so the Tier-2/3 tests search the wire trace for
+    the specific method+path rather than assuming exactly one call.
+  - Code-reviewed: 0 CRITICAL/HIGH/MEDIUM/LOW. Verdict APPROVE — all 11 methods confirmed correctly fixed
+    (including that `DebuggerDetach`/`DebuggerStepWithBatch` inherit `Stateful: true` transitively, since
+    they delegate rather than call `transport.Request` themselves), deprecated functions confirmed
+    untouched, `Stateful: true` confirmed as this codebase's one established mechanism (backed by the
+    persistent `http.CookieJar` every other `Stateful: true` fix already relies on — `pkg/adt/config.go`),
+    tests independently confirmed non-vacuous (fail before the fix, pass after).
+  - **Verified live (2026-09-11)**, against the real SAP system, through the rebuilt throwaway UI server:
+    two independent `Listen → Attach → GetStack (+ GetChildVariables)` round trips — each issued as
+    separate HTTP requests, not one call — both succeeded with real stack data and no `noSessionAttached`
+    on either. `DebuggerStep` (stepOver) on a live-attached session also completed cleanly (`"debuggee
+    terminated"`, a normal successful outcome — no exception). `DebuggerDetach` cleanly released a
+    still-attached session with no error. Note: an early `DebuggerStep(stepContinue)` attempt on a dynpro
+    (`SAPMSSY0`, `PAI SCREEN`) frame errored (`SADT_REST/006`, a different subtype than the fixed `SY/530`)
+    and a subsequent Attach once briefly hit "Debuggee already attached" — both are session-churn artifacts
+    of rapid repeated manual test attempts against one single-threaded debug session/terminal ID, resolved
+    cleanly by one Detach, not a recurrence of the fixed defect; not investigated further as out of scope
+    for this fix.
+- **Live-verification checklist status**: breakpoint set + Listen + external trigger + catch — verified.
+  `DebuggerGetStack`/`DebuggerGetChildVariables` after Attach — verified (this was the specific defect).
+  Stepping (Over) — verified once, cleanly. Detach — verified, clean. `Run report`/`Run RFC`, `--read-only`
+  gating, source display, and the `-s` REPL fix itself (no `.vsp.json` with a named system exists in this
+  project to test against) were **not** exercised live this session — noted as a gap, not fixed.
+- Files: `cmd/vsp/debug_ui.go` (new), `cmd/vsp/debug_ui.html` (new), `cmd/vsp/debug_ui_test.go` (new),
+  `cmd/vsp/debug.go` (`-s` fix), `pkg/adt/debugger.go` (`Stateful` fix), `pkg/adt/session_affinity_test.go`
+  (5 new tests).
+- `go build ./...` clean; full suite green (`go test $(go list ./pkg/... ./internal/... | grep -v
+  pkg/cache)`).
+
+### 2ai. CLI safety-flag propagation — ported upstream #122650182/#b9769d4/#ae5f684, closes the `debug ui --read-only` gap 2ah left open (2026-09-11)
+- **The gap this closes**: 2ah's own live-verification checklist explicitly listed `--read-only` gating
+  as "not exercised live, noted as a gap" — investigating it surfaced a much bigger problem than a single
+  missing test. `--read-only`/`--allowed-packages`/`--enable-transports`/`--transport-read-only`/
+  `--allowed-transports`/`--allow-transportable-edits`/`--block-free-sql` are registered on
+  `rootCmd.Flags()` (`cmd/vsp/main.go`), which Cobra scopes to the root command only — never inherited by
+  any subcommand. `vsp debug ui --read-only` (and `vsp --read-only debug ui`) both fail with `unknown
+  flag: --read-only`, confirmed empirically. Worse: `cfg.ReadOnly` (the field these flags populate) is
+  only ever read from `resolveConfig()`, called solely by the bare/MCP-server `RunE` path — none of the 16
+  files using the `resolveSystemParams(cmd)` + `getClient(params)` CLI pattern (`debug_ui.go` included)
+  ever saw it. The documented per-system `.vsp.json` `"read_only": true` / `"allowed_packages": [...]`
+  (already parsed into `pkg/config.SystemConfig`, used in `ExampleConfig()`'s `"prod"` example) were
+  silent no-ops on this whole code path — `systemParams` had no such fields at all.
+- **Not a new design — already fixed upstream**, in 3 separate merged commits found via `gh` search/API
+  before planning anything (`122650182b4e8046235834f8f252b6c133f00ae7`, `b9769d490a83430c086bb7029c2d8fd7`,
+  `ae5f684228a548ac71c39cffe9f7b90e52b517b6`). Ported and adapted to this fork's actual file layout, not a
+  mechanical `git cherry-pick` — this fork's `cmd/vsp/cli.go`/`workflow.go` differ enough from upstream's
+  that a literal patch would not apply.
+- **`systemParams` (`cmd/vsp/cli.go`) gains 7 fields**: `ReadOnly`, `AllowedPackages`, `EnableTransports`,
+  `TransportReadOnly`, `AllowedTransports`, `AllowTransportableEdits`, `BlockFreeSQL`. `SystemConfig`
+  (`pkg/config/systems.go`) gains the 5 transport ones as new JSON keys (`ReadOnly`/`AllowedPackages`
+  already existed there, parsed but previously dead). `resolveSystemParams` populates all 7 in **both**
+  branches — the named-system branch (`sys.X`, merged with `envFlag("SAP_X")`/`splitList(os.Getenv(...))`
+  via new `firstNonEmptyList` so a `.vsp.json` value isn't silently overridden by an unset env var) and the
+  bare-`SAP_*`-env-var fallback branch. **Deliberate deviation from upstream's literal diff**: upstream
+  only added the 5 transport fields to the named-system branch, leaving the fallback branch asymmetric (a
+  gap its own `ReadOnly`/`AllowedPackages` commit didn't have). Decided to make all 7 symmetric in both
+  branches instead, because this project's actual MCP deployment
+  (`claude_desktop_config.json`'s `env.SAP_ALLOWED_PACKAGES=Z*,$TMP` etc., see 2t's correction) uses the
+  bare-env-var fallback path exclusively — no `.vsp.json` in production here — so the fallback branch is
+  the one that matters in practice, not an edge case to leave asymmetric.
+- **`getClient`/`buildClient`** now builds an `adt.SafetyConfig` via `adt.UnrestrictedSafetyConfig()` +
+  conditional overrides + `adt.WithSafety(safety)`, gated behind a local `restricted bool` (pure
+  optimization — `adt.NewConfig`'s own default is already unrestricted, so the gate changes no behavior,
+  confirmed by code review). New helpers `splitList(v string) []string` (comma-separated, trims, drops
+  blanks) and `envFlag(name string) bool` (`"true"/"1"/"yes"/"on"`, case-insensitive).
+- **`cmd/vsp/workflow.go`**: new `backfillGlobalConfig(params *systemParams)` copies
+  URL/User/Password/Client/Language/Insecure into the global `cfg` struct — for the handful of call sites
+  (`debugSession.printInfo()`, `lua.go`'s verbose banner) that still read `cfg.*` directly rather than
+  taking a `systemParams`. New `createADTClientFor(cmd) (*adt.Client, error)` = resolve + backfill +
+  `getClient`. `runWorkflow`/`runTestWorkflow` migrated to it, keeping their `processCookieAuth(cmd)` call
+  (some workflow steps read `cfg.Cookies` directly — matches upstream's own, slightly inconsistent, real
+  diff rather than "cleaning it up"). Old `createADTClient()` (reads only the global `cfg`, never resolves
+  `-s`) kept as-is with a `// Deprecated` comment — still used by `cmd/vsp/lsp.go`, deliberately **not**
+  ported: confirmed upstream's own `lsp.go` is byte-identical to this fork's (fetched via raw GitHub) and
+  has the same unfixed bug, despite the upstream commit message claiming "lsp" was fixed. Not this fork's
+  gap to close alone.
+- **`cmd/vsp/lua.go`**: `runLua` migrated to `client, err := createADTClientFor(cmd)` directly, no
+  `processCookieAuth` call — matches upstream's actual diff for this file.
+- **`cmd/vsp/debug.go`**: already fixed for `-s` in the 2ah session (`resolveSystemParams`/`getClient`
+  instead of `resolveConfig`/`createADTClient()`). One line added: `backfillGlobalConfig(params)` right
+  after `getClient` succeeds — closes a smaller gap found while building this fix:
+  `debugSession.printInfo()` printed a blank `System:` line under `-s` since `cfg.BaseURL` was never
+  populated. Deliberately **not** switched to `createADTClientFor(cmd)` — that would re-run
+  `resolveSystemParams` a second time, duplicating its verbose stderr logging.
+- **`cmd/vsp/debug_ui.go`** — the actual bug this whole investigation started from: `readOnly:
+  cfg.ReadOnly` (line 150, always `false` on this code path) → `readOnly: client.Safety().ReadOnly`
+  (`client` already in scope, and `client.Safety()` now genuinely reflects the resolved policy).
+- Tests: `cmd/vsp/cli_safety_test.go` (new) — upstream's 4 (`TestGetClientHonoursDeclaredSafety`,
+  `TestGetClientCarriesAllowedPackages`, `TestGetClientUnrestrictedByDefault`, `TestSplitListIgnoresBlanks`)
+  ported, plus a new `TestGetClientCarriesTransportSafety` table (5 subtests, one per transport field) —
+  upstream's own transport-safety commit added no test coverage at all, this fork's does.
+- Code-reviewed: 0 CRITICAL/HIGH/MEDIUM. 1 LOW (fixed same session) — the named-system branch initially
+  merged only the 5 boolean transport fields with their env vars, leaving `ReadOnly`/`AllowedPackages`/
+  `AllowedTransports` unmerged there (matching `pkg/config.SystemConfig.GetSystem()`'s own pre-existing
+  pattern, where only `Password`/`TransportAttribute`/`Cache` merge with env — not a new defect, but
+  inconsistent given the other 4 transport-safety fields do merge). Fixed for full symmetry via
+  `firstNonEmptyList`.
+- **Deliberately out of scope**: no `PersistentFlags()` change in `cmd/vsp/main.go` — `vsp debug ui
+  --read-only` as a literal CLI flag on a subcommand still fails with `unknown flag`. Only the
+  `.vsp.json`/`SAP_*` env var path is fixed. `cmd/vsp/lsp.go` untouched (see above).
+- `go build ./...` clean; full suite green (`go test $(go list ./pkg/... ./internal/... | grep -v
+  pkg/cache)`), including the 9 new tests in `cli_safety_test.go`.
+- **Verified live (2026-09-11)** via the rebuilt throwaway binary against a scratchpad-only `.vsp.json`
+  (never placed in the tracked project directory — it isn't gitignored and a real test config could carry
+  real URL/user info, see 2ah/2t's security notes): added a `devsys_ro` system
+  (`"read_only": true`, alongside the pre-existing `devsys`). `vsp -s devsys debug`'s `info` command and
+  `vsp -s devsys_ro debug`'s `info` command both now print the real system URL (previously blank under
+  `-s`, the `printInfo()` gap this session also closed) — confirms `backfillGlobalConfig` in both
+  `debug.go` and the `createADTClientFor` path. `vsp -s devsys_ro lua -v -e 'print(1)'` printed a correct
+  verbose banner (`Connected to: https://…`, `Client: 100, Language: ES`) and ran — confirms `lua.go`'s
+  migration. **`vsp -s devsys_ro debug ui` blocked on ZADT_VSP being unavailable for the rest of this
+  session** (whole-system `HTTP 503` on every `/sap/bc/adt/...` call, confirmed with a plain `search` too —
+  not scoped to ZADT_VSP or to this fix; SAPGUI and SMICM's HTTP/HTTPS service rows stayed green throughout,
+  so it wasn't the ICM process itself; resolved on its own, cause not root-caused). **Completed in a later
+  session (2026-09-14)**, once the system recovered: `vsp -s devsys_ro debug ui --port 7801` printed
+  `read-only: breakpoints and triggering are disabled` on startup, and `curl -X POST /api/bp`,
+  `/api/run/rfc`, `/api/run/report` each returned `403` with the expected `"read-only mode: cannot ..."`
+  note — closing the original bug this whole port exists to fix. The `readOnly` wiring itself
+  (`client.Safety().ReadOnly` correctly reflecting `systemParams.ReadOnly`) is covered by
+  `TestGetClientHonoursDeclaredSafety` and confirmed correct by code review; the guard logic it feeds
+  (`handleBreakpoint`/`handleRunReport`/`handleRunRFC` returning 403) was unchanged by this fix and already
+  had its own unit tests from 2ah.
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
@@ -1415,6 +1618,35 @@ the code permanently — it is the fix, not a placeholder.
   no `SUBMIT`, verified working).
 - Status: under investigation, not started on a fix — needs a rewrite matching the synchronous ABAP
   reality (job-polling model has no server-side counterpart), plus the `MISSING_PARAM` root cause.
+
+### `SET_BREAKPOINT` refuses every function-module include, not just standard/kernel-called ones (2026-09-14)
+- **Revises an earlier, narrower theory**: 2ah's investigation (and the Run RFC live-verification gap it
+  left open) found `SET_BREAKPOINT` on `RFC_SYSTEM_INFO` failing with `SET_BREAKPOINT_FAILED: Sólo posible
+  fijar breakpoints en códigos fuente activos y sin modificar`, and concluded it was "likely a SAP-side
+  restriction on debugging standard/kernel-called function modules" (`RFC_SYSTEM_INFO` internally does a
+  `CALL 'RFCSystemInfo' ID ...`). That theory is now falsified: a **brand-new custom Z function module**
+  (`ZVSP_TST_RFC_NOOP`, `$TMP`, group `ZVSP_TEST`, no kernel calls, freshly created and activated by
+  `WriteSource` with `activation.success:true`) hits the **exact same error** when a breakpoint is set on
+  its generated include (`LZVSP_TESTU01`, the correct target — confirmed via `SAP(action="search",
+  target="LZVSP_TEST*")`, since the FM name itself and the group's main program `SAPLZVSP_TEST` both give
+  different, clearly-wrong errors: `SET_BREAKPOINT_FAILED: A breakpoint cannot be set in this place`).
+  Re-activating via `ACTIVATE_MULTI` (`FUGR ZVSP_TEST` + `INCL LZVSP_TESTU01`) made no difference.
+- **What still works**: the FM itself is genuinely fine — `RFC_SEARCH` finds it, `RFC_METADATA` reports its
+  (empty) signature correctly, and `CALL_RFC` executes it with `subrc: 0`. Only the breakpoint step fails.
+  2ah's own live verification *did* successfully set and catch a breakpoint on a `PROG`-type `$TMP` object
+  this same session cycle — so the defect looks scoped to **function-group includes specifically**, not to
+  breakpoints in general.
+- **Root cause: not found.** Plausible candidates not yet investigated: `ZCL_VSP_DEBUG_SERVICE`'s breakpoint
+  handler may resolve `program`+`line` to a source/version check that doesn't understand a `FUGR/FF`
+  include's containing-group relationship the way it does a plain `PROG`; or the include's "active" flag
+  genuinely lags its own function group's in a way `ACTIVATE_MULTI` doesn't close (worth checking via a
+  direct `RS_INACTIVE_OBJECTS`-style query, not yet done).
+- **Practical implication**: the "Run RFC" live-verification checklist item (breakpoint → Listen → trigger →
+  catch, on an RFC target) **cannot be completed with any function module on this system** until this is
+  fixed — not a vsp CLI/config bug, a `ZADT_VSP` (or its Go client wrapper's) limitation. Use a `PROG`/report
+  target instead when a breakpoint-based debug-ui/REPL demo is needed.
+- Not fixed this session — `ZVSP_TST_RFC_NOOP`/`ZVSP_TEST` were left in `$TMP` as a ready-made repro for a
+  future investigation rather than deleted immediately.
 
 ### 3. Nuevos tipos DDIC — IMPLEMENTADOS & VERIFICADOS (2026-06-04)
 

@@ -35,6 +35,13 @@ type SystemConfig struct {
 	// Optional safety settings per system
 	ReadOnly        bool     `json:"read_only,omitempty"`
 	AllowedPackages []string `json:"allowed_packages,omitempty"`
+
+	// Optional transport safety settings per system
+	EnableTransports        bool     `json:"enable_transports,omitempty"`
+	TransportReadOnly       bool     `json:"transport_read_only,omitempty"`
+	AllowedTransports       []string `json:"allowed_transports,omitempty"`
+	AllowTransportableEdits bool     `json:"allow_transportable_edits,omitempty"`
+	BlockFreeSQL            bool     `json:"block_free_sql,omitempty"`
 }
 
 // SystemsConfig is the root configuration containing all systems.

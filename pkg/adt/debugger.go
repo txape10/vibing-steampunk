@@ -602,10 +602,16 @@ func (c *Client) DebuggerListen(ctx context.Context, opts *ListenOptions) (*List
 	listenCtx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
 
+	// Stateful: a caught debuggee is only useful if the following DebuggerAttach
+	// lands on the same ADT session this Listen pinned — without it SAP has no
+	// record of this listener when Attach arrives (issue #91 family). The
+	// tradeoff: a long Listen call now holds a dedicated session for up to
+	// TimeoutSeconds+30s instead of sharing the pool.
 	resp, err := c.transport.Request(listenCtx, "/sap/bc/adt/debugger/listeners", &RequestOptions{
-		Method: http.MethodPost,
-		Accept: "application/vnd.sap.as+xml",
-		Query:  query,
+		Method:   http.MethodPost,
+		Accept:   "application/vnd.sap.as+xml",
+		Query:    query,
+		Stateful: true,
 	})
 	if err != nil {
 		// Check for conflict error
@@ -660,9 +666,10 @@ func (c *Client) DebuggerCheckListener(ctx context.Context, opts *ListenOptions)
 	}
 
 	_, err := c.transport.Request(ctx, "/sap/bc/adt/debugger/listeners", &RequestOptions{
-		Method: http.MethodGet,
-		Accept: "application/xml",
-		Query:  query,
+		Method:   http.MethodGet,
+		Accept:   "application/xml",
+		Query:    query,
+		Stateful: true,
 	})
 	if err != nil {
 		// 404 = no listeners active
@@ -704,8 +711,9 @@ func (c *Client) DebuggerStopListener(ctx context.Context, opts *ListenOptions) 
 	}
 
 	_, err := c.transport.Request(ctx, "/sap/bc/adt/debugger/listeners", &RequestOptions{
-		Method: http.MethodDelete,
-		Query:  query,
+		Method:   http.MethodDelete,
+		Query:    query,
+		Stateful: true,
 	})
 	if err != nil {
 		return fmt.Errorf("stop listener failed: %w", err)
@@ -988,9 +996,10 @@ func (c *Client) DebuggerAttach(ctx context.Context, debuggeeID string, user str
 	}
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/debugger", &RequestOptions{
-		Method: http.MethodPost,
-		Accept: "application/xml",
-		Query:  query,
+		Method:   http.MethodPost,
+		Accept:   "application/xml",
+		Query:    query,
+		Stateful: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("debugger attach failed: %w", err)
@@ -1017,9 +1026,10 @@ func (c *Client) DebuggerStep(ctx context.Context, stepType DebugStepType, uri s
 	}
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/debugger", &RequestOptions{
-		Method: http.MethodPost,
-		Accept: "application/xml",
-		Query:  query,
+		Method:   http.MethodPost,
+		Accept:   "application/xml",
+		Query:    query,
+		Stateful: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("debugger step failed: %w", err)
@@ -1039,9 +1049,10 @@ func (c *Client) DebuggerGetStack(ctx context.Context, semanticURIs bool) (*Debu
 	}
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/debugger/stack", &RequestOptions{
-		Method: http.MethodGet,
-		Accept: "application/xml",
-		Query:  query,
+		Method:   http.MethodGet,
+		Accept:   "application/xml",
+		Query:    query,
+		Stateful: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("debugger get stack failed: %w", err)
@@ -1072,6 +1083,7 @@ func (c *Client) DebuggerGetVariables(ctx context.Context, variableIDs []string)
 		Accept:      "application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.debugger.Variables",
 		Query:       url.Values{"method": []string{"getVariables"}},
 		Body:        []byte(body),
+		Stateful:    true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("debugger get variables failed: %w", err)
@@ -1102,6 +1114,7 @@ func (c *Client) DebuggerGetChildVariables(ctx context.Context, parentIDs []stri
 		Accept:      "application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.debugger.ChildVariables",
 		Query:       url.Values{"method": []string{"getChildVariables"}},
 		Body:        []byte(body),
+		Stateful:    true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("debugger get child variables failed: %w", err)
@@ -1119,9 +1132,10 @@ func (c *Client) DebuggerSetVariableValue(ctx context.Context, variableName, val
 	query.Set("variableName", variableName)
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/debugger", &RequestOptions{
-		Method: http.MethodPost,
-		Query:  query,
-		Body:   []byte(value),
+		Method:   http.MethodPost,
+		Query:    query,
+		Body:     []byte(value),
+		Stateful: true,
 	})
 	if err != nil {
 		return "", fmt.Errorf("debugger set variable value failed: %w", err)
@@ -1134,7 +1148,8 @@ func (c *Client) DebuggerSetVariableValue(ctx context.Context, variableName, val
 // stackURI: The stack URI (e.g., "/sap/bc/adt/debugger/stack/type/ABAP/position/3")
 func (c *Client) DebuggerGoToStack(ctx context.Context, stackURI string) error {
 	_, err := c.transport.Request(ctx, stackURI, &RequestOptions{
-		Method: http.MethodPut,
+		Method:   http.MethodPut,
+		Stateful: true,
 	})
 	if err != nil {
 		return fmt.Errorf("debugger go to stack failed: %w", err)
@@ -1693,6 +1708,7 @@ func (c *Client) DebuggerBatchRequest(ctx context.Context, operations []DebugBat
 			"User-Agent":          "vsp/1.0 (compatible; Eclipse ADT)",
 			"X-sap-adt-profiling": "server-time",
 		},
+		Stateful: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("batch request failed: %w", err)
