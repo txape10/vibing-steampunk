@@ -1543,6 +1543,60 @@ the code permanently — it is the fix, not a placeholder.
   (`handleBreakpoint`/`handleRunReport`/`handleRunRFC` returning 403) was unchanged by this fix and already
   had its own unit tests from 2ah.
 
+### 2aj. Upstream contribution — closed the last 3 open compensating-unlock sites for issue #166 (2026-09-14)
+- **Not a fix in this fork's own codebase** — this section documents an upstream contribution (a PR sent
+  to `oisee/vibing-steampunk`), not a change to any file under `pkg/`/`cmd/`/`internal/` in this repo. No
+  file in this project's tracked tree changed as a result; recorded here only because the project
+  convention is to log every upstream interaction, per `docs/upstream-review-2026-09-priority-list.md`
+  (gitignored) and prior sections like `2e`.
+- **GitHub monitoring**: a full sweep of recent upstream activity found oisee had mentioned/thanked
+  txape10 in 4 places from a 2026-09-11 triage run (PR #214 landing PR #150, issues #91/#118/#166), and
+  that `mahlzeit1948` confirmed issue #116 fixed on `main` (2026-09-13) — no action needed there. Before
+  drafting anything for issue #166, checked thoroughly whether a solution had already been proposed: found
+  that upstream contributor `KylinYZ` had opened **PR #227** the same day (2026-09-14), covering the
+  `ExecuteABAP` slice of #166 with a notably careful design (the whole cleanup defer runs on a detached
+  `context.WithoutCancel`, not just the sub-branches) — deliberately **not** duplicated or competed with.
+  The other 3 sites named in oisee's own 2026-09-11 triage report (`workflows_edit.go:404`,
+  `workflows_deploy.go:142/354`, `workflows_source.go:670`) had no open PR against them.
+- **Comment posted** on
+  [issue #166](https://github.com/oisee/vibing-steampunk/issues/166#issuecomment-5663127053): credited
+  PR #227, explained why the txape10 fork's own 3 remaining sites don't share `ExecuteABAP`'s
+  extra-lock-inside-cleanup wrinkle (so `releaseLockAfterFailure`'s existing `context.WithoutCancel`+
+  timeout was already sufficient), and announced a PR covering just those 3.
+- **PR sent**: [oisee/vibing-steampunk#231](https://github.com/oisee/vibing-steampunk/pull/231), built in
+  an isolated `git worktree` checked out on `upstream/main` (never touched this project's own working
+  directory or the `fix/lock-nomodification-with-transport` branch). Converts the same
+  `_ = c.UnlockObject(ctx, ...)` → `releaseLockAfterFailure` + `strandedLockAdvice` pattern this fork
+  already uses (`2t`/`2u`) at the 3 named upstream sites: `EditSourceWithOptions`'s primary defer
+  (`workflows_edit.go`), `CreateFromFile`/`UpdateFromFileWithOptions` (`workflows_deploy.go` — both needed
+  converting to named returns `(result *DeployResult, err error)` first, since neither had a shared
+  `result` variable for the defer to report through; one `result := &DeployResult{...}` had to become
+  `result =` to avoid colliding with the new named return, caught by the `planner` agent before any code
+  was written), and the BDEF creation path's source-write failure branch (`workflows_source.go`).
+- **Code-reviewed** (against upstream's own code, not this fork's): 1 HIGH finding, fixed same session —
+  4 of the 5 new tests passed identically against the pre-fix code (verified empirically by the reviewer
+  stashing just the production files), because they never cancelled the caller's `ctx`, so they couldn't
+  distinguish the old discarded-error unlock from the fix (both send an identical request on a live
+  context). Fixed by adopting PR #227's own technique: cancel `ctx` at the exact moment the failing source
+  PUT reaches the stub server, so the compensating unlock has to escape an already-cancelled context —
+  re-verified directly that all 5 tests now fail against the pre-fix code and pass against the fix. 1 LOW
+  noted, not changed (the `result != nil` guard in the two `workflows_deploy.go` defers protects a path
+  proven unreachable today, same class of "near-unreachable gap" already documented elsewhere in this
+  project's own history).
+- `go build ./...`, `go vet ./...` clean on upstream's `main` + this diff; full `pkg/adt` suite green aside
+  from the two pre-existing Windows `sso_test.go` failures already independently noted in upstream PRs
+  #221 and #227 (unrelated file-mode assumptions, not introduced here).
+- **Scope note**: a `DDLS`/`SRVD` case in `workflows_source.go` with the identical discarded-error pattern,
+  one switch-case below the BDEF branch this PR fixes, was found and deliberately left untouched — outside
+  the 4-site list oisee's own triage named. Flagged in the PR description for a possible future slice.
+- **Merge attempted and correctly refused**: after the user said "cuando termine el CI, mergea si todo
+  está en verde," CI passed and `gh pr merge 231 --repo oisee/vibing-steampunk` was attempted — GitHub
+  rejected it (`txape10 does not have the correct permissions to execute MergePullRequest`), as expected
+  for a contributor with no write access to someone else's repo. The user corrected this sharply — even
+  attempting the call was the wrong instinct, not just its (harmless) failure — see the new feedback memory
+  this session added. PR #231 sits green, waiting on oisee's own review; no further action from this side
+  until she responds.
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
