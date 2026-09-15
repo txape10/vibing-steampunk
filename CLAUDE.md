@@ -1804,6 +1804,23 @@ Sequence: unify existing dep logic → SQL/ADT adapters → impact/path queries.
 Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_ADT_RES_APP`. Design: [001](reports/2026-04-05-001-gui-debugger-design.md)
 
 ### 6. Open Issues
+- **Future improvement, not started** — migrate `SET_BREAKPOINT`'s line-breakpoint call (only that call, not
+  the whole debug domain) from `ZCL_VSP_DEBUG_SERVICE`'s WebSocket/TPDAPI bridge (fixed in 2ak) to this
+  fork's own `pkg/adt/debugger.go`'s `SetExternalBreakpoint` (REST `/sap/bc/adt/debugger/breakpoints`,
+  currently unused/marked deprecated). Live-verified this session (2026-09-15, against `RFC_SYSTEM_INFO`):
+  the REST POST works with no 403 on this system today (the "DEPRECATED... 403" comment on that function is
+  stale) and SAP resolves `main_program`/`include` itself — no `D010INC` lookup needed. Matches the
+  direction upstream took in PRs #187/#188, though via a new dependency (`pkg/saprfc`) this fork deliberately
+  didn't adopt (see 2ah) — this would reuse code already in this fork instead. The blocker: the REST GET
+  (`GetExternalBreakpoints`) still returns empty on this system even when a breakpoint demonstrably exists
+  (confirmed live via a direct `ABDBG_EXTDBPS` query) — upstream doesn't fix this either, they track
+  breakpoints client-side in memory (`Debugger.bpSet` in `pkg/saprfc`) instead of trusting the server GET;
+  `ZCL_VSP_DEBUG_SERVICE` already does the same trick (`mt_breakpoints`). A future attempt at this migration
+  would need the same client-side tracking in Go, or a real fix for the GET endpoint itself — no upstream
+  issue/PR addresses the GET bug as a bug to fix, only as a known limitation designed around; checked
+  thoroughly (issue #184, PRs #184/#186-189 bodies and all comments) before writing this down, nothing to
+  port from there. Deliberately not started — the current WS-based fix (2ak) already works and is verified;
+  this is a "nicer, smaller mechanism" idea for whenever there's time, not a bug needing a fix.
 - **#88** Lock handle bug (EditSource/WriteSource) — same root cause as #132 (session affinity). **Resolved**
   by the #91 port (see 2t/2u above) — the marker migration and enqueue-leak fixes close this on this fork.
   Upstream's own PR #167 lists #88 among the issues it closes.
