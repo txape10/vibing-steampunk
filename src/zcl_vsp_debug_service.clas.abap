@@ -744,6 +744,8 @@ CLASS zcl_vsp_debug_service IMPLEMENTATION.
     DATA lv_statement TYPE string.
     DATA lv_condition TYPE string.
     DATA lv_program TYPE string.
+    DATA lv_master TYPE d010inc-master.
+    DATA lv_include TYPE d010inc-include.
     DATA lo_bp TYPE REF TO if_tpdapi_bp.
 
     lv_kind = extract_param( iv_params = is_message-params iv_name = 'kind' ).
@@ -824,10 +826,25 @@ CLASS zcl_vsp_debug_service IMPLEMENTATION.
 
         CASE lv_kind.
           WHEN 'line'.
-            lo_bp ?= lo_bp_services->create_line_breakpoint(
-              i_main_program = lv_program
-              i_line_nr      = lv_line
-            ).
+            SELECT SINGLE master FROM d010inc
+              INTO lv_master
+              WHERE include = lv_program.
+            IF sy-subrc = 0 AND lv_master <> lv_program.
+              " lv_program is really an include (e.g. of a function group) —
+              " TPDAPI needs the real main program and the include separately.
+              lv_include = lv_program.
+              CONDENSE: lv_master, lv_include.
+              lo_bp ?= lo_bp_services->create_line_breakpoint(
+                i_main_program = lv_master
+                i_include      = lv_include
+                i_line_nr      = lv_line
+              ).
+            ELSE.
+              lo_bp ?= lo_bp_services->create_line_breakpoint(
+                i_main_program = lv_program
+                i_line_nr      = lv_line
+              ).
+            ENDIF.
 
           WHEN 'exception'.
             lo_bp ?= lo_bp_services->create_exception_breakpoint(
@@ -862,6 +879,7 @@ CLASS zcl_vsp_debug_service IMPLEMENTATION.
           success = abap_true
           data    = |{ lv_brace_open }"breakpointId":"{ lv_bp_id }","kind":"{ lv_kind }","registered":true| &&
                     COND #( WHEN lv_program IS NOT INITIAL THEN |,"program":"{ escape_json( lv_program ) }"| ELSE '' ) &&
+                    COND #( WHEN lv_include IS NOT INITIAL THEN |,"include":"{ escape_json( CONV string( lv_include ) ) }","resolvedMainProgram":"{ escape_json( CONV string( lv_master ) ) }"| ELSE '' ) &&
                     COND #( WHEN lv_uri IS NOT INITIAL THEN |,"uri":"{ escape_json( lv_uri ) }","line":{ lv_line }| ELSE '' ) &&
                     COND #( WHEN lv_exception IS NOT INITIAL THEN |,"exception":"{ escape_json( lv_exception ) }"| ELSE '' ) &&
                     COND #( WHEN lv_statement IS NOT INITIAL THEN |,"statement":"{ escape_json( lv_statement ) }"| ELSE '' ) &&

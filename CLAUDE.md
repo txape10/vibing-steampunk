@@ -1597,6 +1597,61 @@ the code permanently — it is the fix, not a placeholder.
   this session added. PR #231 sits green, waiting on oisee's own review; no further action from this side
   until she responds.
 
+### 2ak. `ZCL_VSP_DEBUG_SERVICE=>HANDLE_SET_BREAKPOINT` — line breakpoints on function-group includes — FIXED (2026-09-15)
+- **Root cause, confirmed live** by reading the real SAP standard interface `IF_TPDAPI_BP_FACTORY` (via
+  `SAP(action="read", target="INTF IF_TPDAPI_BP_FACTORY")`): `CREATE_LINE_BREAKPOINT` takes `I_MAIN_PROGRAM`
+  (required) and `I_INCLUDE` (optional) as **separate** parameters. For a plain `PROG`/`CLAS` they coincide,
+  but for a line inside a function group's generated include, SAP needs the real main program
+  (`SAPL<group>`) and the include (`L<group>U<nn>`) passed separately. `handle_set_breakpoint` only ever
+  passed `i_main_program = lv_program`, never `i_include` — explaining every variant of the error seen
+  across sessions (bare FM name, group main program alone, include name alone — all as `i_main_program`
+  alone). This closes the "revises an earlier, narrower theory" entry directly below (kept for its own
+  investigation history, marked resolved).
+- **Fix**: before calling `create_line_breakpoint`, resolve `lv_program` against the standard DDIC table
+  `D010INC` ("Tabla de utilización para Includes ABAP", read live: key fields `MASTER`/`INCLUDE`, both data
+  elements on domain `PROGNAME`, CHAR40 — verified via `SAP(action="read", target="DTEL MASTER")` /
+  `DTEL INCLUDE`, not assumed). `SELECT SINGLE master FROM d010inc WHERE include = lv_program` — if found
+  and `master <> lv_program`, `lv_program` is really an include: call with `i_main_program = <master>` +
+  `i_include = lv_program` (both `CONDENSE`d first — see the code-review finding below). Otherwise
+  (`PROG`/`CLAS`, no matching row), the original single-parameter call runs unchanged — zero risk of
+  regression on the case that already worked.
+- Also added, approved by the user during planning: an informational `"include"`/`"resolvedMainProgram"`
+  pair in the success JSON response when the include path was taken, so a caller can see what was resolved.
+- **Code-reviewed** (0 CRITICAL/HIGH): 1 MEDIUM caught and fixed — `D010INC-MASTER`/`-INCLUDE` are CHAR40,
+  so without `CONDENSE` the new JSON fields would carry ~27 trailing spaces before the closing quote (no
+  consumer reads them today, but it's a real, reproducible bug in the new code). 1 LOW noted, not fixed
+  (pre-existing, unrelated): `cmd/vsp/debug.go`'s `-p`/`--program` CLI flag doesn't uppercase before use,
+  unlike every other caller of `SetLineBreakpoint` — a lowercase include name there would silently miss the
+  `D010INC` lookup (case-sensitive) and fall through to the old, broken behavior for that one entry point.
+- **A second, unrelated syntax error found and fixed during deployment** (not caught by review, since the
+  reviewer doesn't have live SAP access): `escape_json`'s `iv_string` parameter is `IMPORTING ... TYPE
+  string` **without `VALUE()`** — imported by reference, which in classic ABAP requires the actual argument
+  to be exactly `TYPE string`. Passing the new CHAR40 `lv_include`/`lv_master` directly failed the syntax
+  check (`"LV_INCLUDE" is not type-compatible with formal parameter "IV_STRING"`) on the first deploy
+  attempt (rejected before saving — no broken version was ever activated). Fixed with explicit
+  `CONV string( ... )`, matching the pattern already used elsewhere in the same file
+  (`CONV string( ls_debuggee-host )`).
+- Deployed via 3 surgical `EDITSOURCE` calls (declarations, the `WHEN 'line'.` block, the JSON response
+  line) against transport `S4DK928661` (confirmed still open/modifiable, owned by `ZRCHAPADO`, description
+  `ZADT_VSP` — the designated transport for `ZCL_VSP_*` classes), each syntax-checked and activated clean.
+- **Verified live**: `SET_BREAKPOINT` on `LZVSP_TESTU01:6` (the exact repro from the earlier investigation)
+  now succeeds — no more `SET_BREAKPOINT_FAILED`. Regression check: `SET_BREAKPOINT` on `ZTESTRCG1:15` (a
+  plain `PROG`, the unchanged `ELSE` path) still succeeds identically to before. Both test breakpoints
+  deleted after verification.
+- **Not verified live — the "Listen → trigger → catch" round trip**: `LISTEN` timed out both times it was
+  tried against the `LZVSP_TESTU01:6` breakpoint, once triggering via `execute_abap` (`CALL FUNCTION
+  'ZVSP_TST_RFC_NOOP'.` — completed in 0.110s, confirmed executed) and once via `CALL_RFC`. Neither is
+  proof the breakpoint itself is broken — the fix demonstrably changed `SET_BREAKPOINT`'s own result, and
+  the catch mechanism is a separate, pre-existing question: both `LISTEN` and `CALL_RFC` ride the same
+  single ZADT_VSP WebSocket connection (one persistent APC session), and ABAP Unit test execution is
+  documented SAP behavior to ignore session breakpoints by design (so a debugger stop mid-`execute_abap`
+  would never happen regardless of this fix). Genuinely triggering from a **different** SAP session (SAP
+  GUI, or the decoupled REST-based debugger session `cmd/vsp/debug_ui.go` uses per 2ah) was not attempted
+  this session. `ZVSP_TST_RFC_NOOP`/`ZVSP_TEST` are left in `$TMP` for that follow-up.
+- Files: `src/zcl_vsp_debug_service.clas.abap`, `abap/src/zadt_vsp/zcl_vsp_debug_service.clas.abap`,
+  `embedded/abap/zcl_vsp_debug_service.clas.abap` (all three confirmed identical in this method both before
+  and after the change).
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
@@ -1673,7 +1728,7 @@ the code permanently — it is the fix, not a placeholder.
 - Status: under investigation, not started on a fix — needs a rewrite matching the synchronous ABAP
   reality (job-polling model has no server-side counterpart), plus the `MISSING_PARAM` root cause.
 
-### `SET_BREAKPOINT` refuses every function-module include, not just standard/kernel-called ones (2026-09-14)
+### `SET_BREAKPOINT` refuses every function-module include, not just standard/kernel-called ones — FIXED, see 2ak above (2026-09-14, root-caused and fixed 2026-09-15)
 - **Revises an earlier, narrower theory**: 2ah's investigation (and the Run RFC live-verification gap it
   left open) found `SET_BREAKPOINT` on `RFC_SYSTEM_INFO` failing with `SET_BREAKPOINT_FAILED: Sólo posible
   fijar breakpoints en códigos fuente activos y sin modificar`, and concluded it was "likely a SAP-side
