@@ -1638,16 +1638,26 @@ the code permanently — it is the fix, not a placeholder.
   now succeeds — no more `SET_BREAKPOINT_FAILED`. Regression check: `SET_BREAKPOINT` on `ZTESTRCG1:15` (a
   plain `PROG`, the unchanged `ELSE` path) still succeeds identically to before. Both test breakpoints
   deleted after verification.
-- **Not verified live — the "Listen → trigger → catch" round trip**: `LISTEN` timed out both times it was
-  tried against the `LZVSP_TESTU01:6` breakpoint, once triggering via `execute_abap` (`CALL FUNCTION
-  'ZVSP_TST_RFC_NOOP'.` — completed in 0.110s, confirmed executed) and once via `CALL_RFC`. Neither is
-  proof the breakpoint itself is broken — the fix demonstrably changed `SET_BREAKPOINT`'s own result, and
-  the catch mechanism is a separate, pre-existing question: both `LISTEN` and `CALL_RFC` ride the same
-  single ZADT_VSP WebSocket connection (one persistent APC session), and ABAP Unit test execution is
-  documented SAP behavior to ignore session breakpoints by design (so a debugger stop mid-`execute_abap`
-  would never happen regardless of this fix). Genuinely triggering from a **different** SAP session (SAP
-  GUI, or the decoupled REST-based debugger session `cmd/vsp/debug_ui.go` uses per 2ah) was not attempted
-  this session. `ZVSP_TST_RFC_NOOP`/`ZVSP_TEST` are left in `$TMP` for that follow-up.
+- **The full "Listen → trigger → catch" round trip — now verified live too**, in a follow-up same-day
+  session, via `vsp debug ui`. The first attempt (via the plain `SAP(action="debug", ...)` hyperfocused
+  tool) had `LISTEN` time out twice — once triggering via `execute_abap`, once via `CALL_RFC` — and was
+  theorized at the time to be either a single-shared-WebSocket serialization problem (`LISTEN`/`CALL_RFC`
+  both ride the one persistent ZADT_VSP APC session) or ABAP Unit deliberately ignoring breakpoints. A
+  throwaway `vsp debug ui` instance (built fresh, pointed at the real system via the same env the deployed
+  MCP server uses, killed and deleted after) settled it: `debug ui`'s `Listen` runs over a **decoupled REST
+  TPDAPI session** (`pkg/adt/debugger.go`'s `DebuggerListen`), not the WS connection breakpoints/RFC use —
+  set a breakpoint on `LZVSP_TESTU01:6` via `/api/bp`, started `/api/listen?seconds=30` in the background,
+  then triggered with the exact same `execute_abap` call as before while it was actively listening. **Caught
+  it**: `{"attached":true,...,"note":"stopped at SAPLZVSP_TEST:6"}`, full 17-frame stack showing
+  `programName:"SAPLZVSP_TEST"`, `includeName:"LZVSP_TESTU01"`, `line:6`, `eventName:"ZVSP_TST_RFC_NOOP"` —
+  this fix's own resolved main-program/include pair, confirmed live end to end. This **falsifies** the
+  "ABAP Unit ignores breakpoints" theory too — it does not; the earlier failures were purely the
+  single-WebSocket-connection serialization between `LISTEN` and the trigger in the hyperfocused-tool path
+  (a `debug_ui`-specific workaround, not something the hyperfocused `SAP()` tool itself can route around
+  today). The `execute_abap` trigger call itself hung to client-side timeout — consistent with its ABAP
+  session genuinely parking at the breakpoint; `step continue` then ended the debuggee cleanly
+  (`debuggeeEnded`), `detach` confirmed a clean state, and the breakpoint was gone afterward
+  (`GET_BREAKPOINTS` → none). `ZVSP_TST_RFC_NOOP`/`ZVSP_TEST` are still left in `$TMP` as a reusable repro.
 - Files: `src/zcl_vsp_debug_service.clas.abap`, `abap/src/zadt_vsp/zcl_vsp_debug_service.clas.abap`,
   `embedded/abap/zcl_vsp_debug_service.clas.abap` (all three confirmed identical in this method both before
   and after the change).
