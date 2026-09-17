@@ -3,6 +3,8 @@
 package mcp
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
+	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
 
 // routeGitAction routes "system" with git-related types.
@@ -32,6 +35,27 @@ func (s *Server) routeGitAction(ctx context.Context, action, objectType, objectN
 }
 
 // --- Git/abapGit Handlers ---
+
+// sanitizePackageForFilename turns an SAP package name into a safe filename
+// component: only letters, digits, underscore and hyphen survive (a leading
+// "$" from a local package is dropped, same as before), everything else —
+// including "/" or "..", which would otherwise let a caller-supplied package
+// name write the export ZIP outside outputDir — is dropped rather than
+// interpolated into the path.
+func sanitizePackageForFilename(pkg string) string {
+	pkg = strings.TrimPrefix(pkg, "$")
+	var b strings.Builder
+	for _, r := range pkg {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "package"
+	}
+	return b.String()
+}
 
 func (s *Server) handleGitTypes(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if errResult := s.ensureWSConnected(ctx, "GitTypes"); errResult != nil {
@@ -60,10 +84,6 @@ func (s *Server) handleGitTypes(ctx context.Context, request mcp.CallToolRequest
 }
 
 func (s *Server) handleGitExport(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if errResult := s.ensureWSConnected(ctx, "GitExport"); errResult != nil {
-		return errResult, nil
-	}
-
 	params := adt.GitExportParams{}
 
 	// Parse packages
@@ -94,22 +114,36 @@ func (s *Server) handleGitExport(ctx context.Context, request mcp.CallToolReques
 		return newToolResultError("Either packages or objects parameter is required"), nil
 	}
 
-	result, err := s.amdpWSClient.GitExport(ctx, params)
-	if err != nil {
-		return newToolResultError(fmt.Sprintf("GitExport failed: %v", err)), nil
-	}
-
 	// Determine output directory (default: current directory)
 	outputDir := "."
 	if dir, ok := request.GetArguments()["output_dir"].(string); ok && dir != "" {
 		outputDir = dir
 	}
 
+	// A single whole package with no loose objects and the default
+	// subpackage behavior exports over classic RFC (Z_ABAPGIT_SERIALIZE_PACKAGE,
+	// pkg/saprfc) — no ZADT_VSP deployment needed. Anything else (several
+	// packages, individual objects, or an explicit include_subpackages=false
+	// this fork hasn't confirmed the RFC serializer honors) keeps the
+	// WebSocket path unchanged.
+	if len(params.Objects) == 0 && len(params.Packages) == 1 && params.IncludeSubpackages {
+		return s.handleGitExportRFC(ctx, params.Packages[0], outputDir)
+	}
+
+	if errResult := s.ensureWSConnected(ctx, "GitExport"); errResult != nil {
+		return errResult, nil
+	}
+
+	result, err := s.amdpWSClient.GitExport(ctx, params)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("GitExport failed: %v", err)), nil
+	}
+
 	// Generate filename with timestamp
 	var zipName string
 	if len(params.Packages) > 0 {
 		// Use first package name (sanitize $ for filename)
-		pkgName := strings.ReplaceAll(params.Packages[0], "$", "")
+		pkgName := sanitizePackageForFilename(params.Packages[0])
 		zipName = fmt.Sprintf("%s_%s.zip", pkgName, time.Now().Format("20060102_150405"))
 	} else {
 		zipName = fmt.Sprintf("abapgit_export_%s.zip", time.Now().Format("20060102_150405"))
@@ -135,6 +169,49 @@ func (s *Server) handleGitExport(ctx context.Context, request mcp.CallToolReques
 	sb.WriteString("Files in archive:\n")
 	for _, f := range result.Files {
 		fmt.Fprintf(&sb, "  %s (%d bytes)\n", f.Path, f.Size)
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+// handleGitExportRFC serializes one whole ABAP package to an abapGit ZIP over
+// classic RFC (Z_ABAPGIT_SERIALIZE_PACKAGE, pkg/saprfc.ExportPackage) — no
+// ZADT_VSP WebSocket bridge, no vsp helper deployed on the system at all.
+// Unlike GitExportResult from the WebSocket path, the serializer itself
+// reports no object/file count, so this lists the ZIP's own directory
+// instead of trusting a count from the far side.
+func (s *Server) handleGitExportRFC(ctx context.Context, pkg, outputDir string) (*mcp.CallToolResult, error) {
+	c, err := s.ensureRFCClient(ctx)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to connect via RFC: %v", err)), nil
+	}
+
+	zipData, err := saprfc.ExportPackage(ctx, c, pkg, saprfc.ExportOptions{})
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("GitExport (RFC) failed: %v", err)), nil
+	}
+
+	pkgName := sanitizePackageForFilename(pkg)
+	zipName := fmt.Sprintf("%s_%s.zip", pkgName, time.Now().Format("20060102_150405"))
+	zipPath := filepath.Join(outputDir, zipName)
+	if err := os.WriteFile(zipPath, zipData, 0644); err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to write ZIP file: %v", err)), nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Git Export Successful (classic RFC, Z_ABAPGIT_SERIALIZE_PACKAGE)\n\n")
+	fmt.Fprintf(&sb, "Package: %s\n", pkg)
+	fmt.Fprintf(&sb, "ZIP: %s (%d bytes)\n\n", zipPath, len(zipData))
+
+	zr, zerr := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	if zerr != nil {
+		sb.WriteString("(ZIP written, but its directory could not be listed)\n")
+		return mcp.NewToolResultText(sb.String()), nil
+	}
+	fmt.Fprintf(&sb, "Files: %d\n\n", len(zr.File))
+	sb.WriteString("Files in archive:\n")
+	for _, f := range zr.File {
+		fmt.Fprintf(&sb, "  %s (%d bytes)\n", f.Name, f.UncompressedSize64)
 	}
 
 	return mcp.NewToolResultText(sb.String()), nil

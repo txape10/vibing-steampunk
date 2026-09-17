@@ -381,6 +381,24 @@ func resolveConfig(cmd *cobra.Command) {
 		cfg.InsecureSkipVerify = viper.GetBool("INSECURE")
 	}
 
+	// Classic-RFC destination: SAP_RFC_* env (all optional; saprfc.Resolve derives
+	// what is left from BaseURL/Username/Password when these are empty)
+	if v := viper.GetString("RFC_HOST"); v != "" {
+		cfg.RFCHost = v
+	}
+	if v := viper.GetString("RFC_SYSNR"); v != "" {
+		cfg.RFCSysnr = v
+	}
+	if v := viper.GetInt("RFC_PORT"); v != 0 {
+		cfg.RFCPort = v
+	}
+	if v := viper.GetString("RFC_USER"); v != "" {
+		cfg.RFCUser = v
+	}
+	if v := viper.GetString("RFC_PASSWORD"); v != "" {
+		cfg.RFCPassword = v
+	}
+
 	// Mode: flag > SAP_MODE env > default (focused)
 	if !cmd.Flags().Changed("mode") {
 		if envMode := viper.GetString("MODE"); envMode != "" {

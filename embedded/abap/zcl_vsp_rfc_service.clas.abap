@@ -271,11 +271,21 @@ CLASS zcl_vsp_rfc_service IMPLEMENTATION.
       ENDIF.
     ENDLOOP.
 
-    " TABLES params: create internal tables
+    " TABLES params: create internal tables and deserialize the caller's JSON array
+    " content into them (mirrors the IMPORTING kind_table branch above -- without this,
+    " e.g. RFC_READ_TABLE's FIELDS/OPTIONS are silently ignored: the table is created
+    " empty and stays empty, no error, just ignored input).
     LOOP AT lt_tables INTO DATA(ls_tbl).
       CLEAR: ls_ptab, lo_data.
       lo_data = create_table_data( ls_tbl ).
       IF lo_data IS BOUND.
+        DATA(lv_tbl_json_arr) = extract_json_array( iv_params = is_message-params iv_name = CONV #( ls_tbl-parameter ) ).
+        IF lv_tbl_json_arr IS NOT INITIAL.
+          TRY.
+              /ui2/cl_json=>deserialize( EXPORTING json = lv_tbl_json_arr CHANGING data = lo_data->* ).
+            CATCH cx_root.
+          ENDTRY.
+        ENDIF.
         ls_ptab-name = ls_tbl-parameter.
         ls_ptab-kind = abap_func_tables.
         ls_ptab-value = lo_data.

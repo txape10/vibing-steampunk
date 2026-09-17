@@ -11,6 +11,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/oisee/open-rfc-go/rfc"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/cache"
 )
@@ -32,6 +33,7 @@ type Server struct {
 	adtClient      *adt.Client
 	amdpWSClient   *adt.AMDPWebSocketClient   // WebSocket-based AMDP client (ZADT_VSP)
 	debugWSClient  *adt.DebugWebSocketClient  // WebSocket-based debug client (ZADT_VSP)
+	rfcClient      *rfc.Client                // Classic-RFC client (open-rfc-go), no ZADT_VSP needed
 	config         *Config                    // Server configuration for session manager creation
 	featureProber  *adt.FeatureProber         // Feature detection system (safety network)
 	featureConfig  adt.FeatureConfig          // Feature configuration
@@ -51,6 +53,15 @@ type Config struct {
 	Client             string
 	Language           string
 	InsecureSkipVerify bool
+
+	// Classic-RFC destination (pkg/saprfc), independent of the ADT/HTTP settings
+	// above. Empty fields are derived: host from BaseURL's host, port from
+	// 3300+RFCSysnr, credentials from Username/Password. See saprfc.Resolve.
+	RFCHost     string
+	RFCSysnr    string
+	RFCPort     int
+	RFCUser     string
+	RFCPassword string
 
 	// Cookie authentication (alternative to basic auth)
 	Cookies map[string]string

@@ -1662,6 +1662,203 @@ the code permanently — it is the fix, not a placeholder.
   `embedded/abap/zcl_vsp_debug_service.clas.abap` (all three confirmed identical in this method both before
   and after the change).
 
+### 2al. `ZCL_VSP_RFC_SERVICE=>HANDLE_CALL` — `TABLES` parameters never received the caller's JSON content — FIXED (2026-09-17)
+- **Root cause, found while debugging an unrelated project**: the `TABLES` loop built the internal table via
+  `create_table_data` but never deserialized the caller's JSON array into it — unlike the sibling
+  `IMPORTING`/`kind_table` branch a few lines above, which already does `extract_json_array` +
+  `/ui2/cl_json=>deserialize`. Confirmed live: `SAP(action="debug", target="CALL_RFC", params={"function":
+  "RFC_READ_TABLE", "params": "{\"QUERY_TABLE\":\"T000\",\"FIELDS\":[{\"FIELDNAME\":\"MANDT\"}]}"})` returned
+  the full 17-column `FIELDS` metadata of `T000` instead of just `MANDT` — the `FIELDS` TABLES content never
+  reached the function call, so `RFC_READ_TABLE` (and any other FM with `TABLES` input, e.g. `OPTIONS` for a
+  WHERE clause) silently ignored whatever the caller passed there.
+- **Checked upstream first, thoroughly, before writing any code** (issues, PRs, comments, commit history on
+  both `src/` and `embedded/abap/` copies of this file): not reported, not fixed anywhere. The only related
+  issue, [#151](https://github.com/oisee/vibing-steampunk/issues/151) ("CallRFC fails with HTTP(400) for FMs
+  with non-elementary table parameters"), is a different bug — a table-of-tables `CREATE DATA` failure,
+  already independently fixed in this fork (2y) — and its only linked commit (`bc8baf1`) only touches that
+  same table-of-tables guard, nothing about content deserialization. Upstream's own `embedded/abap/` copy on
+  `main` has the identical bug and is, if anything, further behind than this fork's `src/` copy (no
+  `extract_json_array`/`/ui2/cl_json` usage at all, not even for `IMPORTING`-table-type params).
+- **Upstream has in fact moved away from this whole mechanism for reading table data**: a new package
+  `pkg/saprfc` (classic RFC via `github.com/oisee/open-rfc-go`, native Go, no ABAP bridge involved) now backs
+  `vsp rfc call/read-table/describe/search/...`, with its own `RFC_READ_TABLE` wrapper
+  (`pkg/saprfc/readtable.go`) that builds `FIELDS`/`OPTIONS` as native Go maps — this class of bug cannot
+  occur there. This fork deliberately chose, in 2ah, not to adopt `pkg/saprfc`/`open-rfc-go` as a new
+  dependency (to avoid a second parallel RFC/debugger implementation alongside the WebSocket bridge this
+  project already relies on throughout). A separate adoption plan for `pkg/saprfc` has been requested and is
+  being drafted (see the project's own planning docs once written) — deliberately deferred to a later
+  session, not blocking this narrow fix.
+- **Fix**: mirrors the existing `IMPORTING`/`kind_table` pattern exactly, applied only to the `TABLES` loop —
+  same helpers (`extract_json_array`, `/ui2/cl_json=>deserialize` in a `TRY/CATCH cx_root`), a distinct local
+  variable name (`lv_tbl_json_arr`, not `lv_json_arr`) since ABAP classic inline `DATA(...)` declarations
+  scope to the whole method, not the lexical block, and reusing the existing name would have been a
+  duplicate-declaration syntax error:
+  ```abap
+  LOOP AT lt_tables INTO DATA(ls_tbl).
+    CLEAR: ls_ptab, lo_data.
+    lo_data = create_table_data( ls_tbl ).
+    IF lo_data IS BOUND.
+      DATA(lv_tbl_json_arr) = extract_json_array( iv_params = is_message-params iv_name = CONV #( ls_tbl-parameter ) ).
+      IF lv_tbl_json_arr IS NOT INITIAL.
+        TRY.
+            /ui2/cl_json=>deserialize( EXPORTING json = lv_tbl_json_arr CHANGING data = lo_data->* ).
+          CATCH cx_root.
+        ENDTRY.
+      ENDIF.
+      ls_ptab-name = ls_tbl-parameter.
+      ls_ptab-kind = abap_func_tables.
+      ls_ptab-value = lo_data.
+      INSERT ls_ptab INTO TABLE lt_ptab.
+    ENDIF.
+  ENDLOOP.
+  ```
+- **Scope decision — only `embedded/abap/zcl_vsp_rfc_service.clas.abap` touched, matching what's live**: read
+  the live deployed source first (`SAP(action="read", target="CLAS ZCL_VSP_RFC_SERVICE", params={"method":
+  "HANDLE_CALL"}})`) and confirmed it matches `embedded/abap/`, not `src/`. `src/zcl_vsp_rfc_service.clas.abap`
+  has no `extract_json_array`/`/ui2/cl_json` usage at all — a much larger, pre-existing drift than the one
+  2y already documented for a sibling method — so patching it the same way would not compile. Left untouched
+  deliberately, per the code-reviewer's own MEDIUM finding (below) and this project's established precedent
+  (2y) of documenting cross-copy drift as separate follow-up work rather than folding a sync into an
+  unrelated bug fix. `abap/src/zadt_vsp/zcl_vsp_rfc_service.clas.abap` is an ancient 111-line doc sample
+  (only `search`/`ping`, no `call`/`HANDLE_CALL` at all) — out of scope, never deployed.
+- **Bug 2, found in the same investigation, deliberately deferred, not fixed here**: every RFC exception in
+  the same method is mapped to a single generic `INSERT VALUE #( name = 'OTHERS' value = 99 ) INTO TABLE
+  lt_etab.` before the dynamic `CALL FUNCTION`, so `subrc=99` is indistinguishable between "the function
+  raised a real declared exception" (e.g. `RFC_READ_TABLE`'s `TABLE_NOT_AVAILABLE`/`DATA_BUFFER_EXCEEDED`)
+  and "no data"/other soft conditions — the MCP caller has no way to tell them apart today. Not reported or
+  fixed upstream either (checked). Deferred rather than bundled into this fix because it's a materially
+  larger change: enumerating the function's real declared exceptions (likely via the existing
+  `get_func_interface`/`FUNCTION_IMPORT_INTERFACE` machinery already used for `RFC_METADATA`) and a JSON
+  response-schema change the Go/MCP side would need to know about — mixing it with this narrow, low-risk fix
+  would make both harder to review and verify independently.
+- Code-reviewed: 0 CRITICAL/HIGH. 1 MEDIUM (informational, matches the scope decision above almost exactly:
+  flagged that `src/zcl_vsp_rfc_service.clas.abap` did not receive the same fix and now diverges from
+  `embedded/abap/` at this exact method) — no fix applied, already the intended, documented scope.
+- Deployed via a single `EDITSOURCE` call against the live class, transport `S4DK928661`, syntax-checked and
+  activated clean (only 2 pre-existing, unrelated POSIX-regex-deprecation warnings in `EXTRACT_PARAM`/
+  `FIND_BALANCED_JSON`, not touched by this change).
+- **Verified live (2026-09-17)** — with an important nuance matching 2y's own prior finding: the first
+  verification attempt, through the already-running MCP server's `CALL_RFC` tool, still showed the pre-fix
+  symptom (all 17 `T000` columns) immediately after activation — the long-running `vsp.exe` process's
+  existing `ZADT_VSP` WebSocket session had the old class pool loaded in its ABAP roll area and doesn't
+  re-resolve it mid-session, exactly the same artifact 2y hit and documented. Rather than ask for a Claude
+  Desktop restart mid-session, verified instead with a throwaway Go program (`cmd/verifyrfctbl/`, deleted
+  after the run, not committed — same technique as 2w/2ac/2ag/2y) opening its own **fresh** WebSocket
+  connection directly against `pkg/adt.DebugWebSocketClient`: `RFC_READ_TABLE` with `FIELDS=[{"FIELDNAME":
+  "MANDT"}]` now returns `DATA` rows containing only the 3-character `MANDT` value and a `FIELDS` metadata
+  table with exactly one entry — confirmed fixed. Two regression checks in the same run: `RFC_SYSTEM_INFO`
+  (no `TABLES` params at all) unaffected; `RFC_READ_TABLE` with `FIELDS` omitted still returns all columns
+  unfiltered, exactly as before — the fix only adds behavior when a `TABLES` param's JSON is actually present,
+  no change to the no-filter case. **Practical implication**: this class of fix is only observable through
+  the deployed MCP server after a Claude Desktop restart (fresh `vsp.exe`, fresh WS session) — the live
+  system itself was correct immediately after activation, confirmed independent of any client-side session
+  staleness.
+
+### 2am. `pkg/saprfc` adoption, Fase 0 + Fase 1 — `CALL_RFC`/`RFC_SEARCH`/`RFC_METADATA`/abapGit package export migrated to classic RFC (2026-09-17)
+- **Decisión rectora (usuario)**: migrar a `pkg/saprfc` (cliente RFC clásico nativo en Go de upstream,
+  sobre `github.com/oisee/open-rfc-go`, contra el gateway SAP directamente) todo lo que se pueda, dejando
+  el puente WebSocket `ZADT_VSP` solo para lo que no tenga equivalente en RFC clásico. Documento de
+  decisión: `docs/pkg-saprfc-adoption-plan.md`. Planificado con el agente `planner` (Fase 0 + Fase 1),
+  ejecutado tras confirmación explícita del usuario en cada punto de parada.
+- **El documento de adopción estaba desactualizado el mismo día que se escribió**: al releer el código
+  real de upstream (`git fetch upstream`, `git show upstream/main:pkg/saprfc/*.go`) para esta sesión, el
+  paquete había crecido sustancialmente desde que el documento se redactó unas horas antes — API más
+  simple de lo asumido (`rfc.Client.Call` devuelve un `Result` con `.Get`/`.Table`/`.Has` y
+  `MarshalJSON` genérico; `rfc.Client.DescribeTool` genera un JSON Schema de tool MCP directamente,
+  mejor que el `RFC_METADATA` anterior; `rfc.ABAPException{Kind, Key, ...}` distingue de forma nativa
+  excepción declarada / dump / mensaje T100, cerrando gratis el "Bug 2, deferred" de 2al sobre
+  `subrc=99` genérico indistinguible). Config ya resuelta por upstream en `pkg/config.SystemConfig`:
+  campos `RFCHost/RFCSysnr/RFCPort/RFCUser/RFCPassword`, JSON `rfc_host`/`rfc_sysnr`/`rfc_port`/
+  `rfc_user`/`rfc_password`, fallback a `VSP_<SISTEMA>_RFC_PASSWORD` y `SAP_USER`/`SAP_PASSWORD` —
+  portados literalmente, no inventados, siguiendo la política anti-invención del proyecto.
+
+**Fase 0 (setup) — verificada en vivo**:
+- Dependencia `github.com/oisee/open-rfc-go@v0.0.0-20260820234724-6ef4d9eeb9cd` añadida. `go.mod` subido
+  de `go 1.25.0` a `go 1.26` (requerido por la dependencia; el toolchain local ya era `1.26.3`, sin
+  necesidad de instalar nada). Build limpio con `CGO_ENABLED=0` en Windows — el riesgo principal del plan
+  (que `open-rfc-go` arrastrara cgo, como ya le pasa a `pkg/cache` con SQLite) **no se materializó**.
+- Destino RFC real de este sistema obtenido del propio usuario (parámetros de conexión SAP GUI: servidor
+  de aplicación, número de instancia `00`, ID de sistema `S4D` — **no derivable automáticamente** del
+  `SAP_URL` configurado, que es un hostname de reverse-proxy HTTPS sin puerto explícito; `RFC_PING` y
+  `RFC_SYSTEM_INFO` verificados en vivo con un programa throwaway (`cmd/verifyrfc0/`, borrado tras el
+  uso), reutilizando las credenciales ADT existentes (`ZRCHAPADO`) como fallback, tal como diseña
+  `saprfc.Resolve`.
+- **Hallazgo, no bloqueante**: `saprfc.Resolve()` reduce el idioma a 1 carácter con `lang[:1]` sobre el
+  código ISO recibido — con `SAP_LANGUAGE=ES` da `"E"`, que es incorrecto (el código SAP real para
+  español es `"S"`, el mismo bug de conversión ISO→SAP que ya se corrigió en `ZCL_VSP_REPORT_SERVICE` en
+  2m). No afectó a la verificación porque ni `RFC_PING` ni `RFC_SYSTEM_INFO` dependen del idioma de
+  logon. No corregido en este puerto (es código de upstream, `pkg/saprfc/saprfc.go`, sin tocar) —
+  apuntado aquí para si se migra algo sensible al idioma en una fase futura.
+
+**Fase 1 (dominio RFC) — verificada en vivo salvo abapGit**:
+- Archivos nuevos portados de upstream verbatim: `pkg/saprfc/saprfc.go` (`Resolve`/`Open`/`Params`/
+  `Input`/`Secret`), `pkg/saprfc/readtable.go` (`ReadTable`, con el fallback `ET_DATA` para filas anchas
+  y el troceo de WHERE a 72 caracteres), `pkg/saprfc/readtable_test.go`, `pkg/saprfc/abapgit.go`
+  (`ExportPackage`).
+- **`CALL_RFC`** (`internal/mcp/handlers_debugger.go`, `handleCallRFC`): migrado de
+  `s.debugWSClient.CallRFC` a `s.ensureRFCClient(ctx)` (nuevo, `internal/mcp/rfc_client.go`) +
+  `rfc.Client.Call`. Verificado en vivo el caso exacto del bug 2al (`RFC_READ_TABLE` con `FIELDS` como
+  `TABLES`, filtrado a `MANDT`): `fields=1` — el cliente nativo resuelve `TABLES` correctamente sin
+  ningún parche ABAP. **Cambio de contrato observable, deliberado**: `Subrc` se hardcodea a `0` en el
+  camino de éxito (antes reflejaba, de forma poco fiable, un `OTHERS=99` genérico incluso en llamadas
+  "exitosas" con excepción ABAP silenciada); un fallo real ahora se propaga como `err` tipado
+  (`*rfc.ABAPException` cuando aplica) con `IsError: true` en el `CallToolResult` — una mejora de
+  contrato, no una regresión, confirmada por `code-reviewer`.
+- **`RFC_SEARCH`** (`handleRFCSearch`): migrado a `saprfc.ReadTable` sobre `TFDIR` con
+  `FMODE IN ('R', 'X')` (el filtro real que usa el propio `cmd/vsp/rfc.go` de upstream — `'X'` son los
+  módulos remote-enabled basXML-capable, `SADT_REST_RFC_ENDPOINT` entre ellos, que un filtro `'R'` solo
+  ocultaría). Verificado en vivo con `BAPI_USER*`: 10 resultados correctos.
+- **`RFC_METADATA`** (`handleRFCGetMetadata`): migrado a `rfc.Client.DescribeTool`, que expande
+  estructuras/tablas desde su layout DDIC real — firma más completa que el listado plano
+  `[kind] name: type` anterior. Verificado en vivo con `BAPI_USER_GET_DETAIL`: JSON Schema completo y
+  correcto con los 4 tipos de parámetro.
+- **Export abapGit** (`internal/mcp/handlers_git.go`): híbrido, decisión explícita del usuario tras
+  confirmar que `saprfc.ExportPackage` (`Z_ABAPGIT_SERIALIZE_PACKAGE`) solo exporta paquetes completos,
+  no objetos sueltos. Un paquete único, sin objetos sueltos, con `IncludeSubpackages` en su valor por
+  defecto `true` → nuevo `handleGitExportRFC` (RFC nativo, sin `ZADT_VSP`); cualquier otra combinación
+  (varios paquetes, objetos sueltos, o `include_subpackages=false` explícito, cuyo comportamiento en el
+  serializador RFC no está confirmado) → sigue en el camino WebSocket existente sin cambios.
+  `handleGitExportRFC` lista el contenido real del ZIP con `archive/zip` en vez de fiarse de un
+  `ObjectCount`/`FileCount` que el serializador RFC no proporciona.
+  - **No verificable en vivo en este sistema — no es una regresión**: `Z_ABAPGIT_SERIALIZE_PACKAGE` no
+    existe aquí (`RFC_SEARCH "*ABAPGIT*"` solo encuentra `ENQUEUE_EZABAPGIT`/`DEQUEUE_EZABAPGIT`, bloqueos,
+    no serialización). Causa confirmada con el usuario: este sistema tiene abapGit instalado como
+    **standalone** (`ZABAPGIT_STANDALONE`, `PROG/P`, paquete `ZABAP01` — confirmado vía
+    `SAP(action="search", target="ZABAPGIT*")`), un único report autocontenido sin grupo de funciones —
+    no instala `ZABAPGIT_PARALLEL` ni por tanto `Z_ABAPGIT_SERIALIZE_PACKAGE`. Ese módulo de función solo
+    existe con una instalación de abapGit gestionada como repositorio (clonando el propio repo de abapGit
+    en el sistema). **Decisión del usuario**: dejar el código híbrido tal cual — es correcto para
+    sistemas con esa instalación completa; en este sistema, simplemente nunca se toma la rama RFC y el
+    export sigue funcionando por WebSocket como antes.
+- **Revisión de seguridad — 1 CRITICAL encontrado y corregido en la primera pasada del `code-reviewer`**:
+  `handleRFCSearch` concatenaba el `pattern` del usuario sin escapar en la cláusula WHERE enviada a
+  `RFC_READ_TABLE` (`pkg/saprfc.ReadTable` no tiene bind parameters — el WHERE es un string literal
+  enviado tal cual por RFC) — inyección clásica de "RFC_READ_TABLE WHERE-clause injection". Fix: nueva
+  `funcnameLikePredicate(pattern) (string, error)` (`handlers_debugger.go`) con whitelist de caracteres
+  (A-Z, 0-9, `_`, `/`, `*`) siguiendo el mismo patrón que `as4userPredicate` (`pkg/adt/transport.go`,
+  cerrado en 2s por el mismo motivo) — cualquier carácter fuera de la whitelist rechaza la llamada en vez
+  de escaparlo. **1 MEDIUM también corregido**: `pkgName` en el nombre de fichero del ZIP de export no
+  saneaba `/`/`..` (path traversal) — nueva `sanitizePackageForFilename(pkg) string` (whitelist
+  `A-Za-z0-9_-`, fallback `"package"`), aplicada en **ambos** sitios que construyen `pkgName` (el camino
+  WebSocket preexistente, que tenía el mismo patrón sin tocar hasta ahora, y el nuevo camino RFC). Tests
+  de regresión: `internal/mcp/rfc_search_test.go` (`TestFuncnameLikePredicate_RejectsInjection`/
+  `_AcceptsValidPatterns`, `TestSanitizePackageForFilename_RejectsTraversal`). Segunda pasada del
+  `code-reviewer`: **APPROVE, 0 CRITICAL/HIGH/MEDIUM** (1 LOW informativo: `DebugWebSocketClient.Search`/
+  `GetMetadata` en `pkg/adt/websocket_rfc.go` quedan sin llamadas tras esta migración — no huérfanas del
+  todo, el fichero sigue usándose para otras operaciones WS; candidatas a limpieza futura vía
+  `refactor-cleaner` si el usuario lo pide, no tocadas proactivamente).
+- **Deliberadamente fuera de alcance de esta sesión** (Fase 2/3/4 del plan): `RUN_REPORT` vía background
+  job XBP (candidato a cerrar el bug abierto `APC_ILLEGAL_STATEMENT`), debugger de solo lectura vía
+  `RFC_READ_TABLE` sobre `ABDBG_*`, y el debugger interactivo completo (requiere desplegar una facade
+  ABAP nueva, `ZADT_DEBUG_RFC`, que este sistema no tiene). El código WS existente para
+  `SET_BREAKPOINT`/`GET_BREAKPOINTS`/`LISTEN`/`ATTACH`/etc. no se ha tocado.
+- Files: `go.mod`, `go.sum`, `pkg/saprfc/saprfc.go` (nuevo), `pkg/saprfc/readtable.go` (nuevo),
+  `pkg/saprfc/readtable_test.go` (nuevo), `pkg/saprfc/abapgit.go` (nuevo), `internal/mcp/rfc_client.go`
+  (nuevo), `internal/mcp/rfc_search_test.go` (nuevo), `internal/mcp/server.go`,
+  `internal/mcp/handlers_debugger.go`, `internal/mcp/handlers_git.go`, `cmd/vsp/main.go`.
+- `go build ./...` limpio con `CGO_ENABLED=0`; `go test $(go list ./pkg/... ./internal/... | grep -v
+  pkg/cache)` en verde, incluidos los tests portados y los 3 nuevos de seguridad.
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
@@ -1875,6 +2072,32 @@ cp vsp_new_build.exe "$LOCALAPPDATA/VSP/vsp.exe"
   main Claude Desktop window's process tree; if a restart doesn't seem to pick up a change, check for a
   lingering `vsp.exe` PID (`tasklist /FI "IMAGENAME eq vsp.exe"`) rather than assuming the rename+copy
   itself failed — it almost certainly didn't.
+
+### `SAP_RFC_HOST`/`SAP_RFC_SYSNR` — required for the deployed MCP server's classic-RFC calls (2026-09-17)
+
+The 2am `pkg/saprfc` migration's live verification (Fase 0+1) was done against throwaway Go
+programs with the RFC destination supplied directly, not against the actual deployed
+`claude_desktop_config.json`-launched `vsp.exe`. When `CALL_RFC`/`RFC_SEARCH`/`RFC_METADATA` were
+first tried through the real MCP tool on this Windows machine, they failed — `saprfc.Resolve`
+could not derive a gateway host:port from `SAP_URL`, which on this system is a reverse-proxy
+hostname (`sapdev.launioncorp.com`) with no port, not the SAP application server's own hostname.
+Fixed by adding `SAP_RFC_HOST`/`SAP_RFC_SYSNR` to the `abap-adt` server's `env` block in
+`claude_desktop_config.json` (and, as a more durable backup, as Windows **user** environment
+variables — see the gotcha below) — confirmed via `Get-EnvironmentVariable`/registry, scope
+`User`. **End-to-end verified live through the deployed MCP tool after a Claude Desktop restart**
+(not a throwaway program this time): `RFC_SEARCH "RFC_PING*"` found both matches, `CALL_RFC
+RFC_PING` returned `subrc: 0`, `RFC_METADATA BAPI_USER_GET_DETAIL` returned the full parameter
+schema.
+- **Gotcha, confirmed twice in the same debugging session**: `claude_desktop_config.json` can be
+  rewritten by Claude Desktop itself (most likely when it persists its own app state) and has, in
+  this project's history, lost `env` keys it doesn't recognize from its own settings UI — both
+  manual additions of `SAP_RFC_HOST`/`SAP_RFC_SYSNR` to that file were wiped shortly after being
+  added, before a third attempt (this time typed by the user directly with correct JSON syntax —
+  `"KEY": "value"`, not shell-style `KEY=value`) finally persisted. Because of this, the two
+  variables are **also** set as Windows user environment variables (`SAP_RFC_HOST=10.20.147.10`,
+  `SAP_RFC_SYSNR=00`) as an independent fallback — a freshly-spawned `vsp.exe` inherits those
+  regardless of what the JSON currently contains. Either source requires restarting Claude Desktop
+  to take effect (a running `vsp.exe` never re-reads its environment).
 
 ---
 

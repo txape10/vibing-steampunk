@@ -9,7 +9,9 @@ import (
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/oisee/open-rfc-go/rfc"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
+	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
 
 // routeDebuggerAction routes "debug" sub-actions for the WebSocket-based debugger.
@@ -253,14 +255,23 @@ func (s *Server) handleDeleteBreakpoint(ctx context.Context, request mcp.CallToo
 	return mcp.NewToolResultText(fmt.Sprintf("Breakpoint %s deleted successfully.", bpID)), nil
 }
 
+// handleCallRFC calls a function module over classic RFC (pkg/saprfc,
+// open-rfc-go) — a direct socket connection to the SAP gateway, not the
+// ZADT_VSP WebSocket bridge the rest of this file uses. This closes the
+// deserialization bug class documented in CLAUDE.md 2al/2y (TABLES parameters
+// never reaching ABAP, table-of-tables CREATE DATA failures) at the root: the
+// client builds the RFC wire format natively, with no ABAP intermediary to
+// have that bug. A genuine ABAP-side failure (declared exception, runtime
+// dump, or T100 message) now surfaces as a typed error and sets IsError on
+// the tool result — previously every such failure was swallowed into a
+// generic "Subrc: 99" inside an otherwise-successful response.
 func (s *Server) handleCallRFC(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	function, ok := request.GetArguments()["function"].(string)
 	if !ok || function == "" {
 		return newToolResultError("function is required"), nil
 	}
 
-	// Parse params if provided
-	params := make(map[string]interface{})
+	params := rfc.Params{}
 	if paramsStr, ok := request.GetArguments()["params"].(string); ok && paramsStr != "" {
 		// Parse JSON params, preserving structure/array types so nested
 		// IMPORTING parameters (e.g. TRACE_INTERVAL) reach ABAP as JSON
@@ -270,74 +281,114 @@ func (s *Server) handleCallRFC(ctx context.Context, request mcp.CallToolRequest)
 		}
 	}
 
-	// Ensure WebSocket client is connected
-	if err := s.ensureDebugWSClient(ctx); err != nil {
-		return newToolResultError(fmt.Sprintf("Failed to connect to ZADT_VSP WebSocket: %v. Ensure ZADT_VSP is deployed and SAPC/SICF are configured.", err)), nil
+	c, err := s.ensureRFCClient(ctx)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to connect via RFC: %v", err)), nil
 	}
 
-	result, err := s.debugWSClient.CallRFC(ctx, function, params)
+	function = strings.ToUpper(strings.TrimSpace(function))
+	res, err := c.Call(ctx, function, params)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("CallRFC failed: %v", err)), nil
 	}
 
-	// Format result
-	resultJSON, _ := json.MarshalIndent(result, "", "  ")
-	return mcp.NewToolResultText(fmt.Sprintf("RFC call completed.\n\nFunction: %s\nSubrc: %d\n\nResult:\n%s", function, result.Subrc, string(resultJSON))), nil
+	// Result.MarshalJSON already flattens scalars/structures and tables into
+	// one object by export name — no separate Exports/Tables split needed.
+	resultJSON, _ := json.MarshalIndent(res, "", "  ")
+	return mcp.NewToolResultText(fmt.Sprintf("RFC call completed.\n\nFunction: %s\nSubrc: 0\n\nResult:\n%s", function, string(resultJSON))), nil
 }
 
+// funcnameLikePredicate turns a user-supplied function-module name pattern
+// ('*' as wildcard) into a SQL LIKE operand safe to interpolate into an
+// RFC_READ_TABLE OPTIONS WHERE clause. pkg/saprfc.ReadTable has no bind
+// parameters — the whole clause is a literal string sent over RFC — so an
+// unescaped pattern is a WHERE-clause injection into a live SAP system, the
+// same class of risk this project already closed for SAP user names in
+// as4userPredicate (pkg/adt/transport.go). A function module name is
+// letters, digits, underscore, and '/' for a namespace (e.g.
+// /NAMESPACE/FUNC); anything else — starting with a single quote — is
+// rejected outright rather than escaped.
+func funcnameLikePredicate(pattern string) (string, error) {
+	name := strings.ToUpper(strings.TrimSpace(pattern))
+	if name == "" {
+		return "%", nil
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_', r == '/', r == '*':
+		default:
+			return "", fmt.Errorf("invalid function module pattern %q: expected letters, digits, "+
+				"_ / and '*' as a wildcard", pattern)
+		}
+	}
+	like := strings.ReplaceAll(name, "*", "%")
+	if !strings.Contains(like, "%") {
+		like = "%" + like + "%"
+	}
+	return like, nil
+}
+
+// handleRFCSearch finds RFC-enabled function modules by name pattern, reading
+// TFDIR directly over RFC_READ_TABLE (pkg/saprfc.ReadTable) instead of the
+// ZADT_VSP WebSocket bridge. FMODE IN ('R','X') matches both plain
+// remote-enabled modules ('R') and the basXML-capable ones SAP marks 'X' —
+// SADT_REST_RFC_ENDPOINT among them — which a plain 'R' filter would hide.
 func (s *Server) handleRFCSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	pattern, _ := request.GetArguments()["pattern"].(string)
 
-	if err := s.ensureDebugWSClient(ctx); err != nil {
-		return newToolResultError(fmt.Sprintf("Failed to connect to ZADT_VSP WebSocket: %v. Ensure ZADT_VSP is deployed and SAPC/SICF are configured.", err)), nil
+	like, err := funcnameLikePredicate(pattern)
+	if err != nil {
+		return newToolResultError(err.Error()), nil
 	}
 
-	results, err := s.debugWSClient.Search(ctx, pattern)
+	c, err := s.ensureRFCClient(ctx)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to connect via RFC: %v", err)), nil
+	}
+
+	where := "FUNCNAME LIKE '" + like + "' AND FMODE IN ( 'R', 'X' )"
+
+	rows, err := saprfc.ReadTable(ctx, c, "TFDIR", where, []string{"FUNCNAME"}, 100)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("RFC search failed: %v", err)), nil
 	}
 
-	if len(results) == 0 {
+	if len(rows) == 0 {
 		return mcp.NewToolResultText(fmt.Sprintf("No function modules found matching pattern: %s", pattern)), nil
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Function modules matching %q (%d):\n\n", pattern, len(results))
-	for _, r := range results {
-		fmt.Fprintf(&sb, "  %s\n", r.Name)
+	fmt.Fprintf(&sb, "Function modules matching %q (%d):\n\n", pattern, len(rows))
+	for _, row := range rows {
+		fmt.Fprintf(&sb, "  %s\n", row["FUNCNAME"])
 	}
 
 	return mcp.NewToolResultText(sb.String()), nil
 }
 
+// handleRFCGetMetadata describes a function module's interface as an
+// MCP-tool-shaped JSON Schema (rfc.Client.DescribeTool), reading its DDIC
+// signature directly over RFC instead of the ZADT_VSP WebSocket bridge.
+// Structure and table parameters are expanded from their real DDIC layout —
+// a strictly fuller signature than the old flat "[kind] name: type" listing.
 func (s *Server) handleRFCGetMetadata(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	function, ok := request.GetArguments()["function"].(string)
 	if !ok || function == "" {
 		return newToolResultError("function is required"), nil
 	}
 
-	if err := s.ensureDebugWSClient(ctx); err != nil {
-		return newToolResultError(fmt.Sprintf("Failed to connect to ZADT_VSP WebSocket: %v. Ensure ZADT_VSP is deployed and SAPC/SICF are configured.", err)), nil
+	c, err := s.ensureRFCClient(ctx)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to connect via RFC: %v", err)), nil
 	}
 
-	result, err := s.debugWSClient.GetMetadata(ctx, function)
+	function = strings.ToUpper(strings.TrimSpace(function))
+	tool, err := c.DescribeTool(ctx, function)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("RFC getMetadata failed: %v", err)), nil
 	}
 
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Signature for %s:\n\n", result.Function)
-	if len(result.Parameters) == 0 {
-		sb.WriteString("  (no parameters)\n")
-	} else {
-		for _, p := range result.Parameters {
-			opt := ""
-			if p.Optional {
-				opt = " (optional)"
-			}
-			fmt.Fprintf(&sb, "  [%s] %s: %s%s\n", p.Kind, p.Name, p.Type, opt)
-		}
-	}
-
-	return mcp.NewToolResultText(sb.String()), nil
+	toolJSON, _ := json.MarshalIndent(tool, "", "  ")
+	return mcp.NewToolResultText(fmt.Sprintf("Signature for %s:\n\n%s", function, string(toolJSON))), nil
 }

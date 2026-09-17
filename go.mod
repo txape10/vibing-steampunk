@@ -1,6 +1,6 @@
 module github.com/oisee/vibing-steampunk
 
-go 1.25.0
+go 1.26
 
 require (
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
@@ -31,6 +31,7 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/oisee/open-rfc-go v0.0.0-20260820234724-6ef4d9eeb9cd // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
