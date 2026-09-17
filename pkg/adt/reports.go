@@ -10,38 +10,6 @@ import (
 )
 
 
-// RunReportParams contains parameters for report execution.
-// Reports run as background jobs and output to spool (APC-safe).
-type RunReportParams struct {
-	Report  string            `json:"report"`
-	Variant string            `json:"variant,omitempty"`
-	Params  map[string]string `json:"params,omitempty"`
-}
-
-// RunReportResult contains report execution results.
-// Reports run as background jobs - use GetJobStatus to poll completion.
-type RunReportResult struct {
-	Status   string `json:"status"`
-	Report   string `json:"report"`
-	JobName  string `json:"jobname"`
-	JobCount string `json:"jobcount"`
-}
-
-// JobStatusResult contains job status information.
-type JobStatusResult struct {
-	JobName  string   `json:"jobname"`
-	JobCount string   `json:"jobcount"`
-	Status   string   `json:"status"` // scheduled, running, finished, aborted
-	SpoolIDs []string `json:"spool_ids,omitempty"`
-}
-
-// SpoolOutputResult contains spool output data.
-type SpoolOutputResult struct {
-	SpoolID string `json:"spool_id"`
-	Lines   int    `json:"lines"`
-	Output  string `json:"output"`
-}
-
 // TextElements contains program text elements.
 type TextElements struct {
 	Program        string            `json:"program"`
@@ -85,34 +53,6 @@ type ReportVariant struct {
 type GetVariantsResult struct {
 	Report   string          `json:"report"`
 	Variants []ReportVariant `json:"variants"`
-}
-
-// RunReport executes an ABAP report via WebSocket (ZADT_VSP report domain).
-// Report runs as background job - returns job info for polling.
-func (c *AMDPWebSocketClient) RunReport(ctx context.Context, params RunReportParams) (*RunReportResult, error) {
-	reqParams := map[string]interface{}{
-		"report": params.Report,
-	}
-	if params.Variant != "" {
-		reqParams["variant"] = params.Variant
-	}
-	if len(params.Params) > 0 {
-		reqParams["params"] = params.Params
-	}
-
-	resp, err := c.sendReportRequest(ctx, "runReport", reqParams)
-	if err != nil {
-		return nil, err
-	}
-
-	var result RunReportResult
-	if len(resp.Data) > 0 {
-		if err := json.Unmarshal(resp.Data, &result); err != nil {
-			return nil, fmt.Errorf("failed to parse result: %w", err)
-		}
-	}
-
-	return &result, nil
 }
 
 // GetTextElements retrieves program text elements via WebSocket.
@@ -184,49 +124,6 @@ func (c *AMDPWebSocketClient) GetVariants(ctx context.Context, report string) (*
 	}
 
 	var result GetVariantsResult
-	if len(resp.Data) > 0 {
-		if err := json.Unmarshal(resp.Data, &result); err != nil {
-			return nil, fmt.Errorf("failed to parse result: %w", err)
-		}
-	}
-
-	return &result, nil
-}
-
-// GetJobStatus retrieves job status via WebSocket.
-func (c *AMDPWebSocketClient) GetJobStatus(ctx context.Context, jobName, jobCount string) (*JobStatusResult, error) {
-	params := map[string]interface{}{
-		"jobname":  jobName,
-		"jobcount": jobCount,
-	}
-
-	resp, err := c.sendReportRequest(ctx, "getJobStatus", params)
-	if err != nil {
-		return nil, err
-	}
-
-	var result JobStatusResult
-	if len(resp.Data) > 0 {
-		if err := json.Unmarshal(resp.Data, &result); err != nil {
-			return nil, fmt.Errorf("failed to parse result: %w", err)
-		}
-	}
-
-	return &result, nil
-}
-
-// GetSpoolOutput retrieves spool output by ID via WebSocket.
-func (c *AMDPWebSocketClient) GetSpoolOutput(ctx context.Context, spoolID string) (*SpoolOutputResult, error) {
-	params := map[string]interface{}{
-		"spool_id": spoolID,
-	}
-
-	resp, err := c.sendReportRequest(ctx, "getSpoolOutput", params)
-	if err != nil {
-		return nil, err
-	}
-
-	var result SpoolOutputResult
 	if len(resp.Data) > 0 {
 		if err := json.Unmarshal(resp.Data, &result); err != nil {
 			return nil, fmt.Errorf("failed to parse result: %w", err)

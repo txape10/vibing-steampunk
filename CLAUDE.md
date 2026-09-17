@@ -1859,6 +1859,131 @@ the code permanently — it is the fix, not a placeholder.
 - `go build ./...` limpio con `CGO_ENABLED=0`; `go test $(go list ./pkg/... ./internal/... | grep -v
   pkg/cache)` en verde, incluidos los tests portados y los 3 nuevos de seguridad.
 
+### 2an. `pkg/saprfc` adoption, Fase 2 — `RUN_REPORT`/`RUN_REPORT_ASYNC` migrated to classic RFC (XBP background jobs), closes the `APC_ILLEGAL_STATEMENT` bug (2026-09-17)
+- **The bug closed**: `RUN_REPORT`/`RUN_REPORT_ASYNC` went through the WebSocket `ZADT_VSP` bridge
+  (`SUBMIT ... AND RETURN` inside a stateful APC handler), which SAP rejects with
+  `APC_ILLEGAL_STATEMENT` on any report with a selection screen — documented as an architectural
+  limit under "Known Open Issues" for a long time (upstream issue
+  [#113](https://github.com/oisee/vibing-steampunk/issues/113), never fixed on that transport
+  anywhere). Migrated to `pkg/saprfc`'s classic-RFC XBP background-job mechanism (Fase 2 of the
+  adoption plan started in 2am): `BAPI_XMI_LOGON` → `BAPI_XBP_JOB_OPEN` →
+  `BAPI_XBP_JOB_ADD_ABAP_STEP` (carries `SELINFO` for selection-screen parameters) →
+  `BAPI_XBP_JOB_START_ASAP` → poll `TBTCO-STATUS` → `BAPI_XMI_LOGOFF`, spool read via
+  `BAPI_XBP_JOB_SPOOLLIST_READ`. No `SUBMIT` anywhere in this path — the whole bug class is gone
+  by construction, not patched around.
+- **Ported from upstream, verified against its real source first** (not from memory — read
+  `pkg/saprfc/report.go` from `upstream/main` directly, 289 lines, before writing anything): the
+  code comment there explains an earlier upstream attempt used `SUBST_START_REPORT_IN_BATCH`,
+  which picks its own batch server and fails with `BATCH_SCHEDULING_FAILED (XM262)` on systems
+  where that selection doesn't resolve — the XBP BAPIs were chosen instead because they take the
+  target server explicitly and report errors via a real `BAPIRET2`.
+- **Two deliberate deviations from upstream's port**, both because this fork's package already had
+  content upstream's fresh copy didn't: `firstNonEmpty` not redeclared (already in this package's
+  `saprfc.go` from Fase 1, same package — a duplicate would be a compile error); upstream's
+  `asInt32` helper dropped (only used by upstream's debugger code, not ported here — Fase 3/4 are
+  still future work per the adoption plan).
+- **New `JobStatus(ctx, c, jobName, jobCount) (status, statusText string, err error)`**, not in
+  upstream — a thin wrapper needed for the new `GetReportJobStatus` MCP tool (below), which upstream
+  has no equivalent of (its CLI always waits synchronously).
+- **Contract changes, all deliberate and user-approved before implementation** (via `planner` +
+  explicit confirmation, not discovered after the fact):
+  - `variant` (report variant name) **dropped entirely** from `RunReport`/`RunReportAsync` — RFC has
+    no way to resolve a variant to its stored parameter values; `saprfc.RunReport` upstream never
+    had this either. A documented capability loss, not an oversight.
+  - `params` now accepts **two shapes**: a flat object (`{"P_X":"value"}`, one EQ parameter per key
+    — the pre-existing simple form) or an array of full `saprfc.ReportParam` objects, for
+    select-options with a range (`[{"name":"S_WERKS","option":"BT","low":"1000","high":"2000"}]`).
+    This also fixes a pre-existing bug: the old tool description already *claimed* range support
+    with an example the old `map[string]string` implementation could never actually parse — a
+    promise the implementation never kept, not something this change regresses.
+  - New `wait_seconds` parameter (default 30, capped at 120 to keep one MCP call from blocking
+    indefinitely) replaces the old hardcoded 60s poll timeout.
+  - `RunReportAsync`'s result drops the `spool_ids` field — XBP gives one spool per job step, not a
+    list of IDs to iterate.
+  - New tool `GetReportJobStatus(job_name, job_count, include_spool?)` — closes the gap left by
+    dropping the old (structurally broken — see the closed "Known Open Issues" entry below) polling
+    model: a job scheduled with `wait_seconds=0` (fire-and-forget) can be checked on later in a
+    separate call.
+  - `pkg/adt/reports.go` trimmed: `RunReportParams`/`RunReportResult`/`JobStatusResult`/
+    `SpoolOutputResult` types and `AMDPWebSocketClient.RunReport`/`.GetJobStatus`/`.GetSpoolOutput`
+    removed — these assumed ABAP-side actions (`getJobStatus`/`getSpoolOutput`) that a prior
+    session's investigation had already confirmed don't exist anywhere in the deployed ABAP backend.
+    `GetVariants`/`GetTextElements`/`SetTextElements` and their shared `sendReportRequest` helper are
+    untouched — no RFC equivalent exists, they stay on the WebSocket.
+- **Code review, 2 HIGH found and fixed in the same session** (0 CRITICAL from the start):
+  - **WHERE-clause injection in `jobStatus`** (`pkg/saprfc/report.go`) — `jobName`/`jobCount`, fully
+    caller-controlled via the new `GetReportJobStatus` MCP tool, were interpolated unescaped into an
+    `RFC_READ_TABLE` OPTIONS/WHERE clause (`ReadTable`/`RFC_READ_TABLE` has no bind parameters — the
+    same class of bug this codebase already found and fixed twice on sibling code,
+    `funcnameLikePredicate` for `RFC_SEARCH`/`TFDIR` in 2am and `as4userPredicate` for
+    `GetUserTransports`/`AS4USER` in 2s). Fixed with new `validJobName`/`validJobCount` whitelist
+    validators (`[A-Za-z0-9_-/]` max 32 chars / digits-only max 8 chars, matching the real
+    `TBTCO-JOBNAME`/`TBTCO-JOBCOUNT` DDIC widths) called before the WHERE clause is built; `jobStatus`
+    stopped delegating to the general `saprfc.ReadTable` (which requires `*rfc.Client` specifically)
+    and now builds the `RFC_READ_TABLE` call inline against a new `rfcCaller` interface. Verified live
+    (below) that the guard actually rejects an injection payload with a clean error, not a silent
+    bypass.
+  - **No RFC session pinning across `BAPI_XMI_LOGON` → `BAPI_XBP_JOB_*` → `BAPI_XMI_LOGOFF`** — each
+    step was an independent pooled `Client.Call`; SAP's XMI authorization is tied to the physical
+    connection that logged on, and the vendored `open-rfc-go` library's own `rfc/session.go` doc
+    comment names exactly this hazard ("a Session is for the stateful protocols where server-side
+    state must survive between calls... otherwise fail with a session mismatch"), confirmed by
+    reading that file directly rather than trusting the finding's description. Fixed: `RunReport`
+    and `ReadSpoolStep` both call `c.Pin(ctx)` once and route every step of their respective
+    sequences — including, in `RunReport`'s case, the status-polling loop — through
+    `session.Call(...)`, `defer session.Close()`. New `rfcCaller` interface
+    (`Call(ctx, functionName string, in rfc.Params) (rfc.Result, error)`) lets `xmiLogon`/
+    `applicationServer`/`jobStatus` accept either a `*rfc.Client` or a `*rfc.Session` structurally, so
+    the exported `JobStatus` (used by the session-independent `GetReportJobStatus` tool) can still
+    pass a plain pooled client. A second review pass confirmed no stray `c.Call` remained in either
+    function and `session.Close()` is deferred immediately after a successful `Pin`, before any other
+    call — no leak path on any error branch.
+  - Noted, not a finding: holding one pinned pool connection for up to 120s (`RunReport`, MCP-capped)
+    or 5 minutes (`RunReportAsync`'s internal call) against the vendored pool's `MaxSize=8` is bounded
+    backpressure on other concurrent RFC tool calls (`CALL_RFC`/`RFC_SEARCH`/etc.), not a deadlock or
+    leak — the accepted tradeoff of the pinning fix itself, not a new problem it introduces.
+- Tests: `pkg/saprfc/report_test.go` — pure-function coverage (`jobStatusText`, `selectionRows`
+  defaults/explicit/empty, `bapiError` all branches) plus the injection-guard regression tests
+  (`TestValidJobName_RejectsInjection`/`_AcceptsRealNames`, `TestValidJobCount_RejectsInjection`/
+  `_AcceptsRealCounts`). No test exists for `RunReport`/`ReadSpool` against a mocked `*rfc.Client` —
+  this package's own pre-existing test (`readtable_test.go`) never mocks the RFC client either, and
+  there is no test-double mechanism for it in this codebase yet; not invented for this narrow fix,
+  matching the existing coverage convention for this package. `internal/mcp/handlers_report_test.go`
+  (new) — `parseReportParams` (empty/flat-object/array/invalid-JSON/non-string-value) and
+  `reportWaitSeconds` (default/cap/explicit/negative-ignored).
+- `go build ./...` clean; `go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)` green.
+- **Verified live (2026-09-17)** against the real SAP system, through the deployed MCP tool (rebuilt
+  binary, Claude Desktop restarted):
+  - The exact repro from the closed "Known Open Issues" entry — `RUN_REPORT` on `ZTESTRCG1` with no
+    params — now returns `Status: finished` and real spool (`"IDoc 0000000000000000: SIN bloqueo
+    activo"`) instead of hanging to a client timeout.
+  - `GET_VARIANTS` on the same report: unaffected, still answers via the WebSocket
+    (`"No variants found"`, expected — regression check, not a functional one).
+  - `RUN_REPORT_ASYNC` + `GET_ASYNC_RESULT(wait=true)`: completed in ~1.5s, correct spool in the
+    result.
+  - `RUN_REPORT` with `wait_seconds=0`: returned immediately with `Job: VSP_ZTESTRCG1/15572000` and no
+    spool (job still running); a follow-up `GET_REPORT_JOB_STATUS(include_spool=true)` on that exact
+    job correctly reported `finished` plus the spool — confirms the fire-and-forget-then-check flow
+    end to end.
+  - `GET_REPORT_JOB_STATUS` with an injection payload (`job_name: "X' OR JOBNAME LIKE 'Z"`): rejected
+    cleanly with `invalid job name "...": expected up to 32 letters, digits, or _ - /` — no SAP call
+    made, confirming the guard fires before any network request.
+  - `params` flat-object form (`{"PA_IDOC":"1234567890"}`) on `ZTESTRCG1`: the value reached the
+    report correctly (spool echoed `"IDoc 0000001234567890"`).
+  - `params` array form with a select-option range: created a throwaway `$TMP` program
+    (`ZVSP_TST_RUNREPORT`, a `SELECT-OPTIONS s_range FOR sy-tabix` that writes the range it receives —
+    approved by the user before creation, per the project's golden rule on creating SAP objects), ran
+    it with `[{"name":"S_RANGE","kind":"S","sign":"I","option":"BT","low":"10","high":"20"}]` — spool
+    showed `"I BT         10          20"`, confirming `SIGN=I OPTION=BT LOW=10 HIGH=20` landed
+    exactly as sent (also exercises `BAPI_XBP_JOB_ADD_ABAP_STEP`'s `SELINFO` under the new pinned
+    session, since this is the same code path). Program deleted after confirming.
+- Files: `pkg/saprfc/report.go` (new), `pkg/saprfc/report_test.go` (new),
+  `internal/mcp/handlers_report.go` (rewritten `handleRunReport`/`handleRunReportAsync`, new
+  `handleGetReportJobStatus`/`parseReportParams`/`reportWaitSeconds`),
+  `internal/mcp/handlers_report_test.go` (new), `internal/mcp/tools_register.go` (schema updates +
+  new `GetReportJobStatus` tool), `internal/mcp/tools_focused.go` (whitelist), `pkg/adt/reports.go`
+  (trimmed).
+
 ## Known Open Issues (Not Fixed)
 
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
@@ -1910,30 +2035,14 @@ the code permanently — it is the fix, not a placeholder.
   DevTools) expose a data endpoint that could be wrapped instead of just linking out.
 - Test: `pkg/adt/trace_test.go` — `TestListSQLTraces_FailsWithoutCallingSAP`.
 
-### `RUN_REPORT` — hangs on reports with a selection screen; secondary `MISSING_PARAM` bug
-- **Root cause (confirmed)**: matches upstream issue [#113](https://github.com/oisee/vibing-steampunk/issues/113)
-  (open, no fix merged anywhere including this fork and the two most-diverged forks checked). SAP: `SUBMIT
-  ... AND RETURN` is invalid inside a stateful APC WebSocket handler and raises `APC_ILLEGAL_STATEMENT`;
-  the RFC domain's fire-and-forget `runReport` (`RFC_ABAP_INSTALL_AND_RUN ... STARTING NEW TASK`) has no
-  result callback either. Whichever domain the MCP client hits, it can't get a synchronous result.
-  Live-reproduced: `SAP(action="debug", target="RUN_REPORT", params={"report": "ZTESTRCG1"})` (a report
-  with a non-mandatory selection-screen `PARAMETERS`) with no `params`/`variant` timed out (`MCP error
-  -32001`).
-- **Secondary bug (found this session, not reported upstream)**: passing an explicit `params` object to
-  route around the bare `SUBMIT` (`params={"report": "ZTESTRCG1", "params": "{\"PA_IDOC\":\"...\"}"}`)
-  returned `RunReport failed: MISSING_PARAM: Parameter report is required` even though `report` was present
-  in the call — not yet diagnosed (likely a parameter-extraction/serialization mismatch between the Go
-  client's request envelope and ABAP's `extract_param`, separate from the `APC_ILLEGAL_STATEMENT` issue).
-- Also structurally broken regardless of the above: `pkg/adt/reports.go`'s `GetJobStatus`/`GetSpoolOutput`
-  and the job-polling model in `handleRunReport`/`handleRunReportAsync` (`internal/mcp/handlers_report.go`)
-  assume a `getJobStatus`/`getSpoolOutput` action that **does not exist anywhere** in the ABAP source
-  (`grep` for `getJobStatus`/`getSpoolOutput`/`jobname` across `embedded/abap` and `src`: zero matches) —
-  `RunReportResult.JobName`/`JobCount` are never populated by the real backend.
-- **Do not use `RUN_REPORT`/`RUN_REPORT_ASYNC` on reports with mandatory unfilled selection-screen fields**
-  until this is fixed. `GET_VARIANTS`, `GET_TEXT_ELEMENTS`, `SET_TEXT_ELEMENTS` are unaffected (synchronous,
-  no `SUBMIT`, verified working).
-- Status: under investigation, not started on a fix — needs a rewrite matching the synchronous ABAP
-  reality (job-polling model has no server-side counterpart), plus the `MISSING_PARAM` root cause.
+### `RUN_REPORT` — hangs on reports with a selection screen — FIXED, see 2an above (2026-09-17)
+- **Closed by the pkg/saprfc Fase 2 migration** (2an): `RUN_REPORT`/`RUN_REPORT_ASYNC` no longer go
+  through the WebSocket `SUBMIT ... AND RETURN` path at all — they schedule the report as an XBP
+  background job over classic RFC, which has no `APC_ILLEGAL_STATEMENT` restriction. The
+  `MISSING_PARAM`/`GetJobStatus`/`GetSpoolOutput` structural issues below are moot — that whole
+  code path (and the ABAP-side actions it assumed, which never existed) was removed, not patched.
+  Live-verified against the exact repro in this entry's original text (`ZTESTRCG1`, no params) — see
+  2an for the full verification record.
 
 ### `SET_BREAKPOINT` refuses every function-module include, not just standard/kernel-called ones — FIXED, see 2ak above (2026-09-14, root-caused and fixed 2026-09-15)
 - **Revises an earlier, narrower theory**: 2ah's investigation (and the Run RFC live-verification gap it
@@ -2027,7 +2136,8 @@ Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_A
 - **#169** MCP cross-tool-call window: a lock handle spans separate tool calls, and any read the agent does
   between LOCK and the write that consumes it is a stateless hop — no in-process fix closes this, it needs
   an MCP-level design change (upstream is exploring this per PR #183, not ported here).
-- **#55** RunReport in APC — architectural limit
+- **#55** RunReport in APC — architectural limit. **Resolved** by the pkg/saprfc Fase 2 migration
+  (see 2an above) — `RUN_REPORT` no longer uses APC/WebSocket at all, so the limit no longer applies.
 - **#46** / **#45** Sync script flags — closed upstream (script never existed in public repo)
 
 ---

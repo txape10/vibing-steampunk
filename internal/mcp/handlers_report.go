@@ -11,6 +11,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
+	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
 
 // routeReportAction routes "debug" with report-related sub-actions.
@@ -25,6 +26,8 @@ func (s *Server) routeReportAction(ctx context.Context, action, objectType, obje
 		return s.callHandler(ctx, s.handleRunReportAsync, params)
 	case "GET_ASYNC_RESULT":
 		return s.callHandler(ctx, s.handleGetAsyncResult, params)
+	case "GET_REPORT_JOB_STATUS":
+		return s.callHandler(ctx, s.handleGetReportJobStatus, params)
 	case "GET_VARIANTS":
 		return s.callHandler(ctx, s.handleGetVariants, params)
 	case "GET_TEXT_ELEMENTS":
@@ -36,121 +39,112 @@ func (s *Server) routeReportAction(ctx context.Context, action, objectType, obje
 }
 
 // --- Report Execution Handlers ---
+//
+// RunReport/RunReportAsync go over classic RFC (pkg/saprfc, the XBP background-job
+// BAPIs), not the ZADT_VSP WebSocket — the WebSocket's SUBMIT ... AND RETURN is
+// illegal inside a stateful APC handler (APC_ILLEGAL_STATEMENT) on any report with
+// a selection screen, an architectural limit with no fix on that transport (see
+// CLAUDE.md "Known Open Issues" -> RUN_REPORT). GetVariants/GetTextElements/
+// SetTextElements have no RFC equivalent and stay on the WebSocket, unchanged.
+
+// parseReportParams turns the MCP "params" argument into []saprfc.ReportParam. It
+// accepts two shapes: a flat object ({"P_X":"value"}, one EQ parameter per key,
+// the pre-existing simple form) or an array of full ReportParam objects (to
+// express select-options with a range: {"name":"S_WERKS","option":"BT","low":...,
+// "high":...}). An empty/absent string returns (nil, nil).
+func parseReportParams(raw string) ([]saprfc.ReportParam, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(raw, "[") {
+		var arr []saprfc.ReportParam
+		if err := json.Unmarshal([]byte(raw), &arr); err != nil {
+			return nil, fmt.Errorf("invalid params array: %w", err)
+		}
+		return arr, nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return nil, fmt.Errorf("invalid params object: %w", err)
+	}
+	out := make([]saprfc.ReportParam, 0, len(obj))
+	for name, v := range obj {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("params.%s must be a string value (use the array form for select-options)", name)
+		}
+		out = append(out, saprfc.ReportParam{Name: name, Low: s})
+	}
+	return out, nil
+}
+
+// reportWaitSeconds reads the optional wait_seconds argument, defaulting to 30s
+// and capping at 120s so a single MCP call cannot block indefinitely.
+func reportWaitSeconds(request mcp.CallToolRequest) time.Duration {
+	const defaultWait, maxWait = 30.0, 120.0
+	wait := defaultWait
+	if v, ok := request.GetArguments()["wait_seconds"].(float64); ok && v >= 0 {
+		wait = v
+	}
+	if wait > maxWait {
+		wait = maxWait
+	}
+	return time.Duration(wait * float64(time.Second))
+}
 
 func (s *Server) handleRunReport(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// Ensure WebSocket is connected
-	if errResult := s.ensureWSConnected(ctx, "RunReport"); errResult != nil {
-		return errResult, nil
-	}
-
-	// Parse parameters
 	report, _ := request.GetArguments()["report"].(string)
 	if report == "" {
 		return newToolResultError("report parameter is required"), nil
 	}
-
-	params := adt.RunReportParams{
-		Report: report,
+	paramsStr, _ := request.GetArguments()["params"].(string)
+	reportParams, err := parseReportParams(paramsStr)
+	if err != nil {
+		return newToolResultError(err.Error()), nil
 	}
 
-	if variant, ok := request.GetArguments()["variant"].(string); ok {
-		params.Variant = variant
+	c, err := s.ensureRFCClient(ctx)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to connect via RFC: %v", err)), nil
 	}
 
-	if paramsStr, ok := request.GetArguments()["params"].(string); ok && paramsStr != "" {
-		var p map[string]string
-		if err := json.Unmarshal([]byte(paramsStr), &p); err != nil {
-			return newToolResultError(fmt.Sprintf("Invalid params JSON: %v", err)), nil
-		}
-		params.Params = p
-	}
-
-	// Step 1: Schedule background job via WebSocket
-	result, err := s.amdpWSClient.RunReport(ctx, params)
+	run, err := saprfc.RunReport(ctx, c, report, "", reportParams, reportWaitSeconds(request))
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("RunReport failed: %v", err)), nil
 	}
 
-	// Check if we got job info (new job-based approach)
-	if result.JobName == "" || result.JobCount == "" {
-		return newToolResultError("RunReport did not return job info - ABAP service may need updating"), nil
-	}
-
-	// Step 2: Poll for job completion (max 60 seconds)
-	var jobStatus *adt.JobStatusResult
-	pollCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	for {
-		jobStatus, err = s.amdpWSClient.GetJobStatus(pollCtx, result.JobName, result.JobCount)
-		if err != nil {
-			return newToolResultError(fmt.Sprintf("GetJobStatus failed: %v", err)), nil
-		}
-
-		if jobStatus.Status == "finished" || jobStatus.Status == "aborted" {
-			break
-		}
-
-		select {
-		case <-pollCtx.Done():
-			return newToolResultError(fmt.Sprintf("Job %s/%s timed out (status: %s)", result.JobName, result.JobCount, jobStatus.Status)), nil
-		case <-time.After(500 * time.Millisecond):
-			// Continue polling
-		}
-	}
-
-	// Step 3: Format output
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Report: %s\n", result.Report)
-	fmt.Fprintf(&sb, "Job: %s/%s\n", result.JobName, result.JobCount)
-	fmt.Fprintf(&sb, "Status: %s\n\n", jobStatus.Status)
+	fmt.Fprintf(&sb, "Report: %s\n", run.Report)
+	fmt.Fprintf(&sb, "Job: %s/%s\n", run.JobName, run.JobCount)
+	fmt.Fprintf(&sb, "Status: %s\n\n", run.StatusFor)
 
-	// Step 4: Get spool output if available
-	if len(jobStatus.SpoolIDs) > 0 {
-		sb.WriteString("Spool Output:\n")
-		for _, spoolID := range jobStatus.SpoolIDs {
-			spoolResult, err := s.amdpWSClient.GetSpoolOutput(ctx, spoolID)
-			if err != nil {
-				fmt.Fprintf(&sb, "  [Spool %s: error reading - %v]\n", spoolID, err)
-				continue
-			}
-			fmt.Fprintf(&sb, "--- Spool %s (%d lines) ---\n", spoolID, spoolResult.Lines)
-			sb.WriteString(spoolResult.Output)
-			sb.WriteString("\n")
+	if run.Status == "F" {
+		spool, err := saprfc.ReadSpool(ctx, c, run.JobName, run.JobCount)
+		if err != nil {
+			fmt.Fprintf(&sb, "[spool: error reading - %v]\n", err)
+		} else if spool == "" {
+			sb.WriteString("No spool output produced.\n")
+		} else {
+			sb.WriteString("Spool Output:\n")
+			sb.WriteString(spool)
 		}
 	} else {
-		sb.WriteString("No spool output produced.\n")
+		sb.WriteString("Job is still running; use GetReportJobStatus to check on it, or raise wait_seconds.\n")
 	}
 
 	return mcp.NewToolResultText(sb.String()), nil
 }
 
 func (s *Server) handleRunReportAsync(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// Ensure WebSocket is connected
-	if errResult := s.ensureWSConnected(ctx, "RunReportAsync"); errResult != nil {
-		return errResult, nil
-	}
-
-	// Parse parameters
 	report, _ := request.GetArguments()["report"].(string)
 	if report == "" {
 		return newToolResultError("report parameter is required"), nil
 	}
-
-	params := adt.RunReportParams{
-		Report: report,
-	}
-
-	if variant, ok := request.GetArguments()["variant"].(string); ok {
-		params.Variant = variant
-	}
-
-	if paramsStr, ok := request.GetArguments()["params"].(string); ok && paramsStr != "" {
-		var p map[string]string
-		if err := json.Unmarshal([]byte(paramsStr), &p); err != nil {
-			return newToolResultError(fmt.Sprintf("Invalid params JSON: %v", err)), nil
-		}
-		params.Params = p
+	paramsStr, _ := request.GetArguments()["params"].(string)
+	reportParams, err := parseReportParams(paramsStr)
+	if err != nil {
+		return newToolResultError(err.Error()), nil
 	}
 
 	// Generate task ID
@@ -166,94 +160,46 @@ func (s *Server) handleRunReportAsync(ctx context.Context, request mcp.CallToolR
 	s.asyncTasks[taskID] = task
 	s.asyncTasksMu.Unlock()
 
-	// Run report in background goroutine via WebSocket (job-based)
 	go func() {
 		bgCtx := context.Background()
 
-		// Step 1: Schedule background job
-		result, err := s.amdpWSClient.RunReport(bgCtx, params)
+		c, err := s.ensureRFCClient(bgCtx)
 		if err != nil {
 			s.asyncTasksMu.Lock()
 			now := time.Now()
 			task.EndedAt = &now
 			task.Status = "error"
-			task.Error = err.Error()
+			task.Error = fmt.Sprintf("Failed to connect via RFC: %v", err)
 			s.asyncTasksMu.Unlock()
 			return
 		}
 
-		if result.JobName == "" || result.JobCount == "" {
+		run, err := saprfc.RunReport(bgCtx, c, report, "", reportParams, 5*time.Minute)
+		if err != nil {
 			s.asyncTasksMu.Lock()
 			now := time.Now()
 			task.EndedAt = &now
 			task.Status = "error"
-			task.Error = "RunReport did not return job info"
+			task.Error = fmt.Sprintf("RunReport failed: %v", err)
 			s.asyncTasksMu.Unlock()
 			return
 		}
 
-		// Step 2: Poll for job completion (max 5 minutes for async)
-		pollCtx, cancel := context.WithTimeout(bgCtx, 5*time.Minute)
-		defer cancel()
-
-		var jobStatus *adt.JobStatusResult
-		for {
-			jobStatus, err = s.amdpWSClient.GetJobStatus(pollCtx, result.JobName, result.JobCount)
-			if err != nil {
-				s.asyncTasksMu.Lock()
-				now := time.Now()
-				task.EndedAt = &now
-				task.Status = "error"
-				task.Error = fmt.Sprintf("GetJobStatus failed: %v", err)
-				s.asyncTasksMu.Unlock()
-				return
-			}
-
-			if jobStatus.Status == "finished" || jobStatus.Status == "aborted" {
-				break
-			}
-
-			select {
-			case <-pollCtx.Done():
-				s.asyncTasksMu.Lock()
-				now := time.Now()
-				task.EndedAt = &now
-				task.Status = "error"
-				task.Error = fmt.Sprintf("Job %s/%s timed out", result.JobName, result.JobCount)
-				s.asyncTasksMu.Unlock()
-				return
-			case <-time.After(1 * time.Second):
-				// Continue polling
-			}
+		var spoolOutput string
+		if run.Status == "F" {
+			spoolOutput, _ = saprfc.ReadSpool(bgCtx, c, run.JobName, run.JobCount)
 		}
 
-		// Step 3: Collect spool output
-		var spoolOutput strings.Builder
-		if len(jobStatus.SpoolIDs) > 0 {
-			for _, spoolID := range jobStatus.SpoolIDs {
-				spoolResult, err := s.amdpWSClient.GetSpoolOutput(bgCtx, spoolID)
-				if err != nil {
-					fmt.Fprintf(&spoolOutput, "[Spool %s: error - %v]\n", spoolID, err)
-					continue
-				}
-				fmt.Fprintf(&spoolOutput, "--- Spool %s (%d lines) ---\n", spoolID, spoolResult.Lines)
-				spoolOutput.WriteString(spoolResult.Output)
-				spoolOutput.WriteString("\n")
-			}
-		}
-
-		// Mark complete
 		s.asyncTasksMu.Lock()
 		now := time.Now()
 		task.EndedAt = &now
 		task.Status = "completed"
 		task.Result = map[string]interface{}{
-			"report":       result.Report,
-			"jobname":      result.JobName,
-			"jobcount":     result.JobCount,
-			"job_status":   jobStatus.Status,
-			"spool_ids":    jobStatus.SpoolIDs,
-			"spool_output": spoolOutput.String(),
+			"report":       run.Report,
+			"jobname":      run.JobName,
+			"jobcount":     run.JobCount,
+			"job_status":   run.StatusFor,
+			"spool_output": spoolOutput,
 		}
 		s.asyncTasksMu.Unlock()
 	}()
@@ -266,6 +212,43 @@ func (s *Server) handleRunReportAsync(ctx context.Context, request mcp.CallToolR
 	}
 	outputJSON, _ := json.MarshalIndent(output, "", "  ")
 	return mcp.NewToolResultText(string(outputJSON)), nil
+}
+
+func (s *Server) handleGetReportJobStatus(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	jobName, _ := request.GetArguments()["job_name"].(string)
+	jobCount, _ := request.GetArguments()["job_count"].(string)
+	if jobName == "" || jobCount == "" {
+		return newToolResultError("job_name and job_count parameters are required"), nil
+	}
+
+	c, err := s.ensureRFCClient(ctx)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to connect via RFC: %v", err)), nil
+	}
+
+	status, statusText, err := saprfc.JobStatus(ctx, c, jobName, jobCount)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("GetReportJobStatus failed: %v", err)), nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Job: %s/%s\n", jobName, jobCount)
+	fmt.Fprintf(&sb, "Status: %s\n", statusText)
+
+	includeSpool, _ := request.GetArguments()["include_spool"].(bool)
+	if includeSpool && status == "F" {
+		spool, err := saprfc.ReadSpool(ctx, c, jobName, jobCount)
+		if err != nil {
+			fmt.Fprintf(&sb, "[spool: error reading - %v]\n", err)
+		} else if spool == "" {
+			sb.WriteString("No spool output produced.\n")
+		} else {
+			sb.WriteString("\nSpool Output:\n")
+			sb.WriteString(spool)
+		}
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
 }
 
 func (s *Server) handleGetAsyncResult(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

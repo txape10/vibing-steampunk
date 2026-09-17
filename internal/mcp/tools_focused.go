@@ -145,11 +145,14 @@ func focusedToolSet() map[string]bool {
 		"GitTypes":  true, // List 158 supported object types
 		"GitExport": true, // Export packages/objects to abapGit ZIP
 
-		// Report Execution (via ZADT_VSP WebSocket)
-		"RunReport":      true, // Execute reports with params/variants, capture ALV
-		"RunReportAsync": true, // Background report execution with polling
-		"GetAsyncResult": true, // Retrieve async task results
-		"GetVariants":    true, // List report variants
+		// Report Execution (classic RFC / XBP, no ZADT_VSP dependency)
+		"RunReport":          true, // Execute reports with params, capture spool
+		"RunReportAsync":     true, // Background report execution with polling
+		"GetAsyncResult":     true, // Retrieve async task results
+		"GetReportJobStatus": true, // Check a scheduled job's status/spool later
+
+		// Report metadata / text elements (via ZADT_VSP WebSocket — no RFC equivalent)
+		"GetVariants":     true, // List report variants
 		"GetTextElements": true, // Get program text elements
 		"SetTextElements": true, // Set program text elements
 

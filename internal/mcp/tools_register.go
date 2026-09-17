@@ -2275,32 +2275,29 @@ func (s *Server) registerGitTools(shouldRegister func(string) bool) {
 func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 	if shouldRegister("RunReport") {
 		s.mcpServer.AddTool(mcp.NewTool("RunReport",
-			mcp.WithDescription("Execute an ABAP selection-screen report with parameters or variant. Runs as background job and returns spool output. Requires ZADT_VSP WebSocket handler deployed."),
+			mcp.WithDescription("Execute an ABAP selection-screen report with parameters. Schedules the report as a background job over classic RFC (XBP) and returns its spool output once finished, or its status if it is still running after wait_seconds. No variant support (RFC has no way to resolve one) and no ZADT_VSP dependency."),
 			mcp.WithString("report",
 				mcp.Description("Report program name (e.g., 'RFITEMGL', 'ZREPORT_TEST')"),
 				mcp.Required(),
 			),
-			mcp.WithString("variant",
-				mcp.Description("Variant name to use for selection screen (optional)"),
-			),
 			mcp.WithString("params",
-				mcp.Description("JSON object with selection screen parameters (e.g., '{\"P_BUKRS\":\"1000\",\"S_KUNNR\":{\"SIGN\":\"I\",\"OPTION\":\"EQ\",\"LOW\":\"0000001000\"}}'). Keys are parameter names."),
+				mcp.Description("Selection-screen parameters, in one of two forms: a flat object for simple EQ values (e.g. '{\"P_BUKRS\":\"1000\"}'), or an array for select-options with a range (e.g. '[{\"name\":\"S_WERKS\",\"option\":\"BT\",\"low\":\"1000\",\"high\":\"2000\"}]', fields: name, kind (\"P\"|\"S\", default P), sign (\"I\"|\"E\", default I), option (\"EQ\"|\"BT\"|\"CP\"|…, default EQ), low, high)."),
+			),
+			mcp.WithNumber("wait_seconds",
+				mcp.Description("How long to wait for the job to finish before returning its current status instead of its spool. Default 30, capped at 120."),
 			),
 		), s.handleRunReport)
 	}
 
 	if shouldRegister("RunReportAsync") {
 		s.mcpServer.AddTool(mcp.NewTool("RunReportAsync",
-			mcp.WithDescription("Start report execution in background. Returns task_id immediately. Use GetAsyncResult to poll for completion. Useful for long-running reports that would timeout."),
+			mcp.WithDescription("Start report execution in background (classic RFC / XBP, no ZADT_VSP dependency). Returns task_id immediately. Use GetAsyncResult to poll for completion. Useful for long-running reports that would time out RunReport."),
 			mcp.WithString("report",
 				mcp.Description("Report program name"),
 				mcp.Required(),
 			),
-			mcp.WithString("variant",
-				mcp.Description("Variant name (optional)"),
-			),
 			mcp.WithString("params",
-				mcp.Description("JSON object with selection screen parameters"),
+				mcp.Description("Selection-screen parameters — same two forms as RunReport's params (flat object or select-option array)."),
 			),
 		), s.handleRunReportAsync)
 	}
@@ -2316,6 +2313,23 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 				mcp.Description("If true, block until task completes (max 60s). Default: false (poll)"),
 			),
 		), s.handleGetAsyncResult)
+	}
+
+	if shouldRegister("GetReportJobStatus") {
+		s.mcpServer.AddTool(mcp.NewTool("GetReportJobStatus",
+			mcp.WithDescription("Check the TBTCO status of a background job previously scheduled by RunReport (e.g. one still running after wait_seconds elapsed). Classic RFC, no ZADT_VSP dependency."),
+			mcp.WithString("job_name",
+				mcp.Description("Job name, from RunReport's output"),
+				mcp.Required(),
+			),
+			mcp.WithString("job_count",
+				mcp.Description("Job count (JOBCOUNT), from RunReport's output"),
+				mcp.Required(),
+			),
+			mcp.WithBoolean("include_spool",
+				mcp.Description("If true and the job has finished, also read and return its spool output. Default: false."),
+			),
+		), s.handleGetReportJobStatus)
 	}
 
 	if shouldRegister("GetVariants") {
