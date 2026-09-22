@@ -1986,6 +1986,35 @@ the code permanently — it is the fix, not a placeholder.
 
 ## Known Open Issues (Not Fixed)
 
+### `SAP_READ_ONLY` does not gate `CALL_RFC`/`RUN_REPORT`/`RUN_REPORT_ASYNC` — confirmed gap, not fixed (2026-09-22)
+- **Confirmed via grep** (`checkMutation|checkSafety|ReadOnly|Safety\(\)`) across `internal/mcp/handlers_debugger.go`
+  (`CALL_RFC`) and `internal/mcp/handlers_report.go` (`RUN_REPORT`/`RUN_REPORT_ASYNC`, even after the Fase 2
+  `pkg/saprfc`/XBP migration in 2an): **no matches in either file**. `pkg/adt/safety.go`'s `SafetyConfig.ReadOnly`
+  (bound from `SAP_READ_ONLY`) blocks ADT CRUD writes (`create`/`update`/`delete`/`activate`, via `checkMutation`/
+  `checkSafety` in `crud.go` and every `workflows_*.go`) — but these three handlers never call into that gate at
+  all. A report scheduled via `RUN_REPORT` can itself perform database writes; a function module invoked via
+  `CALL_RFC` can be any RFC-enabled BAPI, including write-capable ones. `SAP_READ_ONLY=true` alone does **not**
+  make a connection genuinely read-only against these two tools. Mode/group-based restriction (`SAP_MODE`,
+  `SAP_DISABLED_GROUPS`) doesn't close the gap either: `CallRFC`/`RunReport` are in no group at all in
+  hyperfocused mode (single universal tool, zero group gating at registration — `tools_register.go`'s
+  `if mode == "hyperfocused" { s.registerUniversalTool(); return }`), and are baked into focused mode's fixed
+  whitelist too (`tools_focused.go`).
+- **Discovered while setting up a second, dedicated read-only production MCP connection** (`abap-adt-prod`, a
+  separate entry in `claude_desktop_config.json` with `SAP_READ_ONLY=true`) for other project work (SAP
+  consulting, not this repo). The real backstop chosen there is **SAP-side authorization**, not this vsp flag:
+  the connection's SAP user has a dedicated restricted role with `ACTVT=03` (display) only on
+  `S_DEVELOP`/`S_TABU_DIS`/`S_TABU_NAM`/`S_ADT_RES`, and **no `S_RFC`** — so even though `CALL_RFC`/`RUN_REPORT`
+  aren't gated by vsp, SAP itself rejects any RFC call for that user regardless of what it's asked to do.
+  Live-verified: `ACTIVATE_MULTI` against that connection was correctly rejected by vsp's own safety gate
+  ("blocked by safety configuration"), confirming the ADT-level gate works as documented — the gap is specific
+  to the RFC-based handlers.
+- **Not fixed here** — a real fix would add a `checkSafety`/`checkMutation`-style gate to both handlers (at
+  minimum refusing `CALL_RFC` outright, or requiring an explicit allow-list of read-only RFC names, under
+  `SAP_READ_ONLY=true`; `RUN_REPORT` is inherently unsafe to allow at all under a read-only policy, since a
+  report's own ABAP logic can write regardless of any parameter passed to it). Left as a documented gap rather
+  than fixed opportunistically — deserves its own planned change (safety semantics, not a narrow bug fix), not
+  a drive-by patch during unrelated work.
+
 ### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
 - **Symptom**: PUT to `/sap/bc/adt/messageclass/{name}` with the live-confirmed correct namespace
   (`http://www.sap.com/adt/MessageClass`), root element (`mc:messageClass`), and literal `mc:`/`msg:` prefix
