@@ -2062,9 +2062,11 @@ the code permanently — it is the fix, not a placeholder.
   session language, although `GetMessageClassTexts` itself now honors the language); `WriteMessageClassTexts`'
   assumption that an empty description would overwrite the real one remains unconfirmed (only the
   non-overwrite was observed).
-- **Cleanup note**: a LOCK→PUT→UNLOCK→DELETE cycle on a message class was previously reported to leave `T100`/
-  `T100A` (`ES_MSGSI`) enqueues; not re-checked in this session (would need a temporary report to run
-  `ENQUEUE_READ`) — check SM12 if a later write reports "currently being edited".
+- **Orphan enqueues, checked live (2026-10-02)**: a LOCK→PUT→UNLOCK→DELETE cycle on a message class was
+  reported in September to leave `T100`/`T100A` (`ES_MSGSI`) enqueues. After this session's create / add /
+  translate / delete cycles plus the class delete, `CALL_RFC ENQUEUE_READ` (read-only, no object created)
+  found none for `ES_MSGSI`, none for the dev user, and a no-filter read returned only 3 unrelated system
+  locks — so that leak is not reproduced with the current code (note the post-delete UNLOCK from 2af).
 - Files: `pkg/adt/client.go`, `pkg/adt/crud.go`, `pkg/adt/i18n.go`, `pkg/adt/transport_choice.go`,
   `pkg/adt/workflows.go`, `pkg/adt/workflows_deploy.go`, `pkg/adt/workflows_edit.go`,
   `pkg/adt/workflows_source.go`, `pkg/adt/description.go`, `pkg/adt/textpool.go`, `internal/mcp/handlers_i18n.go`,
