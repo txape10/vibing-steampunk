@@ -512,7 +512,9 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
   These exercise the exact code paths this pass touched (`crud.go`'s `CreateTable` unlock-before-activation
   fix, `workflows_edit.go`'s already-covered path) end-to-end on the real system.
 
-### 2v. MSAG/SE91 message-class bugs — 4 fixed, 1 closed as a permanent known limitation (2026-09-08/09)
+### 2v. MSAG/SE91 message-class bugs — 4 fixed; the 5th ("permanent limitation") was a missing language, fixed in 2ao (2026-09-08/09)
+> **Correction (2026-10-02, see 2ao):** the "permanent known limitation" below turned out to be a missing
+> `adtcore:language` in the PUT body, plus a wrong delete element name. Both are fixed and live-verified.
 Four bugs in the `SAP(action="edit"/"read", target="MSAG ...")` path fixed and code-reviewed this session:
 dead/incorrect MCP tool schema for `WriteMessageClassTexts`, wrong XML namespace on read
 (`http://www.sap.com/adt/MessageClass`, not `/adt/mc`), missing `edit MSAG` routing, and no delete-message
@@ -1984,6 +1986,91 @@ the code permanently — it is the fix, not a placeholder.
   new `GetReportJobStatus` tool), `internal/mcp/tools_focused.go` (whitelist), `pkg/adt/reports.go`
   (trimmed).
 
+### 2ao. Message class (MSAG/SE91) writes — language on the PUT, `corrNr` on the LOCK, delete element, language on the GETs (2026-10-02)
+- **Ported from upstream**: [PR #270](https://github.com/oisee/vibing-steampunk/pull/270) (message class
+  creation/text persistence with language) and [PR #256](https://github.com/oisee/vibing-steampunk/pull/256)
+  (`corrNr` on the LOCK request). Planned together (planner), scope "B acotada" chosen by the user:
+  Fases 1+2+3, Fase 3 as its own commit.
+- **Root cause of 2v's "permanent limitation"**: `PUT /sap/bc/adt/messageclass/{name}` without
+  `adtcore:language` is stored by `CL_ADT_MC_RES_CONTROLLER=>DO_UPDATE` in `T100` with a blank `SPRSL`.
+  `SPRSL` is part of the key (MANDT+ARBGB+MSGNR+SPRSL), so a blank row and a correct `S` row coexist for
+  the same message; a read in the logon language never sees the blank one, which looked exactly like "the
+  PUT persists nothing". The `sap-language` header is ignored by this resource.
+- **Fase 1 — language** (`pkg/adt/client.go`, `pkg/adt/i18n.go`, `pkg/adt/crud.go`): `messageClassWriteBody`
+  carries `adtcore:language`; `newMessageClassWriteBody(name, description, language)` takes it as a required
+  argument. `WriteMessageClassTexts` defaults an empty language to the session's; `CreateMessageClass`'s
+  initial-messages PUT carries it too. New local validation before any lock:
+  `validateMessageClassNumber` (exactly 3 digits — **rejected, not padded**, so the verifier compares what the
+  caller asked for), `validateMessageClassLanguage` (2-letter ISO that `spras()` can map — see below),
+  `validateMessageClassMessages` (also ≤73 characters, the T100 text width).
+- **Fase 2 — `corrNr` on the LOCK** (`LockObject(ctx, url, accessMode, corrNr ...string)` in `crud.go`):
+  the first corrNr goes on the LOCK query; `checkTransportableEdit` runs **before** the LOCK so a
+  disallowed transport never reaches SAP. New `(*TransportChoice).lockCorrNr(supplied)` returns the supplied
+  transport, else the plan's chosen one (empty if the plan is nil or failed). `WriteMessageClassTextsAutoLock`
+  now runs `gateAndMark` → `planTransport` → LOCK with that transport → `resolveWriteTransportFor`, exactly
+  like the other auto-lock workflows (issue #91 discipline: nothing stateless between LOCK and PUT).
+- **Fase 3 — every other LOCK site** passes `trPlan.lockCorrNr(...)`: `WriteDataElementLabels`, `WriteProgram`/
+  `WriteInclude`/`WriteClass`, `UpdateFromFileWithOptions`, `EditSourceWithOptions`, the `workflows_source.go`
+  branches (lines of the 5 LOCK calls), `SetDescription`, `WriteTextPool`. Done as a separate commit-sized
+  change on purpose: it touches the LOCK of every write.
+- **MCP**: `WriteMessageClassTexts`'s `lock_handle` is now **optional** — without it the handler calls
+  `WriteMessageClassTextsAutoLock`; the tool description and the `transport` description were updated.
+- **Found only by live testing — two more bugs of our own, both fixed in the same change:**
+  - **Delete element**: the PUT used `mc:deletedmessage` (singular, a guess from the upstream issue text).
+    The transformation behind the controller, `ST_ADT_MESSAGE_CLASS`, reads `mc:deletedmessages`
+    (**plural**) with attributes `mc:msgno`/`mc:msgtext`/`mc:corrno`/`mc:lockhandle`; the singular was ignored
+    silently (`tt:extensible="deep"`), so `delete_numbers` never deleted anything. Fixed in
+    `messageClassDeletedMessage`/`messageClassWriteBody.Deleted`; only `msgno` is sent. Verified live: after
+    the fix the delete removes the message in the language written and leaves the other language's row.
+  - **GET language**: `CL_ADT_MC_RES_CONTROLLER=>DO_GET` also ignores `sap-language`; it takes a `language`
+    URI query parameter (`sylangu`, the 1-character SAP code) and answers in the session language without
+    it. So writing a language other than the session's (EN while logged on in ES) made
+    `verifyMessageClassWrite` read the session-language text back and report "the write did not actually take
+    effect" although `T100` had the new row. New `messageClassReadQuery(lang)` (uses the existing `spras()`)
+    is applied to `GetMessageClassTexts`, to the verifier, and to the description-echo GET inside
+    `WriteMessageClassTexts`; that last one retries without `language` **only on a 404** (a language with no
+    row yet — read from the controller's `exists( )` check, not confirmed live) and sends no description on
+    any other error, so the session-language description is never echoed into another language's row.
+    Because `spras()` guesses the first letter for an unmapped ISO code (`ET`→`E`, `LV`→`L`…),
+    `validateMessageClassLanguage` refuses any code absent from `isoToSAPLang`.
+- **Tests**: `pkg/adt/lock_corrnr_test.go` (new, ~25 tests) — corrNr on the LOCK (with/without/policy refusal
+  before the LOCK), `lockCorrNr` table, the language in both PUT paths and in `CreateMessageClass`, the
+  verifier reading the language written, the description echo and its 404-only fallback, the plural delete
+  element and a delete SAP ignored still being reported, reads inside the lock window being stateful, language
+  validation, `GetMessageClassTexts` sending the query; plus `i18n_test.go` updates. The language-GET tests
+  were mutation-checked (they fail if `messageClassReadQuery` returns nothing).
+- **Code review**: first pass APPROVE (0 CRITICAL/HIGH); second pass on the live-found fixes APPROVE (0
+  CRITICAL/HIGH, 2 MEDIUM — retry on any error, `spras()` guessing for unmapped codes — both fixed, plus test
+  gaps closed).
+- **Verified live (2026-10-02)** on a throwaway `$TMP` class (language ES): create with message 001 → `T100`
+  row `SPRSL='S'`; add 002 via `edit MSAG` (auto-lock) → `S`, 001 untouched; translate 001 to EN → new row
+  `E`, `S` row unchanged, no false verifier error; delete 002 with `delete_numbers` → gone, 001 still in `S`
+  and `E`; `EDITSOURCE` regression on a `$TMP` program (change and revert) → fine. The class was then deleted.
+  Pre-existing blank-`SPRSL` rows in two customer message classes are old leftovers (they predate this fix and
+  the user cleans them in SE91) — the fix does not write new ones.
+- **NOT verified live**: that SAP honors `corrNr` on the LOCK for a **transportable** object without side
+  effects (needs a transportable-package object and a user-chosen order; the doc comment on `LockObject` says
+  so), and that the response-cache `T100` "stable table" rule never served a stale verification query (queries
+  after a write were varied/spaced; use a differently-worded SQL to be safe — with `VSP_CACHE` off this does not
+  arise).
+- **Open decision, not made**: when `planTransport` fails to create a request (`plan.Err != nil`),
+  `lockCorrNr` sends the LOCK with no `corrNr`, so SAP may autogenerate one — the golden-rule scenario the
+  rest of the transport-choice design exists to avoid. Pre-existing in kind (it was already the case for the
+  write) but now also on the LOCK. A guard before the LOCK in the affected sites would close it; left for the
+  user's call.
+- **Known small gaps**: the `read MSAG` MCP route does not forward a `language` parameter (it answers in the
+  session language, although `GetMessageClassTexts` itself now honors the language); `WriteMessageClassTexts`'
+  assumption that an empty description would overwrite the real one remains unconfirmed (only the
+  non-overwrite was observed).
+- **Cleanup note**: a LOCK→PUT→UNLOCK→DELETE cycle on a message class was previously reported to leave `T100`/
+  `T100A` (`ES_MSGSI`) enqueues; not re-checked in this session (would need a temporary report to run
+  `ENQUEUE_READ`) — check SM12 if a later write reports "currently being edited".
+- Files: `pkg/adt/client.go`, `pkg/adt/crud.go`, `pkg/adt/i18n.go`, `pkg/adt/transport_choice.go`,
+  `pkg/adt/workflows.go`, `pkg/adt/workflows_deploy.go`, `pkg/adt/workflows_edit.go`,
+  `pkg/adt/workflows_source.go`, `pkg/adt/description.go`, `pkg/adt/textpool.go`, `internal/mcp/handlers_i18n.go`,
+  `internal/mcp/tools_register.go`, `pkg/adt/i18n_test.go`, `pkg/adt/lock_corrnr_test.go` (new).
+- `go build ./...` clean; `go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)` green.
+
 ## Known Open Issues (Not Fixed)
 
 ### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused, not fixable in vsp alone (2026-09-22)
@@ -2070,7 +2157,12 @@ the code permanently — it is the fix, not a placeholder.
   than fixed opportunistically — deserves its own planned change (safety semantics, not a narrow bug fix), not
   a drive-by patch during unrelated work.
 
-### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — closed as a known limitation, not under active investigation (2026-09-09)
+### `WriteMessageClassTexts`/`CreateMessageClass` — message text does not persist — RESOLVED, see 2ao (2026-10-02; was "closed as a known limitation" 2026-09-09)
+> **Resolved.** The root cause was never the body shape or a discarded body: the PUT carried no
+> `adtcore:language`, and SAP ignores the `sap-language` header on this resource, so rows landed in `T100`
+> with a blank `SPRSL` (invisible to a read in the logon language). Fixed and live-verified in 2ao.
+> Everything below is the original, superseded write-up, kept for history — its "do not re-attempt"
+> advice no longer applies, and `docs/message-class-write-investigation.md` is marked resolved.
 - **Symptom**: PUT to `/sap/bc/adt/messageclass/{name}` with the live-confirmed correct namespace
   (`http://www.sap.com/adt/MessageClass`), root element (`mc:messageClass`), and literal `mc:`/`msg:` prefix
   technique returns `200 OK`, but the message text is never actually saved — an immediate read-back (even

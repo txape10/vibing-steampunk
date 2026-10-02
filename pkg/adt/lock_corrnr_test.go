@@ -376,6 +376,122 @@ func TestWriteMessageClassTextsAutoLock_RejectsInvalidMessagesBeforeLock(t *test
 	}
 }
 
+// --- Phase 3: the write workflows that plan a transport before the lock ---
+
+// WriteProgram names no request: the plan picks one before the lock, and the
+// LOCK must carry it — the write that follows takes the plan's request through
+// resolveWriteTransportFor.
+func TestWriteProgram_PlannedTransportGoesOnLock(t *testing.T) {
+	checkXML := transportCheckXML(true, "ZDEMO_PKG", "ZDEMO_PROBE",
+		checkCandidate{"TR-A", "TESTUSER", "feature A", "D"})
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "cts/transportchecks"):
+			_, _ = io.WriteString(w, checkXML)
+		case strings.Contains(r.URL.Path, "/checkruns"):
+			w.Header().Set("Content-Type", "application/vnd.sap.adt.checkmessages+xml")
+			_, _ = io.WriteString(w, testEmptyCheckXML)
+		case lockHandler(w, r):
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithAllowTransportableEdits())
+
+	if _, err := client.WriteProgram(context.Background(), "ZDEMO_PROBE", "REPORT zdemo_probe.\n", ""); err != nil {
+		t.Fatalf("WriteProgram: %v", err)
+	}
+
+	calls := rec.snapshot()
+	lockAt := indexOfCall(calls, isLock)
+	putAt := indexOfCall(calls, isSourcePut)
+	if lockAt < 0 || putAt < lockAt {
+		t.Fatalf("expected a LOCK followed by a source PUT; trace:\n%v", calls)
+	}
+	if got := calls[lockAt].query.Get("corrNr"); got != "TR-A" {
+		t.Errorf("LOCK corrNr = %q, want the planned TR-A", got)
+	}
+	if got := calls[putAt].query.Get("corrNr"); got != "TR-A" {
+		t.Errorf("source PUT corrNr = %q, want TR-A", got)
+	}
+	assertWindowStateful(t, calls, lockAt, putAt)
+}
+
+// A transport the caller names goes on the LOCK as given, not replaced by a plan.
+func TestWriteProgram_NamedTransportGoesOnLock(t *testing.T) {
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/checkruns"):
+			w.Header().Set("Content-Type", "application/vnd.sap.adt.checkmessages+xml")
+			_, _ = io.WriteString(w, testEmptyCheckXML)
+		case lockHandler(w, r):
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithAllowTransportableEdits())
+
+	if _, err := client.WriteProgram(context.Background(), "ZDEMO_PROBE", "REPORT zdemo_probe.\n", "TR-NAMED"); err != nil {
+		t.Fatalf("WriteProgram: %v", err)
+	}
+
+	calls := rec.snapshot()
+	lockAt := indexOfCall(calls, isLock)
+	if lockAt < 0 {
+		t.Fatalf("expected a LOCK; trace:\n%v", calls)
+	}
+	if got := calls[lockAt].query.Get("corrNr"); got != "TR-NAMED" {
+		t.Errorf("LOCK corrNr = %q, want TR-NAMED", got)
+	}
+	if indexOfCall(calls, func(c wireCall) bool { return strings.Contains(c.path, "cts/transportchecks") }) >= 0 {
+		t.Error("a transport named by the caller must not trigger a transport check")
+	}
+}
+
+// EditSourceWithOptions plans its transport before the lock like the other
+// workflows; its LOCK has to carry the planned request too.
+func TestEditSource_PlannedTransportGoesOnLock(t *testing.T) {
+	checkXML := transportCheckXML(true, "ZDEMO_PKG", "ZDEMO_EDIT",
+		checkCandidate{"TR-A", "TESTUSER", "feature A", "D"})
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "cts/transportchecks"):
+			_, _ = io.WriteString(w, checkXML)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/source/main"):
+			_, _ = io.WriteString(w, "REPORT zdemo_edit.\nWRITE 'old'.\n")
+		case lockHandler(w, r):
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}, WithAllowTransportableEdits())
+
+	result, err := client.EditSourceWithOptions(context.Background(),
+		"/sap/bc/adt/programs/programs/ZDEMO_EDIT", "WRITE 'old'.", "WRITE 'new'.",
+		&EditSourceOptions{SyntaxCheck: false})
+	if err != nil {
+		t.Fatalf("EditSourceWithOptions: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("edit did not succeed: %s", result.Message)
+	}
+
+	calls := rec.snapshot()
+	lockAt := indexOfCall(calls, isLock)
+	putAt := indexOfCall(calls, isSourcePut)
+	if lockAt < 0 || putAt < lockAt {
+		t.Fatalf("expected a LOCK followed by a source PUT; trace:\n%v", calls)
+	}
+	if got := calls[lockAt].query.Get("corrNr"); got != "TR-A" {
+		t.Errorf("LOCK corrNr = %q, want the planned TR-A", got)
+	}
+	if got := calls[putAt].query.Get("corrNr"); got != "TR-A" {
+		t.Errorf("source PUT corrNr = %q, want TR-A", got)
+	}
+}
+
 // --- Message class: the language of the GETs, and the delete element ---
 
 // msagGetXML is a message class GET answer. SAP ignores the sap-language

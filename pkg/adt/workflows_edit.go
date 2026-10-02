@@ -382,7 +382,7 @@ func (c *Client) EditSourceWithOptions(ctx context.Context, objectURL, oldString
 	// editor would (PR #203). Runs before the lock — stateless, must not
 	// sit between LOCK and PUT (issue #91).
 	trPlan := c.planTransport(ctx, opts.Transport, lockURL, "")
-	lockResult, err := c.LockObject(ctx, lockURL, "MODIFY")
+	lockResult, err := c.LockObject(ctx, lockURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil

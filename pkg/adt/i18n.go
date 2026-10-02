@@ -635,7 +635,7 @@ func (c *Client) WriteDataElementLabels(ctx context.Context, name, lang string, 
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
 
 	var lockResult *LockResult
-	lockResult, err = c.LockObject(ctx, objectURL, "MODIFY")
+	lockResult, err = c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
 	if err != nil {
 		return fmt.Errorf("failed to lock data element %s: %w", name, err)
 	}
