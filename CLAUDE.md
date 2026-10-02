@@ -1986,6 +1986,61 @@ the code permanently — it is the fix, not a placeholder.
 
 ## Known Open Issues (Not Fixed)
 
+### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused, not fixable in vsp alone (2026-09-22)
+- **Symptom**: a `COUNT(*)` over a 2-table JOIN with 6 WHERE conditions returns an identical result
+  with and without the 6th condition (`AND tv~intercentro <> 'X'`, `558383` both ways) — no error, no
+  warning, just a silently wrong result. Two other, more visible failure modes were seen for other
+  query shapes near the same length: a misleading `"Solo está permitida una instrucción SELECT"` and
+  a misleading `"Boolean expression was expected"`/`"INTO" is invalid`.
+- **Root cause, confirmed live with a single unbroken breakpoint chain, byte length measured via
+  Detailanzeige (not the classic debugger's 255-char quick-view, which is a separate, real but
+  irrelevant-here display cap — SAP KBA 2803361)**: SAP's own `CL_ADT_DP_FREESTYLE_RES=>POST` (the
+  ADT REST handler behind `/sap/bc/adt/datapreview/freestyle`) does
+  ```abap
+  request->get_body_data( EXPORTING content_handler = NEW cl_adt_rest_plain_text_handler( )
+                           IMPORTING data = lt_plain_query ).
+  lv_query = cl_oo_section_source=>convert_table_to_string( p_source = CONV #( lt_plain_query ) ).
+  ```
+  `lt_plain_query` is `TYPE sadt_srl_plain_text` (`TABLE OF STRING`, unbounded per row).
+  `CONVERT_TABLE_TO_STRING` requires `P_SOURCE TYPE SEO_SECTION_SOURCE` — a table whose row type
+  (`SEO_SECTION_SOURCE_LINE`) is `CHAR` length **255** (confirmed via DDIC read). The `CONV #(...)`
+  performs an implicit table-type conversion; a STRING→CHAR255 row assignment truncates silently, no
+  exception, `sy-subrc` untouched. A single-line query (no embedded `CR`/`LF`, exactly how vsp's own
+  `runFreestyleQuery` sends it — see below) becomes one oversized row that gets cut at 255 chars
+  **before any of the SQL-parsing classes ever see it** (`CL_ADT_DP_OPEN_SQL_HANDLER`,
+  `CL_ADT_DATAPREVIEW_UTIL`). Verified end to end in one breakpoint stop: raw HTTP body bytes
+  (`BIN_DATA` in `CL_ADT_REST_PLAIN_TEXT_HANDLER=>DESERIALIZE`) arrive complete (`XString{275}`,
+  `intercentro` included); `LT_PLAIN_QUERY[1]` right before the `CONV #()` still has the full 275
+  chars; `LV_QUERY` right after has 257 (255 truncated + the 2-char `CR_LF` that
+  `CONVERT_TABLE_TO_STRING` appends), missing `intercentro` entirely.
+- **The bug was introduced by SAP Note 2807133** ("Fix incorrect crlf and lf handling in ADT SQL
+  Console", `BC-DWB-AIE-DP`, 2019, `SAP_BASIS 750→754`) — confirmed reading its own diff: the code it
+  *replaced* was `lv_query = request->get_inner_rest_request( )->get_entity( )->get_string_data( ).`,
+  a direct unbounded STRING read with no truncation risk at all. The note fixed a real Mac CR/LF
+  issue but introduced this length regression as a side effect. This project's system
+  (`SAP_BASIS 758`) inherits the note's code by release lineage — it isn't "missing" the note, the
+  note's own fix *is* the bug. No later SAP note fixing this regression was found (checked the
+  Support Portal's own listing of notes touching `CL_ADT_DP_FREESTYLE_RES POST`: 3807261, 2051046,
+  2977495, 2347886 — none address query length/truncation) and no GitHub issue/PR/comment anywhere in
+  `oisee/vibing-steampunk`, its forks, or `marcellourbani/abap-adt-api` (the reference TS client, which
+  sends the same unsplit raw body) mentions it either.
+- **Workaround (server-side, always available, no vsp change needed)**: send the SQL with a real line
+  break (`\n`) before any line would exceed 255 characters — `sadt_srl_plain_text`/
+  `seo_section_source` truncate **per line**, so a query broken into short-enough lines survives
+  intact. Verified live, repeatedly: the exact 275-char single-line query above gives the wrong,
+  unchanged `558383`; the same query with one `\n` inserted before the 6th condition gives the
+  correct, different `253952`. Documented for users at `~/.claude/sap-mcp-servers.md` ("Cómo escribir
+  consultas largas").
+- **Not fixed in vsp itself, and no user-facing SAP incident opened (explicit user decision)** — this
+  is purely a SAP-side ABAP defect; vsp's `runFreestyleQuery` (`pkg/adt/client.go:1301`) already sends
+  the caller's SQL byte-for-byte unmodified (`Body: []byte(sqlQuery)`), which is correct behavior — it
+  doesn't corrupt anything itself. A **possible future improvement, not started, not requested**: vsp
+  could defensively auto-insert a line break before character 255 in any single-line query passed to
+  `runFreestyleQuery`/`GetTableContents`'s freestyle path, protecting every caller (including this
+  MCP's own `action="query", target="SQL"`) from ever hitting this SAP bug without needing to know
+  about it — would need the same "break before a keyword, never mid-identifier/literal" care as the
+  manual workaround above.
+
 ### `SAP_READ_ONLY` does not gate `CALL_RFC`/`RUN_REPORT`/`RUN_REPORT_ASYNC` — confirmed gap, not fixed (2026-09-22)
 - **Confirmed via grep** (`checkMutation|checkSafety|ReadOnly|Safety\(\)`) across `internal/mcp/handlers_debugger.go`
   (`CALL_RFC`) and `internal/mcp/handlers_report.go` (`RUN_REPORT`/`RUN_REPORT_ASYNC`, even after the Fase 2
