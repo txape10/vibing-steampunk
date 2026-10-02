@@ -1010,16 +1010,14 @@ type messageClassWriteMessage struct {
 // this separate collection on the PUT body — a number simply absent from
 // Messages is left untouched, not deleted (see WriteMessageClassTexts).
 //
-// The element name "deletedmessage" and its lowercase casing are UNVERIFIED
-// against a live SAP system — carried over from the upstream issue's
-// description of CL_ADT_MC_RES_CONTROLLER=>DO_UPDATE (tt_deletedmessage), not
-// read directly off this project's own system, unlike the messages shape
-// above. Delete support does not exist yet in upstream's own fix either
-// (issue #161, still open there) — this is this fork's own addition, still
-// resting on the same guess it always was. The namespace-qualified msgno
-// attribute follows the messages convention by analogy, since an unqualified
-// one is now confirmed to read as absent. Confirm the element name itself
-// with a live PUT before relying on this to actually delete a message.
+// The element is "mc:deletedmessages" — PLURAL. Read directly off this
+// system's ST_ADT_MESSAGE_CLASS (the simple transformation behind
+// CL_ADT_MC_RES_CONTROLLER=>DO_UPDATE): it maps the tt_deletedmessage table
+// to <mc:deletedmessages mc:msgno=... mc:msgtext=... mc:corrno=...
+// mc:lockhandle=...>. An earlier version of this type used the singular
+// "deletedmessage", which the transformation ignores without any error
+// (tt:extensible="deep"), so delete_numbers silently deleted nothing. Only
+// msgno is sent; DO_UPDATE deletes with the PUT body's adtcore:language.
 type messageClassDeletedMessage struct {
 	Number string `xml:"mc:msgno,attr"`
 }
@@ -1044,39 +1042,45 @@ type MessageClass struct {
 // body. The root element/namespace and the adtcore:/mc: prefixes are
 // live-verified as the shape ADT's message class resource expects (this
 // project's own SAP system, 2026-09-08, and independently upstream via a
-// live GET, per the doc comment on messageClassWriteMessage). Whether this
-// exact body actually persists a message on PUT is NOT yet confirmed by
-// either project — see WriteMessageClassTexts's doc comment for the
-// live-reproduced silent-no-op this is meant to fix, and
-// verifyMessageClassWrite for the safety net that surfaces it as an error
-// instead of a false "success" until it is.
+// live GET, per the doc comment on messageClassWriteMessage).
+//
+// Language carries adtcore:language on the PUT. Upstream (oisee PR #270)
+// reports that without it SAP ignores the sap-language header this PUT also
+// sends (OverrideLanguage) and stores the message in T100 with an empty
+// SPRSL; empty-SPRSL rows next to correct ones were found on this system.
+// Confirmed live on this system (2026-10-02): with the attribute, create, add
+// and translate land in T100 with the right SPRSL; verifyMessageClassWrite
+// stays active as a permanent safety net.
 //
 // It is a separate type from MessageClass on purpose: giving MessageClass
 // itself this same strict, namespaced shape would make Unmarshal
 // correspondingly strict and able to reject a GET response that doesn't
 // match exactly, regressing the two existing, already-working read paths
-// that share the type (GetMessageClass, GetMessageClassTexts). The
-// deletedmessage element name is the one piece still unverified — see
-// messageClassDeletedMessage.
+// that share the type (GetMessageClass, GetMessageClassTexts).
 type messageClassWriteBody struct {
 	XMLName      xml.Name                     `xml:"mc:messageClass"`
 	XMLNSmc      string                       `xml:"xmlns:mc,attr"`
 	XMLNSadtcore string                       `xml:"xmlns:adtcore,attr"`
 	Name         string                       `xml:"adtcore:name,attr"`
+	Language     string                       `xml:"adtcore:language,attr,omitempty"`
 	Description  string                       `xml:"adtcore:description,attr,omitempty"`
 	Messages     []messageClassWriteMessage   `xml:"mc:messages"`
-	Deleted      []messageClassDeletedMessage `xml:"mc:deletedmessage,omitempty"`
+	Deleted      []messageClassDeletedMessage `xml:"mc:deletedmessages,omitempty"`
 }
 
 // newMessageClassWriteBody fills in the two xmlns attributes so every call
 // site builds a valid body without repeating the namespace constants —
 // forgetting them silently produces empty xmlns:mc=""/xmlns:adtcore=""
 // attributes rather than a compile error, since Go can't require they be set.
-func newMessageClassWriteBody(name, description string) messageClassWriteBody {
+// language is required: see messageClassWriteBody's doc comment for why
+// omitting it is the defect this signature exists to make impossible to
+// repeat.
+func newMessageClassWriteBody(name, description, language string) messageClassWriteBody {
 	return messageClassWriteBody{
 		XMLNSmc:      msagNS,
 		XMLNSadtcore: adtcoreNS,
 		Name:         name,
+		Language:     language,
 		Description:  description,
 	}
 }

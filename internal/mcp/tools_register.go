@@ -2602,7 +2602,7 @@ func (s *Server) registerI18NTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("WriteMessageClassTexts") {
 		s.mcpServer.AddTool(mcp.NewTool("WriteMessageClassTexts",
-			mcp.WithDescription("Create, update or delete message class texts in a specific language. texts is an upsert by message number (a number omitted from both texts and delete_numbers is left unchanged); delete_numbers removes messages by number in the same call. Requires a lock handle from LockObject. Use for translating or editing message class entries."),
+			mcp.WithDescription("Create, update or delete message class texts in a specific language. texts is an upsert by message number (a number omitted from both texts and delete_numbers is left unchanged); delete_numbers removes messages by number in the same call. Takes and releases its own lock unless a lock handle from LockObject is given. Use for translating or editing message class entries."),
 			mcp.WithString("name",
 				mcp.Required(),
 				mcp.Description("Message class name"),
@@ -2627,8 +2627,7 @@ func (s *Server) registerI18NTools(shouldRegister func(string) bool) {
 				mcp.Items(map[string]interface{}{"type": "string"}),
 			),
 			mcp.WithString("lock_handle",
-				mcp.Required(),
-				mcp.Description("Lock handle from LockObject"),
+				mcp.Description("Optional lock handle. Omit it and this call takes and releases its own lock."),
 			),
 			mcp.WithString("transport",
 				mcp.Description("Transport request number (optional for $TMP objects)"),

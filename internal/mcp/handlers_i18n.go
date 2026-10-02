@@ -96,10 +96,11 @@ func (s *Server) handleWriteMessageClassTexts(ctx context.Context, request mcp.C
 		return newToolResultError("language is required"), nil
 	}
 
-	lockHandle, ok := request.GetArguments()["lock_handle"].(string)
-	if !ok || lockHandle == "" {
-		return newToolResultError("lock_handle is required"), nil
-	}
+	// Optional. Left empty, the write takes and releases its own lock
+	// (WriteMessageClassTextsAutoLock) — a handle from a separate MCP call
+	// cannot be reused here anyway (issue #169: each tool call is its own
+	// server-side session).
+	lockHandle, _ := request.GetArguments()["lock_handle"].(string)
 
 	transport, _ := request.GetArguments()["transport"].(string)
 
@@ -130,6 +131,13 @@ func (s *Server) handleWriteMessageClassTexts(ctx context.Context, request mcp.C
 
 	if len(texts) == 0 && len(deleteNumbers) == 0 {
 		return newToolResultError("at least one of texts or delete_numbers is required"), nil
+	}
+
+	if lockHandle == "" {
+		if err := s.adtClient.WriteMessageClassTextsAutoLock(ctx, name, lang, texts, deleteNumbers, transport); err != nil {
+			return newToolResultError(fmt.Sprintf("WriteMessageClassTexts failed: %v", err)), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("Message class %s texts updated successfully in language %s.", name, lang)), nil
 	}
 
 	err := s.adtClient.WriteMessageClassTexts(ctx, name, lang, texts, deleteNumbers, lockHandle, transport)

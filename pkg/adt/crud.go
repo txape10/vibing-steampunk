@@ -26,12 +26,28 @@ type LockResult struct {
 // LockObject acquires an edit lock on an ABAP object.
 // objectURL is the ADT URL of the object (e.g., "/sap/bc/adt/programs/programs/ZTEST")
 // accessMode is typically "MODIFY" for editing
-func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode string) (*LockResult, error) {
+//
+// corrNr is the transport request (or task) the edit goes under. Sent on the
+// LOCK for parity with upstream PR #256 (the ADT API takes it there); not yet
+// verified live against this system. Variadic so call sites without a
+// transport stay valid; only the first value is read.
+func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode string, corrNr ...string) (*LockResult, error) {
+	transport := ""
+	if len(corrNr) > 0 {
+		transport = corrNr[0]
+	}
+
 	// Safety check - only check for MODIFY locks, READ locks are safe
 	if accessMode == "" || accessMode == "MODIFY" {
 		if err := c.checkSafety(OpLock, "LockObject"); err != nil {
 			return nil, err
 		}
+	}
+
+	// The transport goes out on the LOCK, so the transport policy is checked
+	// here, before SAP sees it, and not only in the write that follows.
+	if err := c.checkTransportableEdit(transport, "LockObject"); err != nil {
+		return nil, err
 	}
 
 	if accessMode == "" {
@@ -41,6 +57,9 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 	params := url.Values{}
 	params.Set("_action", "LOCK")
 	params.Set("accessMode", accessMode)
+	if transport != "" {
+		params.Set("corrNr", transport)
+	}
 
 	resp, err := c.transport.Request(ctx, objectURL, &RequestOptions{
 		Method:   http.MethodPost,
@@ -2456,6 +2475,15 @@ func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClass
 		opts.Language = "ES"
 	}
 	opts.Language = strings.ToUpper(opts.Language)
+	if err := validateMessageClassLanguage(opts.Language); err != nil {
+		return err
+	}
+
+	// Validated before the shell is even created — a malformed initial
+	// message should never leave a half-created message class behind.
+	if err := validateMessageClassMessages(opts.Messages, nil); err != nil {
+		return err
+	}
 
 	// Mutation gate: package + transport policy check. Package (not
 	// ObjectURL) is used deliberately — the object does not exist yet, so
@@ -2519,7 +2547,10 @@ func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClass
 
 	// 2. If initial messages provided: lock → PUT → unlock
 	if len(opts.Messages) > 0 {
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+		// opts.Transport is either what the caller named or what the plan
+		// above chose — the request the shell was created under, so the LOCK
+		// and this PUT are never bound to two different requests.
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
 		if err != nil {
 			return fmt.Errorf("locking for initial messages: %w", err)
 		}
@@ -2530,7 +2561,7 @@ func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClass
 		// endpoint actually requires. Pass the real description (not "")
 		// so this PUT doesn't blank out what the shell POST just set —
 		// same risk WriteMessageClassTexts guards against for updates.
-		mc := newMessageClassWriteBody(opts.Name, opts.Description)
+		mc := newMessageClassWriteBody(opts.Name, opts.Description, opts.Language)
 		for _, m := range opts.Messages {
 			mc.Messages = append(mc.Messages, messageClassWriteMessage{Number: m.Number, Text: m.Text})
 		}

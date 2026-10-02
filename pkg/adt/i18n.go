@@ -3,11 +3,13 @@ package adt
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // --- i18n Types ---
@@ -186,6 +188,19 @@ func (c *Client) getDataElementDoc(ctx context.Context, name, lang string, state
 	return doc, resp.Body, nil
 }
 
+// messageClassReadQuery selects the language a message class GET returns.
+// CL_ADT_MC_RES_CONTROLLER=>DO_GET ignores the sap-language header: without
+// the `language` URI query parameter (type sylangu, i.e. the 1-character SAP
+// code) it answers in the session language, so reading back a write in any
+// other language would show the wrong text. An empty lang sends nothing and
+// keeps the session-language behaviour.
+func messageClassReadQuery(lang string) url.Values {
+	if s := spras(lang); s != "" {
+		return url.Values{"language": {s}}
+	}
+	return nil
+}
+
 // GetMessageClassTexts retrieves all messages of a message class in a specific language.
 func (c *Client) GetMessageClassTexts(ctx context.Context, name, lang string) ([]MessageClassMessage, error) {
 	if err := c.checkSafety(OpRead, "GetMessageClassTexts"); err != nil {
@@ -198,6 +213,7 @@ func (c *Client) GetMessageClassTexts(ctx context.Context, name, lang string) ([
 	path := fmt.Sprintf("/sap/bc/adt/messageclass/%s", url.PathEscape(strings.ToLower(name)))
 	resp, err := c.transport.Request(ctx, path, &RequestOptions{
 		Method:           http.MethodGet,
+		Query:            messageClassReadQuery(lang),
 		Accept:           "application/vnd.sap.adt.mc.messageclass+xml",
 		OverrideLanguage: lang,
 	})
@@ -213,20 +229,70 @@ func (c *Client) GetMessageClassTexts(ctx context.Context, name, lang string) ([
 	return mc.Messages, nil
 }
 
+// messageClassNumberRe matches a T100 message number: exactly 3 digits.
+var messageClassNumberRe = regexp.MustCompile(`^[0-9]{3}$`)
+
+var messageClassLanguageRe = regexp.MustCompile(`^[A-Z]{2}$`)
+
+// validateMessageClassNumber rejects anything that is not exactly 3 digits
+// rather than padding it — verifyMessageClassWrite compares msgno exactly
+// against what the caller asked for, so silently padding "1" to "001" here
+// and comparing against a caller-supplied "1" elsewhere would be a second,
+// self-inflicted way to see a false write failure.
+func validateMessageClassNumber(number string) error {
+	if !messageClassNumberRe.MatchString(number) {
+		return fmt.Errorf("message number %q: T100 requires exactly 3 digits (e.g. \"001\")", number)
+	}
+	return nil
+}
+
+// validateMessageClassLanguage rejects anything that is not a 2-letter ISO
+// code before any request is sent — lang also becomes part of the PUT body
+// itself now (messageClassWriteBody.Language), so a malformed value would
+// otherwise reach SAP instead of failing locally. It must also be one spras()
+// can map: the GETs ask for the 1-character SAP key, and for an unmapped code
+// spras() guesses from the first letter (ET -> E), so the read-back and the
+// description echo would be in a different language than the PUT.
+func validateMessageClassLanguage(lang string) error {
+	if !messageClassLanguageRe.MatchString(lang) {
+		return fmt.Errorf("language %q: expected a 2-letter ISO code (e.g. EN, DE, ES)", lang)
+	}
+	if _, ok := isoToSAPLang[lang]; !ok {
+		return fmt.Errorf("language %q: no known SAP language key for this ISO code", lang)
+	}
+	return nil
+}
+
+// validateMessageClassMessages checks every message number and text length
+// before any request is sent — a malformed message should never cost a lock
+// or, for CreateMessageClass, a half-created object.
+func validateMessageClassMessages(texts []MessageClassMessage, deleteNumbers []string) error {
+	for _, t := range texts {
+		if err := validateMessageClassNumber(t.Number); err != nil {
+			return err
+		}
+		if n := utf8.RuneCountInString(t.Text); n > 73 {
+			return fmt.Errorf("message %s: text is %d characters long; T100 holds at most 73", t.Number, n)
+		}
+	}
+	for _, num := range deleteNumbers {
+		if err := validateMessageClassNumber(num); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // WriteMessageClassTexts updates message class texts in a specific language.
 // texts is an upsert by message number — a message omitted from both texts
 // and deleteNumbers is left unchanged. deleteNumbers removes messages by
 // number in the same PUT; pass nil if nothing is being deleted.
 //
-// STATUS as of this session's live testing against this project's own SAP
-// system: this PUT does not currently persist a message, on either of the
-// two independently-tried, namespace-correct body shapes (see
-// messageClassWriteMessage's doc comment for the second attempt and its
-// result). verifyMessageClassWrite below exists specifically because of
-// this — it turns SAP's silent no-op into a returned error, so a caller
-// never sees a false "success". Do not treat a nil error from this function
-// as proof the write is fixed until that read-back verification is removed
-// or this comment is.
+// The PUT body carries adtcore:language (see messageClassWriteBody); without
+// it SAP stores the row with an empty SPRSL and the text never shows up in
+// the language asked for. Confirmed live 2026-10-02: create, add and
+// translate persist with the right SPRSL. verifyMessageClassWrite stays as a
+// permanent read-back safety net against SAP's silent no-op PUTs.
 //
 // Requires a lock handle from LockObject and optionally a transport request
 // number. Callers that don't want to manage a lock handle themselves should
@@ -235,9 +301,10 @@ func (c *Client) GetMessageClassTexts(ctx context.Context, name, lang string) ([
 // The Description SAP currently has is read first and echoed back on the PUT
 // rather than left empty: an empty description attribute reportedly
 // overwrites the message class's real short text (T100A/T100T) — see this
-// function's package doc and the struct comment on MessageClass. UNVERIFIED
-// against a live SAP system; confirm with a real PUT before relying on this
-// in production.
+// function's package doc and the struct comment on MessageClass. That an
+// empty description would overwrite the real one is NOT confirmed; what was
+// observed live (2026-10-02) is that the description survived an add and a
+// translate when echoed this way.
 //
 // That read runs its own request rather than calling the public
 // GetMessageClass, and deliberately after the lock, with Stateful: true: it
@@ -247,6 +314,19 @@ func (c *Client) GetMessageClassTexts(ctx context.Context, name, lang string) ([
 func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, texts []MessageClassMessage, deleteNumbers []string, lockHandle, transport string) error {
 	name = strings.ToUpper(name)
 	lang = strings.ToUpper(lang)
+	if lang == "" {
+		lang = strings.ToUpper(c.Language())
+	}
+
+	// Validated before any request: a malformed message or language should
+	// never cost a lock.
+	if err := validateMessageClassLanguage(lang); err != nil {
+		return err
+	}
+	if err := validateMessageClassMessages(texts, deleteNumbers); err != nil {
+		return err
+	}
+
 	path := fmt.Sprintf("/sap/bc/adt/messageclass/%s", url.PathEscape(strings.ToLower(name)))
 
 	// Unified mutation policy gate (op type + package + transport)
@@ -263,29 +343,41 @@ func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, 
 	// the doc comment above. A failure here is not fatal to the write: worst
 	// case the description travels empty, same as before this fix.
 	//
-	// OverrideLanguage must match the PUT below: without it this GET reads
-	// the session/logon language, not lang, so translating a class into a
-	// language other than the session's would echo the description back in
-	// the wrong language and overwrite the real one — the same class of
-	// corruption this fix exists to prevent, just relocated from "empty" to
-	// "wrong language".
+	// The `language` query parameter must match the PUT below: the GET ignores
+	// sap-language, so without it this reads the session language and
+	// translating a class into another language would echo the description
+	// back in the wrong one and overwrite the real one. DO_GET answers 404
+	// when lang has no row yet (a first translation, as read from its
+	// exists( ) check — not confirmed live); only then retry in the session
+	// language. Any other failure sends no description rather than echo the
+	// wrong language's. When the retry fails too, the description is empty.
 	description := ""
-	if resp, err := c.transport.Request(ctx, path, &RequestOptions{
-		Method:           http.MethodGet,
-		Accept:           "application/vnd.sap.adt.mc.messageclass+xml",
-		OverrideLanguage: lang,
-		Stateful:         true,
-	}); err == nil {
+	for _, query := range []url.Values{messageClassReadQuery(lang), nil} {
+		resp, err := c.transport.Request(ctx, path, &RequestOptions{
+			Method:           http.MethodGet,
+			Query:            query,
+			Accept:           "application/vnd.sap.adt.mc.messageclass+xml",
+			OverrideLanguage: lang,
+			Stateful:         true,
+		})
+		if err != nil {
+			var apiErr *APIError
+			if query != nil && errors.As(err, &apiErr) && apiErr.IsNotFound() {
+				continue
+			}
+			break
+		}
 		var current MessageClass
 		if xml.Unmarshal(resp.Body, &current) == nil {
 			description = current.Description
 		}
+		break
 	}
 
 	// Build XML body. messageClassWriteBody, not MessageClass — see its doc
 	// comment for why the write shape needs literal mc:/adtcore: prefixes
 	// that the read type must not carry.
-	mc := newMessageClassWriteBody(name, description)
+	mc := newMessageClassWriteBody(name, description, lang)
 	for _, m := range texts {
 		mc.Messages = append(mc.Messages, messageClassWriteMessage{Number: m.Number, Text: m.Text})
 	}
@@ -360,8 +452,12 @@ func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, 
 // the PUT's own 2xx is the only signal available in that case, and this is a
 // best-effort safety net, not the source of truth.
 func (c *Client) verifyMessageClassWrite(ctx context.Context, path, lang string, texts []MessageClassMessage, deleteNumbers []string) error {
+	// Query: the GET answers in the session language unless told otherwise,
+	// which made a write in any other language read back the wrong text and
+	// look like a failed write (see messageClassReadQuery).
 	resp, err := c.transport.Request(ctx, path, &RequestOptions{
 		Method:           http.MethodGet,
+		Query:            messageClassReadQuery(lang),
 		Accept:           "application/vnd.sap.adt.mc.messageclass+xml",
 		OverrideLanguage: lang,
 		Stateful:         true,
@@ -403,6 +499,20 @@ func (c *Client) verifyMessageClassWrite(ctx context.Context, path, lang string,
 // wraps.
 func (c *Client) WriteMessageClassTextsAutoLock(ctx context.Context, name, lang string, texts []MessageClassMessage, deleteNumbers []string, transport string) (err error) {
 	name = strings.ToUpper(name)
+	lang = strings.ToUpper(lang)
+	if lang == "" {
+		lang = strings.ToUpper(c.Language())
+	}
+
+	// Validated before any request, including the gate and the lock below —
+	// a malformed message or language should never cost a lock.
+	if err := validateMessageClassLanguage(lang); err != nil {
+		return err
+	}
+	if err := validateMessageClassMessages(texts, deleteNumbers); err != nil {
+		return err
+	}
+
 	objectURL := fmt.Sprintf("/sap/bc/adt/messageclass/%s", url.PathEscape(strings.ToLower(name)))
 
 	// Gate above the lock and mark the object so WriteMessageClassTexts's own
@@ -419,8 +529,15 @@ func (c *Client) WriteMessageClassTextsAutoLock(ctx context.Context, name, lang 
 		return err
 	}
 
+	// Pick a transport the way the editor would when none was named (PR
+	// #203), before the lock — a networked lookup inside the lock window
+	// would retire the session the lock handle is bound to (issue #91). The
+	// LOCK below carries this plan's choice so the lock and the eventual PUT
+	// are never bound to two different requests.
+	trPlan := c.planTransport(ctx, transport, objectURL, "")
+
 	var lockResult *LockResult
-	lockResult, err = c.LockObject(ctx, objectURL, "MODIFY")
+	lockResult, err = c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
 	if err != nil {
 		return fmt.Errorf("failed to lock message class: %w", err)
 	}
@@ -437,10 +554,11 @@ func (c *Client) WriteMessageClassTextsAutoLock(ctx context.Context, name, lang 
 		}
 	}()
 
-	// Adopt transport from lock result when caller did not supply one, same
-	// as every other write path (issue #144/#91).
+	// Resolve the transport to write under: supplied, else the lock's own
+	// (issue #144), else the plan above. Re-validated against the
+	// transportable-edit policy regardless of which one wins (issue #203).
 	var effectiveTransport string
-	effectiveTransport, err = c.resolveWriteTransport(transport, lockResult.CorrNr, "WriteMessageClassTexts")
+	effectiveTransport, _, err = c.resolveWriteTransportFor(trPlan, transport, lockResult.CorrNr, "WriteMessageClassTexts")
 	if err != nil {
 		return fmt.Errorf("transportable-edit check failed: %w", err)
 	}

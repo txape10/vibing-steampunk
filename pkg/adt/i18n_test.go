@@ -260,13 +260,11 @@ func TestOverrideLanguageInRequest(t *testing.T) {
 // *absent*, not a lenient match on local name the way this package's own
 // Unmarshal is.
 //
-// The deletedmessage element name remains an unverified guess (see
-// messageClassDeletedMessage's doc comment; upstream has no delete support
-// at all yet, issue #161 still open there) — this test only pins what this
-// code currently produces, so a live PUT that reveals a different name has
-// something concrete to correct.
+// The delete element is the PLURAL mc:deletedmessages, read off the system's
+// ST_ADT_MESSAGE_CLASS; the singular form this code once sent is ignored by
+// SAP without any error, so this test pins that it never comes back.
 func TestMessageClassMarshalXML(t *testing.T) {
-	mc := newMessageClassWriteBody("ZTEST_MC", "Test messages")
+	mc := newMessageClassWriteBody("ZTEST_MC", "Test messages", "ES")
 	mc.Messages = []messageClassWriteMessage{
 		{Number: "001", Text: "Enter a value"},
 	}
@@ -285,13 +283,17 @@ func TestMessageClassMarshalXML(t *testing.T) {
 		`xmlns:mc="` + msagNS + `"`,
 		`xmlns:adtcore="` + adtcoreNS + `"`,
 		`adtcore:name="ZTEST_MC"`,
+		`adtcore:language="ES"`,
 		`adtcore:description="Test messages"`,
 		`<mc:messages mc:msgno="001" mc:msgtext="Enter a value"`,
-		`<mc:deletedmessage mc:msgno="009"`,
+		`<mc:deletedmessages mc:msgno="009"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected the marshalled body to contain %q, got: %s", want, out)
 		}
+	}
+	if strings.Contains(out, "<mc:deletedmessage ") {
+		t.Errorf("the singular deletedmessage element is ignored by SAP and must not be sent: %s", out)
 	}
 	if strings.Contains(out, "<MessageClass") {
 		t.Errorf("the bare read-model element name leaked into the request: %s", out)
@@ -317,7 +319,7 @@ func TestMessageClassMarshalXML(t *testing.T) {
 // this fix came from explicitly flagged this as unverified rather than
 // assumed.
 func TestMessageClassMarshalXML_OmitsEmptyDescription(t *testing.T) {
-	mc := newMessageClassWriteBody("ZTEST_MC", "")
+	mc := newMessageClassWriteBody("ZTEST_MC", "", "ES")
 
 	body, err := xml.Marshal(mc)
 	if err != nil {
