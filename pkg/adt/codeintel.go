@@ -390,6 +390,11 @@ func parsePrettyPrinterSettings(data []byte) (*PrettyPrinterSettings, error) {
 
 // SetPrettyPrinterSettings updates the formatter settings.
 func (c *Client) SetPrettyPrinterSettings(ctx context.Context, settings *PrettyPrinterSettings) error {
+	// The settings are the user's, held on the server: changing them is a write
+	if err := c.checkSafety(OpUpdate, "SetPrettyPrinterSettings"); err != nil {
+		return err
+	}
+
 	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <prettyprintersettings:PrettyPrinterSettings
 xmlns:prettyprintersettings="http://www.sap.com/adt/prettyprintersettings"

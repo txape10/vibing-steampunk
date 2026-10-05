@@ -810,12 +810,26 @@ type UnitTestStackEntry struct {
 	Description string `json:"description"`
 }
 
+// checkUnitTestRisk refuses runs that include dangerous or critical tests when
+// workflows are not allowed. Those risk levels may change data or system
+// state, so under --read-only they are code execution, not a read. The
+// default flags are harmless-only and always pass.
+func (c *Client) checkUnitTestRisk(opName string, flags *UnitTestRunFlags) error {
+	if flags != nil && (flags.Dangerous || flags.Critical) {
+		return c.checkSafety(OpWorkflow, opName+" (dangerous/critical tests)")
+	}
+	return nil
+}
+
 // RunUnitTests runs ABAP Unit tests for an object.
 // objectURL is the ADT URL of the object (e.g., "/sap/bc/adt/oo/classes/ZCL_TEST")
 func (c *Client) RunUnitTests(ctx context.Context, objectURL string, flags *UnitTestRunFlags) (*UnitTestResult, error) {
 	if flags == nil {
 		defaultFlags := DefaultUnitTestFlags()
 		flags = &defaultFlags
+	}
+	if err := c.checkUnitTestRisk("RunUnitTests", flags); err != nil {
+		return nil, err
 	}
 
 	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>

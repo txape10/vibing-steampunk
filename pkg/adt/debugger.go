@@ -1127,6 +1127,11 @@ func (c *Client) DebuggerGetChildVariables(ctx context.Context, parentIDs []stri
 // variableName: The name of the variable to modify
 // value: The new value as a string
 func (c *Client) DebuggerSetVariableValue(ctx context.Context, variableName, value string) (string, error) {
+	// Changing a variable in a running program alters what that program does
+	if err := c.checkSafety(OpWorkflow, "DebuggerSetVariableValue"); err != nil {
+		return "", err
+	}
+
 	query := url.Values{}
 	query.Set("method", "setVariableValue")
 	query.Set("variableName", variableName)

@@ -37,10 +37,15 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 		transport = corrNr[0]
 	}
 
-	// Safety check - only check for MODIFY locks, READ locks are safe
-	if accessMode == "" || accessMode == "MODIFY" {
+	// Safety check: every mode except READ takes an exclusive enqueue. Under
+	// --read-only that is a write (the enqueue stays in SM12 if nobody
+	// unlocks), and OpLock is not among the operations ReadOnly blocks.
+	if mode := strings.ToUpper(strings.TrimSpace(accessMode)); mode != "READ" {
 		if err := c.checkSafety(OpLock, "LockObject"); err != nil {
 			return nil, err
+		}
+		if c.config.Safety.ReadOnly {
+			return nil, fmt.Errorf("operation 'LockObject' (access mode %q) is blocked by safety configuration: read-only mode enabled", mode)
 		}
 	}
 
@@ -1317,6 +1322,14 @@ func (c *Client) UnpublishServiceBinding(ctx context.Context, serviceName string
 }
 
 func (c *Client) publishUnpublishServiceBinding(ctx context.Context, action, serviceName, serviceVersion string) (*PublishResult, error) {
+	opName := "PublishServiceBinding"
+	if action == "unpublishjobs" {
+		opName = "UnpublishServiceBinding"
+	}
+	if err := c.checkSafety(OpUpdate, opName); err != nil {
+		return nil, err
+	}
+
 	if serviceVersion == "" {
 		serviceVersion = "0001"
 	}

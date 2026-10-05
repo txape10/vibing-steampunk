@@ -97,6 +97,16 @@ type gctsErrorLog struct {
 
 const gctsBasePath = "/sap/bc/cts_abapvcs"
 
+// checkGctsWrite gates a gCTS operation that changes the repository or the
+// system. OpTransport only asks for --enable-transports; --read-only and
+// --transport-read-only have to be consulted as well.
+func (c *Client) checkGctsWrite(opName string) error {
+	if err := c.checkSafety(OpTransport, opName); err != nil {
+		return err
+	}
+	return c.config.Safety.CheckTransport("", opName, true)
+}
+
 // GctsListRepositories lists all gCTS repositories.
 func (c *Client) GctsListRepositories(ctx context.Context) ([]GctsRepository, error) {
 	if err := c.checkSafety(OpTransport, "GctsListRepositories"); err != nil {
@@ -151,7 +161,7 @@ func (c *Client) GctsGetRepository(ctx context.Context, rid string) (*GctsReposi
 
 // GctsCreateRepository creates a new gCTS repository.
 func (c *Client) GctsCreateRepository(ctx context.Context, opts GctsCreateOptions) (*GctsRepository, error) {
-	if err := c.checkSafety(OpTransport, "GctsCreateRepository"); err != nil {
+	if err := c.checkGctsWrite("GctsCreateRepository"); err != nil {
 		return nil, err
 	}
 
@@ -184,7 +194,7 @@ func (c *Client) GctsCreateRepository(ctx context.Context, opts GctsCreateOption
 
 // GctsDeleteRepository deletes a gCTS repository.
 func (c *Client) GctsDeleteRepository(ctx context.Context, rid string) error {
-	if err := c.checkSafety(OpTransport, "GctsDeleteRepository"); err != nil {
+	if err := c.checkGctsWrite("GctsDeleteRepository"); err != nil {
 		return err
 	}
 
@@ -209,7 +219,7 @@ func (c *Client) GctsDeleteRepository(ctx context.Context, rid string) error {
 
 // GctsCloneRepository clones a gCTS repository on the SAP system.
 func (c *Client) GctsCloneRepository(ctx context.Context, rid string) error {
-	if err := c.checkSafety(OpTransport, "GctsCloneRepository"); err != nil {
+	if err := c.checkGctsWrite("GctsCloneRepository"); err != nil {
 		return err
 	}
 
@@ -233,7 +243,7 @@ func (c *Client) GctsCloneRepository(ctx context.Context, rid string) error {
 
 // GctsPull pulls a specific commit into a gCTS repository.
 func (c *Client) GctsPull(ctx context.Context, rid, commitID string) (*GctsPullResult, error) {
-	if err := c.checkSafety(OpTransport, "GctsPull"); err != nil {
+	if err := c.checkGctsWrite("GctsPull"); err != nil {
 		return nil, err
 	}
 
@@ -265,7 +275,7 @@ func (c *Client) GctsPull(ctx context.Context, rid, commitID string) (*GctsPullR
 
 // GctsCommit creates a commit in a gCTS repository.
 func (c *Client) GctsCommit(ctx context.Context, rid string, opts GctsCommitOptions) (*GctsCommitResult, error) {
-	if err := c.checkSafety(OpTransport, "GctsCommit"); err != nil {
+	if err := c.checkGctsWrite("GctsCommit"); err != nil {
 		return nil, err
 	}
 
@@ -324,7 +334,7 @@ func (c *Client) GctsListBranches(ctx context.Context, rid string) ([]GctsBranch
 
 // GctsSwitchBranch switches the active branch of a gCTS repository.
 func (c *Client) GctsSwitchBranch(ctx context.Context, rid, branch string) error {
-	if err := c.checkSafety(OpTransport, "GctsSwitchBranch"); err != nil {
+	if err := c.checkGctsWrite("GctsSwitchBranch"); err != nil {
 		return err
 	}
 
