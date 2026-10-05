@@ -420,10 +420,12 @@ func resolveConfig(cmd *cobra.Command) {
 
 	// Safety options: flag > SAP_* env
 	if !cmd.Flags().Changed("read-only") {
-		cfg.ReadOnly = viper.GetBool("READ_ONLY")
+		// viper's GetBool is strconv.ParseBool: "yes"/"on" read as false. For a
+		// restriction that is the wrong way to fail, so envFlag is consulted too.
+		cfg.ReadOnly = viper.GetBool("READ_ONLY") || envFlag("SAP_READ_ONLY")
 	}
 	if !cmd.Flags().Changed("block-free-sql") {
-		cfg.BlockFreeSQL = viper.GetBool("BLOCK_FREE_SQL")
+		cfg.BlockFreeSQL = viper.GetBool("BLOCK_FREE_SQL") || envFlag("SAP_BLOCK_FREE_SQL")
 	}
 	if !cmd.Flags().Changed("allowed-ops") {
 		cfg.AllowedOps = viper.GetString("ALLOWED_OPS")
@@ -441,7 +443,7 @@ func resolveConfig(cmd *cobra.Command) {
 		cfg.EnableTransports = viper.GetBool("ENABLE_TRANSPORTS")
 	}
 	if !cmd.Flags().Changed("transport-read-only") {
-		cfg.TransportReadOnly = viper.GetBool("TRANSPORT_READ_ONLY")
+		cfg.TransportReadOnly = viper.GetBool("TRANSPORT_READ_ONLY") || envFlag("SAP_TRANSPORT_READ_ONLY")
 	}
 	if !cmd.Flags().Changed("allowed-transports") {
 		// Use GetString and split manually - GetStringSlice doesn't split comma-separated env vars

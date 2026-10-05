@@ -406,6 +406,23 @@ func (s *debugUIServer) triggerAndCatch(ctx context.Context, seconds int, trigge
 	}
 }
 
+// runRefusal returns why a Run (a report or an RFC call) is not allowed, or ""
+// if it is. The read-only flag keeps its own message; beyond it the call also
+// has to pass the resolved safety config, which is how --allowed-ops /
+// --disallowed-ops reach this server. A nil client (some tests) skips the
+// second check.
+func (s *debugUIServer) runRefusal(op, readOnlyNote string) string {
+	if s.readOnly {
+		return readOnlyNote
+	}
+	if s.client != nil {
+		if err := s.client.Safety().CheckOperation(adt.OpWorkflow, op); err != nil {
+			return err.Error()
+		}
+	}
+	return ""
+}
+
 func (s *debugUIServer) handleBreakpoint(w http.ResponseWriter, r *http.Request) {
 	if s.readOnly {
 		writeJSONStatus(w, http.StatusForbidden, s.snapshot(r.Context(), "read-only mode: cannot set a breakpoint"))
@@ -432,8 +449,8 @@ func (s *debugUIServer) handleBreakpoint(w http.ResponseWriter, r *http.Request)
 // doc comment above and CLAUDE.md's RUN_REPORT entry for the known hang risk
 // on a report with a mandatory unfilled selection-screen field.
 func (s *debugUIServer) handleRunReport(w http.ResponseWriter, r *http.Request) {
-	if s.readOnly {
-		writeJSONStatus(w, http.StatusForbidden, s.snapshot(r.Context(), "read-only mode: cannot run a report"))
+	if note := s.runRefusal("RunReport", "read-only mode: cannot run a report"); note != "" {
+		writeJSONStatus(w, http.StatusForbidden, s.snapshot(r.Context(), note))
 		return
 	}
 	if !s.tryStart() {
@@ -470,8 +487,8 @@ func (s *debugUIServer) handleRunReport(w http.ResponseWriter, r *http.Request) 
 // breakpoint inside the FM's own code; a param-taking call is a possible
 // follow-up, not built here to keep this port's scope small.
 func (s *debugUIServer) handleRunRFC(w http.ResponseWriter, r *http.Request) {
-	if s.readOnly {
-		writeJSONStatus(w, http.StatusForbidden, s.snapshot(r.Context(), "read-only mode: cannot call an RFC"))
+	if note := s.runRefusal("CallRFC", "read-only mode: cannot call an RFC"); note != "" {
+		writeJSONStatus(w, http.StatusForbidden, s.snapshot(r.Context(), note))
 		return
 	}
 	if !s.tryStart() {

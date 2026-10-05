@@ -158,7 +158,7 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 		Cache:              cacheEnabled,
 		CachePath:          cachePath,
 
-		ReadOnly:        strings.EqualFold(os.Getenv("SAP_READ_ONLY"), "true"),
+		ReadOnly:        envFlag("SAP_READ_ONLY"),
 		AllowedPackages: splitList(os.Getenv("SAP_ALLOWED_PACKAGES")),
 
 		EnableTransports:        envFlag("SAP_ENABLE_TRANSPORTS"),

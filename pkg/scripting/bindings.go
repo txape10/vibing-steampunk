@@ -706,8 +706,28 @@ func (e *LuaEngine) luaGetVariables(L *lua.LState) int {
 	return 1
 }
 
+// refuseVariableWrite is the first line of every binding that ends in
+// DebuggerSetVariableValue. pkg/adt refuses that call too; asking here as well
+// means the refusal is what the script sees, rather than whatever "checkpoint
+// not found" or "no recording" the binding would have returned first, and a
+// checkpoint with many variables gets one error instead of one per variable.
+func (e *LuaEngine) refuseVariableWrite(L *lua.LState, name string) bool {
+	if e.client == nil {
+		return false
+	}
+	if err := e.client.Safety().CheckOperation(adt.OpWorkflow, name); err != nil {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString(err.Error()))
+		return true
+	}
+	return false
+}
+
 // setVariable(name, value) - Modify variable value in live debug session (FORCE REPLAY!)
 func (e *LuaEngine) luaSetVariable(L *lua.LState) int {
+	if e.refuseVariableWrite(L, "setVariable") {
+		return 2
+	}
 	name := getString(L, 1)
 	value := L.Get(2)
 
@@ -866,6 +886,9 @@ func (e *LuaEngine) luaListCheckpoints(L *lua.LState) int {
 
 // injectCheckpoint(name) - Inject all variables from checkpoint into live debug session (FORCE REPLAY!)
 func (e *LuaEngine) luaInjectCheckpoint(L *lua.LState) int {
+	if e.refuseVariableWrite(L, "injectCheckpoint") {
+		return 2
+	}
 	name := getString(L, 1)
 
 	checkpoint, ok := e.checkpoints[name]
@@ -1364,6 +1387,9 @@ func (e *LuaEngine) luaCompareRecordings(L *lua.LState) int {
 // forceReplay(recordingId, [stepNumber]) - Inject state from recording into live debug session
 // This is the killer feature: inject production state into dev session for debugging!
 func (e *LuaEngine) luaForceReplay(L *lua.LState) int {
+	if e.refuseVariableWrite(L, "forceReplay") {
+		return 2
+	}
 	recordingID := getString(L, 1)
 	stepNumber := getOptInt(L, 2, -1) // -1 means last step
 	storePath := getOptString(L, 3, ".vsp-recordings")
@@ -1447,6 +1473,9 @@ func (e *LuaEngine) luaForceReplay(L *lua.LState) int {
 
 // replayFromStep(stepNumber) - Inject state from current recording at specific step
 func (e *LuaEngine) luaReplayFromStep(L *lua.LState) int {
+	if e.refuseVariableWrite(L, "replayFromStep") {
+		return 2
+	}
 	stepNumber := int(L.ToNumber(1))
 
 	if e.recorder == nil {

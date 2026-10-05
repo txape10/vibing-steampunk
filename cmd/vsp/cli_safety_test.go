@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // TestGetClientHonoursDeclaredSafety verifies that a systemParams with
@@ -167,4 +169,29 @@ func TestGetClientCarriesTransportSafety(t *testing.T) {
 			t.Fatal("BlockFreeSQL did not reach the client")
 		}
 	})
+}
+
+// SAP_READ_ONLY=1 (or yes/on) used to count only in the named-system branch of
+// resolveSystemParams; the env-only branch, which is how the MCP server is
+// deployed, compared against the literal "true".
+func TestResolveSystemParams_EnvOnlyReadOnlyAcceptsTheUsualSpellings(t *testing.T) {
+	for _, v := range []string{"true", "TRUE", "1", "yes", "on"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("SAP_URL", "https://sap.example:44300")
+			t.Setenv("SAP_USER", "TESTER")
+			t.Setenv("SAP_PASSWORD", "secret")
+			t.Setenv("SAP_READ_ONLY", v)
+			prev := systemName
+			systemName = ""
+			t.Cleanup(func() { systemName = prev })
+
+			params, err := resolveSystemParams(&cobra.Command{})
+			if err != nil {
+				t.Fatalf("resolveSystemParams: %v", err)
+			}
+			if !params.ReadOnly {
+				t.Errorf("SAP_READ_ONLY=%q should switch read-only on", v)
+			}
+		})
+	}
 }

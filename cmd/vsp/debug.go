@@ -613,6 +613,12 @@ func (s *debugSession) runProgram(args []string) error {
 		return nil
 	}
 
+	// Running a program is code execution; a read-only session must not do it.
+	// s.client carries the policy resolved for this system (-s/.vsp.json/env).
+	if err := s.client.Safety().CheckOperation(adt.OpWorkflow, "RunReport"); err != nil {
+		return err
+	}
+
 	if s.wsClient == nil {
 		return fmt.Errorf("WebSocket not connected - cannot run programs")
 	}
@@ -716,6 +722,11 @@ func (s *debugSession) callRFC(args []string) error {
 		fmt.Println("Example: call RFC_PING")
 		fmt.Println("         call BAPI_USER_GET_DETAIL USERNAME=TESTUSER")
 		return nil
+	}
+
+	// A function module can write whatever it was written to write
+	if err := s.client.Safety().CheckOperation(adt.OpWorkflow, "CallRFC"); err != nil {
+		return err
 	}
 
 	if s.wsClient == nil {
