@@ -159,6 +159,16 @@ SAP(action="help",   target="debug")
 
 All safety controls (`--read-only`, `--allowed-ops`, `--allowed-packages`) work identically — the universal tool routes through the same handler → ADT client → `checkSafety()` chain.
 
+**What `--read-only` refuses** (each check runs before any network I/O):
+- every ADT write (create, update, delete, activate, workflows) and every lock mode except `READ`;
+- transport writes — create, release, delete, merge, move — even with `--enable-transports`; listing and reading transports still work;
+- `CALL_RFC`, `RUN_REPORT`, `RUN_REPORT_ASYNC`, `SET_TEXT_ELEMENTS`, `MOVE`;
+- service binding publish/unpublish, pretty-printer settings, gCTS writes (create, delete, clone, pull, commit, switch branch);
+- unit-test and coverage runs that include `dangerous` or `critical` tests (ordinary runs still work);
+- writing a variable in a running debug session (MCP, Lua `setVariable`/`injectCheckpoint`/`forceReplay`/`replayFromStep`) and the `run`/`call` commands of `vsp debug` and its UI.
+
+Known gaps: breakpoints and AMDP debugger start are still allowed (they are what debugging a read-only system needs); `SET_TEXT_ELEMENTS` has no package check, and `MOVE` checks only the destination package, not the one the object leaves.
+
 > *Thanks to [Filipp Gnilyak](https://github.com/nickel-f) for the hyperfocused mode concept.*
 
 ### Context Compression — Built-in ABAP Understanding

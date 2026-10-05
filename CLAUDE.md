@@ -2073,6 +2073,59 @@ the code permanently — it is the fix, not a placeholder.
   `internal/mcp/tools_register.go`, `pkg/adt/i18n_test.go`, `pkg/adt/lock_corrnr_test.go` (new).
 - `go build ./...` clean; `go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)` green.
 
+### 2ap. `--read-only` covers every path that writes or runs code — ported from upstream #280/#283, adapted (2026-10-05)
+- **The gap** (documented under Known Open Issues on 2026-09-22): `SafetyConfig.ReadOnly` blocked ADT CRUD but
+  `CALL_RFC`, `RUN_REPORT`/`RUN_REPORT_ASYNC`, `SET_TEXT_ELEMENTS` and `MOVE` never consulted it (they use an RFC
+  client or the ZADT_VSP WebSocket, not `pkg/adt`'s gates), `OpLock` is not among the operations `ReadOnly` blocks
+  (an `edit LOCK` was granted under `--read-only` and left its enqueue in SM12), and `CheckTransport` refused
+  writes only under `--transport-read-only`. Upstream closed these in [#280](https://github.com/oisee/vibing-steampunk/pull/280)
+  and [#283](https://github.com/oisee/vibing-steampunk/pull/283) (+ lint-only #284, not needed here).
+- **Gates added** — all pure in-memory checks, first thing in the function, before any request and never between a
+  LOCK and the write that consumes it (issue #91):
+  - `pkg/adt`: `CheckTransport` refuses writes under `ReadOnly` (**behaviour change**: `--read-only
+    --enable-transports` no longer allows create/release/delete/merge/move; list/get still work);
+    `IsTransportWriteAllowed` also false under `ReadOnly`; the v1 `CreateTransport`/`ReleaseTransport` call
+    `CheckTransport` too (upstream does not — fork-specific hardening, and release now enforces `AllowedTransports`);
+    `LockObject` gates every access mode except `READ` (`OpLock` + refuse under `ReadOnly`); `SetPrettyPrinterSettings`
+    and service-binding publish/unpublish (`OpUpdate`); `DebuggerSetVariableValue` (`OpWorkflow`); `RunUnitTests`/
+    `GetCodeCoverage` with `Dangerous`/`Critical` flags (`checkUnitTestRisk`, `OpWorkflow`; harmless runs unchanged);
+    the six gCTS writes via `checkGctsWrite` (`OpTransport` + `CheckTransport(write)` — so `--transport-read-only`
+    now also blocks them).
+  - `internal/mcp`: `s.refuseUnderSafety(op, name)` first thing in `handleCallRFC`, `handleRunReport`,
+    `handleRunReportAsync` (before the task is registered), `handleSetTextElements`, `handleMoveObject` (which also
+    checks the **destination** package with `CheckPackage`, a fork addition). Reads stay allowed: `RFC_SEARCH`,
+    `RFC_METADATA`, `GET_REPORT_JOB_STATUS` (incl. `include_spool`), `GET_VARIANTS`, `GET_TEXT_ELEMENTS`.
+  - CLI/Lua: `vsp debug` REPL `run`/`call` and the debug-UI Run handlers use the client's resolved safety config
+    (`OpWorkflow`, so `--allowed-ops`/`--disallowed-ops` apply too, not just a read-only boolean); the four Lua
+    bindings that end in `DebuggerSetVariableValue` call `refuseVariableWrite` first.
+  - `SAP_READ_ONLY`/`SAP_BLOCK_FREE_SQL`/`SAP_TRANSPORT_READ_ONLY` now also accept `1`/`yes`/`on` on the real MCP
+    path (`resolveConfig` used viper's `GetBool` = `strconv.ParseBool`, so `yes`/`on` silently meant *not* read-only —
+    fail-open for a restriction) and on the CLI env-only branch.
+- **Not ported (nothing to port to in this fork)**: everything around `action="rfc"` (`handlers_rfc.go`, per-call
+  `host`/`sysnr`/`port` override, `-s`/`SAP_SYSTEM` destination mismatch — the fork's MCP server takes the RFC
+  destination only from `SAP_RFC_*`), `cmd/vsp/rfc*.go`, `trace*.go`, `adt_debug.go`, `pkg/scripting/debug_session.go`,
+  the `--block-free-sql` gate on `read_table`'s caller WHERE (the fork's `RFC_SEARCH` builds its own whitelisted
+  WHERE), and the `.vsp-recordings/index.json` artifact upstream committed by accident.
+- **Deliberately left allowed**: breakpoints (`SET_BREAKPOINT`/`DELETE_BREAKPOINT`) and AMDP start over MCP — what
+  debugging a read-only system needs; the debug UI already blocks `/api/bp` on its own.
+- **Known gaps (follow-ups, not done)**: `SET_TEXT_ELEMENTS` has no package check at all (only SAP authorization
+  stops it under `SAP_ALLOWED_PACKAGES=Z*,$TMP`); `MOVE` checks only where the object goes, not where it comes from;
+  `CALL_RFC` is refused wholesale under `--read-only`, including `RFC_READ_TABLE`-style reads.
+- **Tests** (each refusal test has a control proving the same call goes through without the gate; mutation-checked
+  by removing the production change): `pkg/adt/readonly_more_test.go` (transport), `readonly_gates_test.go` (lock
+  modes, pretty-printer, publish, debugger variable, unit-test risk, gCTS, controls), `safety_test.go`;
+  `internal/mcp/handlers_readonly_test.go` (a fake TCP gateway counts RFC connections; an httptest server counts
+  ADT/WebSocket requests; `MOVE` destination whitelist; `edit LOCK`); `cmd/vsp/debug_readonly_test.go` (REPL, debug UI
+  Run handlers, `--disallowed-ops`), `cli_safety_test.go` (env spellings); `pkg/scripting/readonly_test.go`.
+- **Reviews**: planner (plan approved with the recommendations), code-reviewer APPROVE, 0 CRITICAL/HIGH. Its MEDIUM
+  (`SAP_READ_ONLY=yes` still fail-open on the MCP path) and LOW findings (stray edit, detached doc comments,
+  DryRun/wording consistency, missing controls) were fixed.
+- `go build ./...` clean; `go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)` green; in `cmd/vsp` only
+  the 6 pre-existing CGO/sqlite audit-cache tests fail.
+- **Not yet verified live / deployed**: the live check is planned read-only (a throwaway Go program driving
+  `mcp.NewServer` with `ReadOnly:true` against the dev system, asserting refusals leave no request in the
+  `VSP_HTTP_TRACE` trace); the `abap-adt-prod` connection only benefits once the new `vsp.exe` is deployed.
+
 ## Known Open Issues (Not Fixed)
 
 ### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused, not fixable in vsp alone (2026-09-22)
@@ -2130,7 +2183,10 @@ the code permanently — it is the fix, not a placeholder.
   about it — would need the same "break before a keyword, never mid-identifier/literal" care as the
   manual workaround above.
 
-### `SAP_READ_ONLY` does not gate `CALL_RFC`/`RUN_REPORT`/`RUN_REPORT_ASYNC` — confirmed gap, not fixed (2026-09-22)
+### `SAP_READ_ONLY` does not gate `CALL_RFC`/`RUN_REPORT`/`RUN_REPORT_ASYNC` — RESOLVED in code by 2ap (2026-10-05; first documented 2026-09-22)
+> **Resolved in code (see 2ap)**, pending deployment of the new `vsp.exe` and a read-only live check. The analysis
+> below is kept for history; its "not fixed" statements describe the state before 2ap. The SAP-side backstop
+> (restricted role without `S_RFC` for the production user) stays in place regardless — do not drop it.
 - **Confirmed via grep** (`checkMutation|checkSafety|ReadOnly|Safety\(\)`) across `internal/mcp/handlers_debugger.go`
   (`CALL_RFC`) and `internal/mcp/handlers_report.go` (`RUN_REPORT`/`RUN_REPORT_ASYNC`, even after the Fase 2
   `pkg/saprfc`/XBP migration in 2an): **no matches in either file**. `pkg/adt/safety.go`'s `SafetyConfig.ReadOnly`
