@@ -1,6 +1,7 @@
 package adt
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -408,5 +409,32 @@ func TestSafetyConfig_CheckTransportableEdit_ErrorMessage(t *testing.T) {
 	}
 	if !contains(errMsg, "SAP_ALLOW_TRANSPORTABLE_EDITS") {
 		t.Error("Error message should mention environment variable")
+	}
+}
+
+// --read-only is documented as blocking every write operation. The transport
+// gate used to look only at --transport-read-only, so `--read-only
+// --enable-transports` still allowed create, release and delete.
+func TestSafetyConfig_CheckTransport_ReadOnly(t *testing.T) {
+	cfg := SafetyConfig{ReadOnly: true, EnableTransports: true}
+
+	for _, op := range []string{"CreateTransport", "ReleaseTransport", "DeleteTransport", "MergeTransport", "MoveTransport"} {
+		if err := cfg.CheckTransport("DEVK900001", op, true); err == nil {
+			t.Errorf("%s must be refused under --read-only", op)
+		} else if !strings.Contains(err.Error(), "read-only") {
+			t.Errorf("%s: error should name read-only mode, got: %v", op, err)
+		}
+	}
+
+	for _, op := range []string{"ListTransports", "GetTransport"} {
+		if err := cfg.CheckTransport("", op, false); err != nil {
+			t.Errorf("%s is a read and must stay allowed under --read-only: %v", op, err)
+		}
+	}
+
+	// the control: without --read-only the same write passes
+	open := SafetyConfig{EnableTransports: true}
+	if err := open.CheckTransport("DEVK900001", "CreateTransport", true); err != nil {
+		t.Errorf("a write without --read-only must pass: %v", err)
 	}
 }

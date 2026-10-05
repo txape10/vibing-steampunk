@@ -256,6 +256,10 @@ func (c *Client) CreateTransport(ctx context.Context, objectURL string, descript
 	if err := c.checkSafety(OpTransport, "CreateTransport"); err != nil {
 		return "", err
 	}
+	// OpTransport alone does not look at --read-only / --transport-read-only
+	if err := c.config.Safety.CheckTransport("", "CreateTransport", true); err != nil {
+		return "", err
+	}
 
 	owner := strings.ToUpper(c.config.Username)
 
@@ -284,6 +288,9 @@ func (c *Client) CreateTransport(ctx context.Context, objectURL string, descript
 func (c *Client) ReleaseTransport(ctx context.Context, transportNumber string, ignoreLocks bool) ([]string, error) {
 	// Safety check
 	if err := c.checkSafety(OpTransport, "ReleaseTransport"); err != nil {
+		return nil, err
+	}
+	if err := c.config.Safety.CheckTransport(strings.ToUpper(transportNumber), "ReleaseTransport", true); err != nil {
 		return nil, err
 	}
 
