@@ -162,16 +162,16 @@ Session:
   SAP(action="debug", target="GET_STACK")
   SAP(action="debug", target="GET_VARIABLES")
 
-RFC:
+RFC (CALL_RFC is refused under --read-only; RFC_SEARCH and RFC_METADATA are reads and stay allowed):
   SAP(action="debug", target="CALL_RFC", params={"function": "RFC_READ_TABLE", "params": "{\"QUERY_TABLE\": \"T000\"}"})
   SAP(action="debug", target="RFC_SEARCH", params={"pattern": "BAPI_USER*"})
   SAP(action="debug", target="RFC_METADATA", params={"function": "BAPI_USER_GET_DETAIL"})
 
-Move object:
+Move object (refused under --read-only; the destination package must be allowed by --allowed-packages):
   SAP(action="debug", target="MOVE", params={"object_type": "CLAS", "object_name": "ZCL_TEST", "new_package": "$TMP"})
 
-Report execution:
-  SAP(action="debug", target="RUN_REPORT", params={"report": "RSUSR002"})  ⚠️ known issue with reports that have a selection screen — see CLAUDE.md "Known Open Issues"
+Report execution (RUN_REPORT, RUN_REPORT_ASYNC and SET_TEXT_ELEMENTS are refused under --read-only):
+  SAP(action="debug", target="RUN_REPORT", params={"report": "RSUSR002"})  runs as a background job over RFC (selection-screen reports work; see CLAUDE.md 2an)
   SAP(action="debug", target="GET_VARIANTS", params={"report": "RSUSR002"})
   SAP(action="debug", target="GET_TEXT_ELEMENTS", params={"program": "ZREPORT"})
   SAP(action="debug", target="SET_TEXT_ELEMENTS", params={"program": "ZREPORT", "selection_texts": "{\"P_USER\": \"Username\"}"})  (heading_texts param is accepted but non-functional server-side)

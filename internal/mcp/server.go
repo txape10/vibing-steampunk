@@ -303,6 +303,17 @@ func newToolResultError(message string) *mcp.CallToolResult {
 	return result
 }
 
+// refuseUnderSafety checks the safety configuration before a handler touches
+// the network and returns the tool error to send back, or nil if the operation
+// is allowed. Handlers that go through an RFC or WebSocket client do not pass
+// through pkg/adt's own gates, so they ask here, first thing.
+func (s *Server) refuseUnderSafety(op adt.OperationType, opName string) *mcp.CallToolResult {
+	if err := s.adtClient.Safety().CheckOperation(op, opName); err != nil {
+		return newToolResultError(err.Error())
+	}
+	return nil
+}
+
 // ensureWSConnected ensures the WebSocket client is connected, creating it if needed.
 // Returns error result if connection fails, nil on success.
 func (s *Server) ensureWSConnected(ctx context.Context, toolName string) *mcp.CallToolResult {

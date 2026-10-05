@@ -966,6 +966,15 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 		return newToolResultError("new_package is required"), nil
 	}
 
+	if refused := s.refuseUnderSafety(adt.OpUpdate, "MoveObject"); refused != nil {
+		return refused, nil
+	}
+	// The destination package is where the object ends up, so it has to be one
+	// the configuration lets this server write to.
+	if err := s.adtClient.Safety().CheckPackage(newPackage); err != nil {
+		return newToolResultError(err.Error()), nil
+	}
+
 	// Ensure WebSocket client is connected
 	if err := s.ensureDebugWSClient(ctx); err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to connect to ZADT_VSP WebSocket: %v. Ensure ZADT_VSP is deployed and SAPC/SICF are configured.", err)), nil

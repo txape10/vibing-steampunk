@@ -266,6 +266,11 @@ func (s *Server) handleDeleteBreakpoint(ctx context.Context, request mcp.CallToo
 // the tool result — previously every such failure was swallowed into a
 // generic "Subrc: 99" inside an otherwise-successful response.
 func (s *Server) handleCallRFC(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Any RFC-enabled function module can write, and the caller picks which
+	if refused := s.refuseUnderSafety(adt.OpWorkflow, "CallRFC"); refused != nil {
+		return refused, nil
+	}
+
 	function, ok := request.GetArguments()["function"].(string)
 	if !ok || function == "" {
 		return newToolResultError("function is required"), nil

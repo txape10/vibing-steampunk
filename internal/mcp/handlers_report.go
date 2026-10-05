@@ -94,6 +94,11 @@ func reportWaitSeconds(request mcp.CallToolRequest) time.Duration {
 }
 
 func (s *Server) handleRunReport(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// A report is arbitrary ABAP; it can write whatever the selection says
+	if refused := s.refuseUnderSafety(adt.OpWorkflow, "RunReport"); refused != nil {
+		return refused, nil
+	}
+
 	report, _ := request.GetArguments()["report"].(string)
 	if report == "" {
 		return newToolResultError("report parameter is required"), nil
@@ -137,6 +142,11 @@ func (s *Server) handleRunReport(ctx context.Context, request mcp.CallToolReques
 }
 
 func (s *Server) handleRunReportAsync(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Before the task is registered and the goroutine started, not inside it
+	if refused := s.refuseUnderSafety(adt.OpWorkflow, "RunReportAsync"); refused != nil {
+		return refused, nil
+	}
+
 	report, _ := request.GetArguments()["report"].(string)
 	if report == "" {
 		return newToolResultError("report parameter is required"), nil
@@ -382,6 +392,10 @@ func (s *Server) handleGetTextElements(ctx context.Context, request mcp.CallTool
 }
 
 func (s *Server) handleSetTextElements(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if refused := s.refuseUnderSafety(adt.OpUpdate, "SetTextElements"); refused != nil {
+		return refused, nil
+	}
+
 	if errResult := s.ensureWSConnected(ctx, "SetTextElements"); errResult != nil {
 		return errResult, nil
 	}
