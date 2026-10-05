@@ -2122,9 +2122,13 @@ the code permanently — it is the fix, not a placeholder.
   DryRun/wording consistency, missing controls) were fixed.
 - `go build ./...` clean; `go test $(go list ./pkg/... ./internal/... | grep -v pkg/cache)` green; in `cmd/vsp` only
   the 6 pre-existing CGO/sqlite audit-cache tests fail.
-- **Not yet verified live / deployed**: the live check is planned read-only (a throwaway Go program driving
-  `mcp.NewServer` with `ReadOnly:true` against the dev system, asserting refusals leave no request in the
-  `VSP_HTTP_TRACE` trace); the `abap-adt-prod` connection only benefits once the new `vsp.exe` is deployed.
+- **Verified live (2026-10-05)**, after deploying the new `vsp.exe` and restarting Claude Desktop, through the
+  read-only production connection (`abap-adt-prod`, `SAP_READ_ONLY=true`): `CALL_RFC RFC_PING` →
+  `operation 'CallRFC' (type W) is blocked by safety configuration` — refused locally, nothing sent to SAP; a
+  read (`query SQL` on `T000`) still answers. Only `CALL_RFC` was exercised there: the other gated handlers
+  (`RUN_REPORT`, `SET_TEXT_ELEMENTS`, `MOVE`) are covered by the unit tests and were deliberately not tried on
+  production, where a missing gate would have meant a real write attempt. No throwaway Go program was used (it
+  would need the connection credentials from `claude_desktop_config.json`).
 
 ## Known Open Issues (Not Fixed)
 
@@ -2184,7 +2188,7 @@ the code permanently — it is the fix, not a placeholder.
   manual workaround above.
 
 ### `SAP_READ_ONLY` does not gate `CALL_RFC`/`RUN_REPORT`/`RUN_REPORT_ASYNC` — RESOLVED in code by 2ap (2026-10-05; first documented 2026-09-22)
-> **Resolved in code (see 2ap)**, pending deployment of the new `vsp.exe` and a read-only live check. The analysis
+> **Resolved (see 2ap)** and verified live on the production read-only connection on 2026-10-05. The analysis
 > below is kept for history; its "not fixed" statements describe the state before 2ap. The SAP-side backstop
 > (restricted role without `S_RFC` for the production user) stays in place regardless — do not drop it.
 - **Confirmed via grep** (`checkMutation|checkSafety|ReadOnly|Safety\(\)`) across `internal/mcp/handlers_debugger.go`
