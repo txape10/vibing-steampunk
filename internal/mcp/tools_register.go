@@ -2376,6 +2376,49 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 			),
 		), s.handleSetTextElements)
 	}
+
+	if shouldRegister("GetClassParamTexts") {
+		s.mcpServer.AddTool(mcp.NewTool("GetClassParamTexts",
+			mcp.WithDescription("Get the short texts (SE24 'Description' column) of the method parameters of a class. Without 'method' all methods are returned. Parameters of methods inherited from an interface (ZIF~M) are not listed here."),
+			mcp.WithString("class",
+				mcp.Description("Class name"),
+				mcp.Required(),
+			),
+			mcp.WithString("method",
+				mcp.Description("Method name (optional; default: all methods)"),
+			),
+			mcp.WithString("language",
+				mcp.Description("Language: one-character SAP key ('S') or ISO code ('ES'). Default: the class master language."),
+			),
+		), s.handleGetClassParamTexts)
+	}
+
+	if shouldRegister("SetClassParamText") {
+		s.mcpServer.AddTool(mcp.NewTool("SetClassParamText",
+			mcp.WithDescription("Set or clear the short text of ONE method parameter of a class (SE24). Only classes in local packages ($*) for now. Texts of methods and attributes are NOT done here: write them with an ABAP Doc '\"! <p class=\"shorttext synchronized\">text</p>' line above the declaration."),
+			mcp.WithString("class",
+				mcp.Description("Class name"),
+				mcp.Required(),
+			),
+			mcp.WithString("method",
+				mcp.Description("Method name"),
+				mcp.Required(),
+			),
+			mcp.WithString("parameter",
+				mcp.Description("Parameter name (e.g. IV_VALUE, RV_RESULT)"),
+				mcp.Required(),
+			),
+			mcp.WithString("description",
+				mcp.Description("New text, at most 60 characters, no line breaks. Leave empty and set clear=true to empty it."),
+			),
+			mcp.WithBoolean("clear",
+				mcp.Description("Empty the text (needed when description is empty)"),
+			),
+			mcp.WithString("language",
+				mcp.Description("Language: one-character SAP key ('S') or ISO code ('EN'). Default: the class master language. Each language has its own text, so this is also how a translation is written."),
+			),
+		), s.handleSetClassParamText)
+	}
 }
 
 // registerInstallTools registers install/setup tools.

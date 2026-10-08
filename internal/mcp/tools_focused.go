@@ -156,6 +156,9 @@ func focusedToolSet() map[string]bool {
 		"GetTextElements": true, // Get program text elements
 		"SetTextElements": true, // Set program text elements
 
+		// Class parameter short texts (SetClassParamText is a write)
+		"GetClassParamTexts": true, // Read the SE24 parameter texts of a class
+
 		// Install/Setup tools
 		"InstallZADTVSP":   true, // Deploy ZADT_VSP WebSocket handler to SAP
 		"InstallAbapGit":   true, // Deploy abapGit (standalone or dev edition) to SAP

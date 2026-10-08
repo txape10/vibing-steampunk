@@ -807,6 +807,7 @@ func GetAllToolNames() []string {
 		// Report execution (requires ZADT_VSP)
 		"RunReport", "RunReportAsync", "GetAsyncResult",
 		"GetVariants", "GetTextElements", "SetTextElements",
+		"GetClassParamTexts", "SetClassParamText",
 		// Debugger (requires ZADT_VSP, experimental)
 		"SetBreakpoint", "GetBreakpoints", "DeleteBreakpoint",
 		"DebuggerListen", "DebuggerAttach", "DebuggerDetach",

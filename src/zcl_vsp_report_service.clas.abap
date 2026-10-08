@@ -7,6 +7,113 @@ CLASS zcl_vsp_report_service DEFINITION
     INTERFACES zif_vsp_service.
 
   PRIVATE SECTION.
+    TYPES:
+      BEGIN OF ty_get_request,
+        class_name  TYPE string,
+        method_name TYPE string,
+        language    TYPE string,
+      END OF ty_get_request,
+
+      BEGIN OF ty_set_request,
+        class_name     TYPE string,
+        method_name    TYPE string,
+        parameter_name TYPE string,
+        description    TYPE string,
+        language       TYPE string,
+        clear_text     TYPE abap_bool,
+      END OF ty_set_request,
+
+      BEGIN OF ty_param_text,
+        name        TYPE string,
+        decl_type   TYPE string,
+        version     TYPE string,
+        description TYPE string,
+        has_text    TYPE abap_bool,
+      END OF ty_param_text,
+      ty_param_texts TYPE STANDARD TABLE OF ty_param_text WITH EMPTY KEY,
+
+      BEGIN OF ty_method_texts,
+        method_name TYPE string,
+        cmp_type    TYPE string,
+        params      TYPE ty_param_texts,
+      END OF ty_method_texts,
+      ty_method_texts_tab TYPE STANDARD TABLE OF ty_method_texts WITH EMPTY KEY,
+
+      BEGIN OF ty_get_response,
+        class_name      TYPE string,
+        package_name    TYPE string,
+        master_language TYPE string,
+        language        TYPE string,
+        method_list     TYPE ty_method_texts_tab,
+      END OF ty_get_response,
+
+      BEGIN OF ty_set_response,
+        status          TYPE string,
+        class_name      TYPE string,
+        method_name     TYPE string,
+        parameter_name  TYPE string,
+        language        TYPE string,
+        master_language TYPE string,
+        old_description TYPE string,
+        new_description TYPE string,
+        row_state       TYPE string,
+        verified        TYPE abap_bool,
+      END OF ty_set_response,
+
+      BEGIN OF ty_error,
+        code    TYPE string,
+        message TYPE string,
+      END OF ty_error.
+
+    METHODS handle_get_class_param_texts
+      IMPORTING is_message         TYPE zif_vsp_service=>ty_message
+      RETURNING VALUE(rs_response) TYPE zif_vsp_service=>ty_response.
+
+    METHODS handle_set_class_param_text
+      IMPORTING is_message         TYPE zif_vsp_service=>ty_message
+      RETURNING VALUE(rs_response) TYPE zif_vsp_service=>ty_response.
+
+    METHODS validate_set_request
+      IMPORTING is_req          TYPE ty_set_request
+      RETURNING VALUE(rs_error) TYPE ty_error.
+
+    METHODS locate_target
+      IMPORTING is_req        TYPE ty_set_request
+      EXPORTING es_error      TYPE ty_error
+                ev_lang       TYPE sy-langu
+                ev_masterlang TYPE tadir-masterlang.
+
+    METHODS apply_set_request
+      IMPORTING iv_id              TYPE string
+                is_req             TYPE ty_set_request
+                iv_lang            TYPE sy-langu
+                iv_masterlang      TYPE tadir-masterlang
+      RETURNING VALUE(rs_response) TYPE zif_vsp_service=>ty_response.
+
+    METHODS modify_param_text
+      IMPORTING is_co           TYPE seosubco
+                is_df           TYPE seosubcodf
+                iv_lang         TYPE sy-langu
+                iv_description  TYPE string
+      RETURNING VALUE(rv_error) TYPE string.
+
+    METHODS resolve_class
+      IMPORTING iv_class      TYPE string
+      EXPORTING ev_found      TYPE abap_bool
+                ev_devclass   TYPE tadir-devclass
+                ev_masterlang TYPE tadir-masterlang.
+
+    METHODS resolve_language
+      IMPORTING iv_language TYPE string
+                iv_default  TYPE sy-langu
+      EXPORTING ev_lang     TYPE sy-langu
+                ev_ok       TYPE abap_bool.
+
+    METHODS set_result
+      IMPORTING iv_id              TYPE string
+                is_result          TYPE ty_set_response
+      RETURNING VALUE(rs_response) TYPE zif_vsp_service=>ty_response.
+
     METHODS handle_run_report
       IMPORTING is_message         TYPE zif_vsp_service=>ty_message
       RETURNING VALUE(rs_response) TYPE zif_vsp_service=>ty_response.
@@ -62,6 +169,10 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
         rs_response = handle_set_text_elements( is_message ).
       WHEN 'getVariants'.
         rs_response = handle_get_variants( is_message ).
+      WHEN 'getClassParamTexts'.
+        rs_response = handle_get_class_param_texts( is_message ).
+      WHEN 'setClassParamText'.
+        rs_response = handle_set_class_param_text( is_message ).
       WHEN OTHERS.
         rs_response = build_error(
           iv_id      = is_message-id
@@ -505,6 +616,424 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
     lv_json = |{ lv_json }]{ lv_c }|.
     rs_response = VALUE #( id = is_message-id success = abap_true data = lv_json ).
+  ENDMETHOD.
+
+  METHOD resolve_class.
+    DATA lv_class TYPE tadir-obj_name.
+
+    ev_found = abap_false.
+    lv_class = to_upper( iv_class ).
+
+    SELECT SINGLE devclass, masterlang FROM tadir
+      WHERE pgmid    = 'R3TR'
+        AND object   = 'CLAS'
+        AND obj_name = @lv_class
+      INTO ( @ev_devclass, @ev_masterlang ).
+    IF sy-subrc = 0.
+      ev_found = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD resolve_language.
+    ev_ok = abap_false.
+
+    IF iv_language IS INITIAL.
+      ev_lang = iv_default.
+    ELSEIF strlen( iv_language ) = 1.
+      " 1 character is already a SAP language key
+      ev_lang = to_upper( iv_language ).
+    ELSE.
+      " 2 characters are ISO (ES -> S)
+      DATA(lv_iso) = to_upper( iv_language ).
+      CALL FUNCTION 'CONVERSION_EXIT_ISOLA_INPUT'
+        EXPORTING
+          input            = lv_iso
+        IMPORTING
+          output           = ev_lang
+        EXCEPTIONS
+          unknown_language = 1
+          OTHERS           = 2.
+      IF sy-subrc <> 0.
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    " The default (master language) is checked too: a blank language would
+    " write a row with a blank key.
+    SELECT SINGLE spras FROM t002 WHERE spras = @ev_lang INTO @DATA(lv_spras).
+    ev_ok = xsdbool( sy-subrc = 0 ).
+  ENDMETHOD.
+
+  METHOD set_result.
+    DATA(lv_data) = /ui2/cl_json=>serialize(
+      data        = is_result
+      pretty_name = /ui2/cl_json=>pretty_mode-low_case ).
+    rs_response = VALUE #( id = iv_id success = abap_true data = lv_data ).
+  ENDMETHOD.
+
+  METHOD modify_param_text.
+    DATA lt_parameters TYPE seos_parameters_w.
+    DATA ls_parameter LIKE LINE OF lt_parameters.
+
+    " SEO_PARAMETER_MODIFY rewrites the whole active SEOSUBCODF row, so it
+    " needs the complete definition and not only the text.
+    MOVE-CORRESPONDING is_co TO ls_parameter.
+    MOVE-CORRESPONDING is_df TO ls_parameter.
+    ls_parameter-langu    = iv_lang.
+    ls_parameter-descript = iv_description.
+    APPEND ls_parameter TO lt_parameters.
+
+    CALL FUNCTION 'SEO_PARAMETER_MODIFY'
+      EXPORTING
+        parameters             = lt_parameters
+      EXCEPTIONS
+        component_not_existing = 1
+        not_specified          = 2
+        not_existing           = 3
+        OTHERS                 = 4.
+    IF sy-subrc <> 0.
+      rv_error = |SEO_PARAMETER_MODIFY failed (sy-subrc { sy-subrc })|.
+    ENDIF.
+
+    " No COMMIT WORK / ROLLBACK WORK here: both end the push channel with
+    " APC_ILLEGAL_STATEMENT. The framework commits when the handler returns.
+  ENDMETHOD.
+
+  METHOD handle_get_class_param_texts.
+    DATA ls_req TYPE ty_get_request.
+    DATA ls_response TYPE ty_get_response.
+    DATA lr_method TYPE RANGE OF seosubco-cmpname.
+
+    TRY.
+        /ui2/cl_json=>deserialize( EXPORTING json = is_message-params CHANGING data = ls_req ).
+      CATCH cx_root.
+        rs_response = build_error( iv_id = is_message-id iv_code = 'INVALID_PARAM' iv_message = 'Parameters are not valid JSON' ).
+        RETURN.
+    ENDTRY.
+
+    DATA(lv_class) = to_upper( ls_req-class_name ).
+    DATA(lv_method) = to_upper( ls_req-method_name ).
+    IF lv_class IS INITIAL.
+      rs_response = build_error( iv_id = is_message-id iv_code = 'MISSING_PARAM' iv_message = 'Parameter class_name is required' ).
+      RETURN.
+    ENDIF.
+
+    resolve_class(
+      EXPORTING iv_class      = lv_class
+      IMPORTING ev_found      = DATA(lv_found)
+                ev_devclass   = DATA(lv_devclass)
+                ev_masterlang = DATA(lv_masterlang) ).
+    IF lv_found = abap_false.
+      rs_response = build_error( iv_id = is_message-id iv_code = 'CLASS_NOT_FOUND' iv_message = |Class { lv_class } not found| ).
+      RETURN.
+    ENDIF.
+
+    resolve_language(
+      EXPORTING iv_language = ls_req-language
+                iv_default  = lv_masterlang
+      IMPORTING ev_lang     = DATA(lv_lang)
+                ev_ok       = DATA(lv_lang_ok) ).
+    IF lv_lang_ok = abap_false.
+      rs_response = build_error( iv_id = is_message-id iv_code = 'INVALID_LANGUAGE' iv_message = |Unknown language code: { ls_req-language }| ).
+      RETURN.
+    ENDIF.
+
+    DATA lv_class_key TYPE seosubco-clsname.
+    lv_class_key = lv_class.
+    IF lv_method IS NOT INITIAL.
+      lr_method = VALUE #( ( sign = 'I' option = 'EQ' low = lv_method ) ).
+    ENDIF.
+
+    SELECT t_co~cmpname, t_co~sconame, t_co~cmptype, t_df~version, t_df~pardecltyp, t_tx~descript
+      FROM seosubco AS t_co
+      INNER JOIN seosubcodf AS t_df
+        ON  t_df~clsname = t_co~clsname
+        AND t_df~cmpname = t_co~cmpname
+        AND t_df~sconame = t_co~sconame
+      LEFT OUTER JOIN seosubcotx AS t_tx
+        ON  t_tx~clsname = t_co~clsname
+        AND t_tx~cmpname = t_co~cmpname
+        AND t_tx~sconame = t_co~sconame
+        AND t_tx~langu   = @lv_lang
+      WHERE t_co~clsname = @lv_class_key
+        AND t_co~scotype = '0'
+        AND t_co~cmpname IN @lr_method
+      ORDER BY t_co~cmpname, t_co~sconame, t_df~version
+      INTO TABLE @DATA(lt_rows).
+
+    ls_response-class_name      = lv_class.
+    ls_response-package_name    = lv_devclass.
+    ls_response-master_language = lv_masterlang.
+    ls_response-language        = lv_lang.
+
+    LOOP AT lt_rows ASSIGNING FIELD-SYMBOL(<ls_row>).
+      ASSIGN ls_response-method_list[ method_name = <ls_row>-cmpname ] TO FIELD-SYMBOL(<ls_method>).
+      IF sy-subrc <> 0.
+        APPEND VALUE #( method_name = <ls_row>-cmpname cmp_type = <ls_row>-cmptype )
+          TO ls_response-method_list ASSIGNING <ls_method>.
+      ENDIF.
+
+      DATA(lv_version) = COND string( WHEN <ls_row>-version = '1' THEN 'active' ELSE 'inactive' ).
+      ASSIGN <ls_method>-params[ name = <ls_row>-sconame ] TO FIELD-SYMBOL(<ls_param>).
+      IF sy-subrc = 0.
+        <ls_param>-version = 'both'.
+      ELSE.
+        APPEND VALUE #(
+          name        = <ls_row>-sconame
+          decl_type   = <ls_row>-pardecltyp
+          version     = lv_version
+          description = <ls_row>-descript
+          has_text    = xsdbool( <ls_row>-descript IS NOT INITIAL ) )
+          TO <ls_method>-params.
+      ENDIF.
+    ENDLOOP.
+
+    DATA(lv_data) = /ui2/cl_json=>serialize(
+      data        = ls_response
+      pretty_name = /ui2/cl_json=>pretty_mode-low_case ).
+    rs_response = VALUE #( id = is_message-id success = abap_true data = lv_data ).
+  ENDMETHOD.
+
+  METHOD validate_set_request.
+    CONSTANTS lc_max_length TYPE i VALUE 60.
+
+    IF is_req-class_name IS INITIAL OR is_req-method_name IS INITIAL OR is_req-parameter_name IS INITIAL.
+      rs_error = VALUE #( code = 'MISSING_PARAM' message = 'class_name, method_name and parameter_name are required' ).
+    ELSEIF is_req-description IS INITIAL AND is_req-clear_text = abap_false.
+      rs_error = VALUE #( code = 'CLEAR_REQUIRED' message = 'An empty description needs clear_text = true' ).
+    ELSEIF is_req-description IS NOT INITIAL AND is_req-clear_text = abap_true.
+      rs_error = VALUE #( code = 'INVALID_PARAM' message = 'clear_text = true cannot be combined with a description' ).
+    ELSEIF strlen( is_req-description ) > lc_max_length.
+      rs_error = VALUE #( code = 'TEXT_TOO_LONG'
+                          message = |Description has { strlen( is_req-description ) } characters, the maximum is { lc_max_length }| ).
+    ELSEIF contains( val = is_req-description pcre = '[[:cntrl:]]' ).
+      rs_error = VALUE #( code = 'INVALID_PARAM' message = 'Description must not contain control characters (line breaks, tabs)' ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD locate_target.
+    CONSTANTS lc_local_package_prefix TYPE c LENGTH 1 VALUE '$'.
+    CONSTANTS lc_objtype_class        TYPE c LENGTH 4 VALUE 'CLAS'.
+    CONSTANTS lc_actvt_change         TYPE c LENGTH 2 VALUE '02'.
+    DATA lv_cls TYPE seosubco-clsname.
+
+    resolve_class(
+      EXPORTING iv_class      = is_req-class_name
+      IMPORTING ev_found      = DATA(lv_found)
+                ev_devclass   = DATA(lv_devclass)
+                ev_masterlang = ev_masterlang ).
+    IF lv_found = abap_false.
+      es_error = VALUE #( code = 'CLASS_NOT_FOUND' message = |Class { is_req-class_name } not found| ).
+      RETURN.
+    ENDIF.
+
+    " Transportable packages are not supported yet: the change has to be
+    " recorded in a request (LIMU CLSD + CPUB), which this action does not do.
+    IF lv_devclass(1) <> lc_local_package_prefix.
+      es_error = VALUE #( code = 'NON_LOCAL_PACKAGE'
+                          message = |Class { is_req-class_name } is in transportable package { lv_devclass }; only local packages are supported| ).
+      RETURN.
+    ENDIF.
+
+    resolve_language(
+      EXPORTING iv_language = is_req-language
+                iv_default  = ev_masterlang
+      IMPORTING ev_lang     = ev_lang
+                ev_ok       = DATA(lv_lang_ok) ).
+    IF lv_lang_ok = abap_false.
+      es_error = VALUE #( code = 'INVALID_LANGUAGE' message = |Unknown language code: { is_req-language }| ).
+      RETURN.
+    ENDIF.
+
+    lv_cls = is_req-class_name.
+    AUTHORITY-CHECK OBJECT 'S_DEVELOP'
+      ID 'DEVCLASS' FIELD lv_devclass
+      ID 'OBJTYPE'  FIELD lc_objtype_class
+      ID 'OBJNAME'  FIELD lv_cls
+      ID 'P_GROUP'  DUMMY
+      ID 'ACTVT'    FIELD lc_actvt_change.
+    IF sy-subrc <> 0.
+      es_error = VALUE #( code = 'NO_AUTHORIZATION' message = |No change authorization (S_DEVELOP) for class { is_req-class_name }| ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD apply_set_request.
+    " Runs inside the class lock: everything read here is what gets rewritten.
+    CONSTANTS lc_version_active   TYPE seosubcodf-version VALUE '1'.
+    CONSTANTS lc_version_inactive TYPE seosubcodf-version VALUE '0'.
+    CONSTANTS lc_scotype_param    TYPE seosubco-scotype VALUE '0'.
+    DATA lv_cls TYPE seosubco-clsname.
+    DATA lv_cmp TYPE seosubco-cmpname.
+    DATA lv_sco TYPE seosubco-sconame.
+
+    lv_cls = is_req-class_name.
+    lv_cmp = is_req-method_name.
+    lv_sco = is_req-parameter_name.
+
+    SELECT SINGLE * FROM seosubco
+      WHERE clsname = @lv_cls AND cmpname = @lv_cmp AND sconame = @lv_sco
+      INTO @DATA(ls_co).
+    IF sy-subrc <> 0.
+      SELECT SINGLE cmpname FROM seocompo
+        WHERE clsname = @lv_cls AND cmpname = @lv_cmp
+        INTO @DATA(lv_cmp_found).
+      IF sy-subrc = 0.
+        rs_response = build_error( iv_id = iv_id iv_code = 'PARAM_NOT_FOUND' iv_message = |Parameter { is_req-parameter_name } not found in method { is_req-method_name }| ).
+      ELSEIF is_req-method_name CS '~'.
+        rs_response = build_error( iv_id = iv_id iv_code = 'METHOD_NOT_FOUND' iv_message = |Method { is_req-method_name } is inherited from an interface; change the text in the interface| ).
+      ELSE.
+        rs_response = build_error( iv_id = iv_id iv_code = 'METHOD_NOT_FOUND' iv_message = |Method { is_req-method_name } not found in class { is_req-class_name }| ).
+      ENDIF.
+      RETURN.
+    ENDIF.
+    IF ls_co-scotype <> lc_scotype_param.
+      rs_response = build_error( iv_id = iv_id iv_code = 'PARAM_NOT_FOUND' iv_message = |{ is_req-parameter_name } is not a parameter (it is an exception)| ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE * FROM seosubcodf
+      WHERE clsname = @lv_cls AND cmpname = @lv_cmp AND sconame = @lv_sco AND version = @lc_version_active
+      INTO @DATA(ls_df).
+    IF sy-subrc <> 0.
+      rs_response = build_error( iv_id = iv_id iv_code = 'PARAM_INACTIVE_ONLY' iv_message = |Parameter { is_req-parameter_name } has no active version; activate the class first| ).
+      RETURN.
+    ENDIF.
+
+    " With a pending inactive version it is not verified whether activating it
+    " keeps the text, so refuse instead of risking a lost change.
+    SELECT SINGLE version FROM seosubcodf
+      WHERE clsname = @lv_cls AND cmpname = @lv_cmp AND sconame = @lv_sco AND version = @lc_version_inactive
+      INTO @DATA(lv_inactive).
+    IF sy-subrc = 0.
+      rs_response = build_error( iv_id = iv_id iv_code = 'CLASS_HAS_INACTIVE_VERSION' iv_message = |Parameter { is_req-parameter_name } has a pending inactive version; activate the class first| ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE descript FROM seosubcotx
+      WHERE clsname = @lv_cls AND cmpname = @lv_cmp AND sconame = @lv_sco AND langu = @iv_lang
+      INTO @DATA(lv_old).
+    DATA(lv_row_existed) = xsdbool( sy-subrc = 0 ).
+
+    DATA(ls_result) = VALUE ty_set_response(
+      class_name      = is_req-class_name
+      method_name     = is_req-method_name
+      parameter_name  = is_req-parameter_name
+      language        = iv_lang
+      master_language = iv_masterlang
+      old_description = lv_old
+      new_description = is_req-description ).
+
+    IF ( lv_row_existed = abap_true AND lv_old = CONV seodescr( is_req-description ) )
+       OR ( lv_row_existed = abap_false AND is_req-description IS INITIAL ).
+      ls_result-status    = 'unchanged'.
+      ls_result-row_state = COND #( WHEN lv_row_existed = abap_false THEN 'absent'
+                                    WHEN lv_old IS INITIAL THEN 'blank'
+                                    ELSE 'present' ).
+      ls_result-verified  = abap_true.
+      rs_response = set_result( iv_id = iv_id is_result = ls_result ).
+      RETURN.
+    ENDIF.
+
+    DATA(lv_error) = modify_param_text(
+      is_co          = ls_co
+      is_df          = ls_df
+      iv_lang        = iv_lang
+      iv_description = is_req-description ).
+    IF lv_error IS NOT INITIAL.
+      rs_response = build_error( iv_id = iv_id iv_code = 'MODIFY_FAILED' iv_message = |{ lv_error } (state may be partial: check with param_texts)| ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE descript FROM seosubcotx
+      WHERE clsname = @lv_cls AND cmpname = @lv_cmp AND sconame = @lv_sco AND langu = @iv_lang
+      INTO @DATA(lv_new).
+    DATA(lv_row_exists_after) = xsdbool( sy-subrc = 0 ).
+
+    ls_result-status    = 'changed'.
+    ls_result-row_state = COND #( WHEN lv_row_exists_after = abap_false THEN 'absent'
+                                  WHEN lv_new IS INITIAL THEN 'blank'
+                                  ELSE 'present' ).
+    ls_result-verified  = xsdbool( ( is_req-description IS INITIAL AND lv_new IS INITIAL )
+                                   OR ( is_req-description IS NOT INITIAL AND lv_new = CONV seodescr( is_req-description ) ) ).
+    IF ls_result-verified = abap_false.
+      rs_response = build_error( iv_id = iv_id iv_code = 'VERIFY_FAILED' iv_message = |The change may have been saved; the table shows '{ lv_new }'. Check with param_texts| ).
+      RETURN.
+    ENDIF.
+
+    rs_response = set_result( iv_id = iv_id is_result = ls_result ).
+  ENDMETHOD.
+
+  METHOD handle_set_class_param_text.
+    DATA ls_req TYPE ty_set_request.
+    DATA lv_lock_name TYPE seoclsenq-clsname.
+
+    TRY.
+        /ui2/cl_json=>deserialize( EXPORTING json = is_message-params CHANGING data = ls_req ).
+      CATCH cx_root.
+        rs_response = build_error( iv_id = is_message-id iv_code = 'INVALID_PARAM' iv_message = 'Parameters are not valid JSON' ).
+        RETURN.
+    ENDTRY.
+
+    ls_req-class_name     = to_upper( ls_req-class_name ).
+    ls_req-method_name    = to_upper( ls_req-method_name ).
+    ls_req-parameter_name = to_upper( ls_req-parameter_name ).
+    " Trailing blanks do not survive CHAR60, so compare and store the trimmed text
+    ls_req-description    = shift_right( val = shift_left( val = ls_req-description sub = ` ` ) sub = ` ` ).
+
+    DATA(ls_error) = validate_set_request( ls_req ).
+    IF ls_error IS INITIAL.
+      locate_target(
+        EXPORTING is_req        = ls_req
+        IMPORTING es_error      = ls_error
+                  ev_lang       = DATA(lv_lang)
+                  ev_masterlang = DATA(lv_masterlang) ).
+    ENDIF.
+    IF ls_error IS NOT INITIAL.
+      rs_response = build_error( iv_id = is_message-id iv_code = ls_error-code iv_message = ls_error-message ).
+      RETURN.
+    ENDIF.
+
+    " _scope 1 keeps the lock out of the update task, so the DEQUEUE below is
+    " what releases it; the WebSocket session is long-lived and would hold it
+    " otherwise. Locking comes before any read: what is read is what is rewritten.
+    " SE24 and ADT lock the class under its class-pool name (padded with '='
+    " to 30 characters). A name padded with blanks is a different lock
+    " argument and would never collide with theirs.
+    lv_lock_name = ls_req-class_name.
+    TRANSLATE lv_lock_name USING ' ='.
+    CALL FUNCTION 'ENQUEUE_ESEOCLASS'
+      EXPORTING
+        mode_seoclsenq = 'E'
+        clsname        = lv_lock_name
+        _scope         = '1'
+      EXCEPTIONS
+        foreign_lock   = 1
+        system_failure = 2
+        OTHERS         = 3.
+    CASE sy-subrc.
+      WHEN 0.
+      WHEN 1.
+        rs_response = build_error( iv_id = is_message-id iv_code = 'FOREIGN_LOCK' iv_message = |Class { ls_req-class_name } is locked by user { sy-msgv1 }| ).
+        RETURN.
+      WHEN OTHERS.
+        rs_response = build_error( iv_id = is_message-id iv_code = 'LOCK_FAILED' iv_message = |Could not lock class { ls_req-class_name }| ).
+        RETURN.
+    ENDCASE.
+
+    TRY.
+        rs_response = apply_set_request(
+          iv_id         = is_message-id
+          is_req        = ls_req
+          iv_lang       = lv_lang
+          iv_masterlang = lv_masterlang ).
+      CATCH cx_root INTO DATA(lx_error).
+        rs_response = build_error( iv_id = is_message-id iv_code = 'MODIFY_FAILED' iv_message = |{ lx_error->get_text( ) } (state may be partial: check with param_texts)| ).
+    ENDTRY.
+
+    CALL FUNCTION 'DEQUEUE_ESEOCLASS'
+      EXPORTING
+        mode_seoclsenq = 'E'
+        clsname        = lv_lock_name.
   ENDMETHOD.
 
   METHOD extract_param.

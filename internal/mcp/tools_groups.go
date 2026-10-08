@@ -34,6 +34,7 @@ func toolGroups() map[string][]string {
 		},
 		"R": { // Report execution tools (via ZADT_VSP WebSocket)
 			"RunReport", "GetVariants", "GetTextElements", "SetTextElements",
+			"GetClassParamTexts", "SetClassParamText",
 		},
 		"I": { // Install/Setup tools
 			"InstallZADTVSP",

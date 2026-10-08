@@ -6,8 +6,11 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
 
 // routeDescriptionAction routes the description ops on the universal tool:
@@ -34,8 +37,92 @@ func (s *Server) routeDescriptionAction(ctx context.Context, action, objectType,
 			args["transport"] = v
 		}
 		return s.callHandler(ctx, s.handleSetDescription, args)
+	case action == "read" && t == "param_texts":
+		return s.callHandler(ctx, s.handleGetClassParamTexts, paramTextArgs(objectType, objectName, params))
+	case action == "edit" && t == "set_param_text":
+		return s.callHandler(ctx, s.handleSetClassParamText, paramTextArgs(objectType, objectName, params))
 	}
 	return nil, false, nil
+}
+
+// paramTextArgs builds the arguments of the parameter-text handlers from a
+// target such as "CLAS ZCL_X" and the params; params.class overrides the
+// target. clear travels as a bool (getStringParam would drop it).
+func paramTextArgs(objectType, objectName string, params map[string]any) map[string]any {
+	args := map[string]any{}
+	if objectType != "" {
+		args["object_type"] = objectType
+	}
+	if objectName != "" {
+		args["class"] = objectName
+	}
+	for _, key := range []string{"class", "method", "parameter", "description", "language", "transport"} {
+		if v := getStringParam(params, key); v != "" {
+			args[key] = v
+		}
+	}
+	if clearText, ok := getBoolParam(params, "clear"); ok {
+		args["clear"] = clearText
+	}
+	return args
+}
+
+func (s *Server) handleGetClassParamTexts(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+	if t := getStringParam(args, "object_type"); t != "" && t != "CLAS" {
+		return newToolResultError("parameter texts are only supported for classes (CLAS); interfaces are not supported yet"), nil
+	}
+	class := getStringParam(args, "class")
+	if class == "" {
+		return newToolResultError("class is required (target \"CLAS ZCL_X\")"), nil
+	}
+	if errResult := s.ensureWSConnected(ctx, "GetClassParamTexts"); errResult != nil {
+		return errResult, nil
+	}
+	res, err := s.amdpWSClient.GetClassParamTexts(ctx, class, getStringParam(args, "method"), getStringParam(args, "language"))
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("GetClassParamTexts failed: %v", err)), nil
+	}
+	return newToolResultJSON(res), nil
+}
+
+func (s *Server) handleSetClassParamText(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Nothing below may touch the network before the safety checks.
+	if refused := s.refuseUnderSafety(adt.OpUpdate, "SetClassParamText"); refused != nil {
+		return refused, nil
+	}
+	args := request.GetArguments()
+	if t := getStringParam(args, "object_type"); t != "" && t != "CLAS" {
+		return newToolResultError("parameter texts are only supported for classes (CLAS); interfaces are not supported yet"), nil
+	}
+	if getStringParam(args, "transport") != "" {
+		return newToolResultError("transportable classes are not supported yet: only classes in local packages ($*) can be changed"), nil
+	}
+	clearText, _ := getBoolParam(args, "clear")
+	p := adt.SetClassParamTextParams{
+		Class:       getStringParam(args, "class"),
+		Method:      getStringParam(args, "method"),
+		Parameter:   getStringParam(args, "parameter"),
+		Description: getStringParam(args, "description"),
+		Language:    getStringParam(args, "language"),
+		Clear:       clearText,
+	}
+	if err := adt.ValidateClassParamTextParams(p); err != nil {
+		return newToolResultError(fmt.Sprintf("SetClassParamText: %v", err)), nil
+	}
+	// The package policy (--allowed-packages) is enforced here, before the
+	// WebSocket is opened; the "local package only" rule is enforced by SAP.
+	if _, err := s.adtClient.PrepareSourceUpdate(ctx, "/sap/bc/adt/oo/classes/"+url.PathEscape(strings.ToLower(p.Class)), ""); err != nil {
+		return newToolResultError(fmt.Sprintf("SetClassParamText: %v", err)), nil
+	}
+	if errResult := s.ensureWSConnected(ctx, "SetClassParamText"); errResult != nil {
+		return errResult, nil
+	}
+	res, err := s.amdpWSClient.SetClassParamText(ctx, p)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("SetClassParamText failed: %v", err)), nil
+	}
+	return newToolResultJSON(res), nil
 }
 
 // descriptionArgs fills object_type / name / parent from a target such as

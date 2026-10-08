@@ -39,6 +39,7 @@ Read metadata:
   SAP(action="read", target="DEVC $TMP")             - Package info
   SAP(action="read", target="MSAG ZMSG_CLASS")       - Message class
   SAP(action="read", target="PROG ZREPORT", params={"type": "description"}) - SE80 short description
+  SAP(action="read", target="CLAS ZCL_X", params={"type": "param_texts", "method": "M", "language": "EN"}) - SE24 parameter short texts (method/language optional)
   SAP(action="read", target="TRAN SM30")              - Transaction info
   SAP(action="read", target="TYPE_INFO ZTYPE")        - Type info
   SAP(action="read", target="STRUCT ZSTRUCT")         - Structure definition
@@ -63,6 +64,12 @@ Method-level edit (CLAS only):
 Change the SE80/SE11 short description (no source rewrite):
   SAP(action="edit", target="PROG ZREPORT", params={"type": "set_description", "description": "New short text"})
   SAP(action="edit", target="FUNC Z_FM", params={"type": "set_description", "description": "...", "parent": "Z_FG"})
+
+Change the short text of ONE method parameter (SE24; classes in local packages only, needs ZADT_VSP):
+  SAP(action="edit", target="CLAS ZCL_X", params={"type": "set_param_text", "method": "M", "parameter": "IV_A", "description": "Text (max 60)", "language": "EN"})
+  SAP(action="edit", target="CLAS ZCL_X", params={"type": "set_param_text", "method": "M", "parameter": "IV_A", "clear": true})
+  language: 1-char SAP key or ISO code; default = class master language; each language has its own text.
+  Method/attribute texts are NOT done here: use ABAP Doc "! <p class="shorttext synchronized">text</p> above the declaration.
 
 Surgical edit (find and replace in source):
   SAP(action="edit", target="EDITSOURCE", params={"object_url": "/sap/bc/adt/oo/classes/zcl_test", "old_string": "old code", "new_string": "new code"})
