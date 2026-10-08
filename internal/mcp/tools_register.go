@@ -2379,7 +2379,7 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("GetClassParamTexts") {
 		s.mcpServer.AddTool(mcp.NewTool("GetClassParamTexts",
-			mcp.WithDescription("Get the short texts (SE24 'Description' column) of the method parameters of a class. Without 'method' all methods are returned. Parameters of methods inherited from an interface (ZIF~M) are not listed here."),
+			mcp.WithDescription("Get the short texts (SE24 'Description' column) of the method parameters of a class. Without 'method' all methods are returned. Exceptions of the methods are listed too (kind=exception). Methods inherited from an interface (ZIF~M) are not listed here."),
 			mcp.WithString("class",
 				mcp.Description("Class name"),
 				mcp.Required(),
@@ -2395,7 +2395,7 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("SetClassParamText") {
 		s.mcpServer.AddTool(mcp.NewTool("SetClassParamText",
-			mcp.WithDescription("Set or clear the short text of ONE method parameter of a class (SE24). Classes in a transportable package need transport (an existing, modifiable workbench request of yours, never a task); it is never chosen or created for you. Texts of methods and attributes are NOT done here: write them with an ABAP Doc '\"! <p class=\"shorttext synchronized\">text</p>' line above the declaration."),
+			mcp.WithDescription("Set or clear the short text of ONE method parameter or exception of a class (SE24). Classes in a transportable package need transport (an existing, modifiable workbench request of yours, never a task); it is never chosen or created for you. Texts of methods and attributes are NOT done here: write them with an ABAP Doc '\"! <p class=\"shorttext synchronized\">text</p>' line above the declaration."),
 			mcp.WithString("class",
 				mcp.Description("Class name"),
 				mcp.Required(),
@@ -2405,7 +2405,7 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 				mcp.Required(),
 			),
 			mcp.WithString("parameter",
-				mcp.Description("Parameter name (e.g. IV_VALUE, RV_RESULT)"),
+				mcp.Description("Parameter or exception name (e.g. IV_VALUE, RV_RESULT, CX_STATIC_CHECK)"),
 				mcp.Required(),
 			),
 			mcp.WithString("description",

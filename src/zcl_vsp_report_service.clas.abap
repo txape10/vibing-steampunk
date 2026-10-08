@@ -26,6 +26,7 @@ CLASS zcl_vsp_report_service DEFINITION
 
       BEGIN OF ty_param_text,
         name        TYPE string,
+        kind        TYPE string,
         decl_type   TYPE string,
         version     TYPE string,
         description TYPE string,
@@ -53,6 +54,7 @@ CLASS zcl_vsp_report_service DEFINITION
         class_name      TYPE string,
         method_name     TYPE string,
         parameter_name  TYPE string,
+        kind            TYPE string,
         language        TYPE string,
         master_language TYPE string,
         old_description TYPE string,
@@ -80,7 +82,7 @@ CLASS zcl_vsp_report_service DEFINITION
     CONSTANTS gc_trfunction_unclassified TYPE e070-trfunction VALUE 'X'.
     CONSTANTS gc_version_active       TYPE seosubcodf-version VALUE '1'.
     CONSTANTS gc_version_inactive     TYPE seosubcodf-version VALUE '0'.
-    CONSTANTS gc_scotype_param        TYPE seosubco-scotype VALUE '0'.
+    CONSTANTS gc_scotype_exception    TYPE seosubco-scotype VALUE '1'.
 
     METHODS handle_get_class_param_texts
       IMPORTING is_message         TYPE zif_vsp_service=>ty_message
@@ -196,6 +198,24 @@ CLASS zcl_vsp_report_service DEFINITION
                 iv_lang         TYPE sy-langu
                 iv_description  TYPE string
       RETURNING VALUE(rv_error) TYPE string.
+
+    METHODS modify_exception_text
+      IMPORTING is_co           TYPE seosubco
+                is_df           TYPE seosubcodf
+                iv_lang         TYPE sy-langu
+                iv_description  TYPE string
+      RETURNING VALUE(rv_error) TYPE string.
+
+    METHODS modify_subco_text
+      IMPORTING is_co           TYPE seosubco
+                is_df           TYPE seosubcodf
+                iv_lang         TYPE sy-langu
+                iv_description  TYPE string
+      RETURNING VALUE(rv_error) TYPE string.
+
+    METHODS subco_kind
+      IMPORTING iv_scotype     TYPE seosubco-scotype
+      RETURNING VALUE(rv_kind) TYPE string.
 
     METHODS resolve_class
       IMPORTING iv_class      TYPE string
@@ -799,6 +819,41 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
     " APC_ILLEGAL_STATEMENT. The framework commits when the handler returns.
   ENDMETHOD.
 
+  METHOD modify_exception_text.
+    DATA lt_exceptions TYPE seos_exceptions_w.
+    DATA ls_exception LIKE LINE OF lt_exceptions.
+
+    MOVE-CORRESPONDING is_co TO ls_exception.
+    MOVE-CORRESPONDING is_df TO ls_exception.
+    ls_exception-langu    = iv_lang.
+    ls_exception-descript = iv_description.
+    APPEND ls_exception TO lt_exceptions.
+
+    CALL FUNCTION 'SEO_EXCEPTION_MODIFY'
+      EXPORTING
+        exceps                 = lt_exceptions
+      EXCEPTIONS
+        component_not_existing = 1
+        not_specified          = 2
+        not_existing           = 3
+        OTHERS                 = 4.
+    IF sy-subrc <> 0.
+      rv_error = |SEO_EXCEPTION_MODIFY failed (sy-subrc { sy-subrc })|.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD modify_subco_text.
+    IF is_co-scotype = gc_scotype_exception.
+      rv_error = modify_exception_text( is_co = is_co is_df = is_df iv_lang = iv_lang iv_description = iv_description ).
+    ELSE.
+      rv_error = modify_param_text( is_co = is_co is_df = is_df iv_lang = iv_lang iv_description = iv_description ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD subco_kind.
+    rv_kind = COND #( WHEN iv_scotype = gc_scotype_exception THEN 'exception' ELSE 'parameter' ).
+  ENDMETHOD.
+
   METHOD handle_get_class_param_texts.
     DATA ls_req TYPE ty_get_request.
     DATA ls_response TYPE ty_get_response.
@@ -844,7 +899,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       lr_method = VALUE #( ( sign = 'I' option = 'EQ' low = lv_method ) ).
     ENDIF.
 
-    SELECT t_co~cmpname, t_co~sconame, t_co~cmptype, t_df~version, t_df~pardecltyp, t_tx~descript
+    SELECT t_co~cmpname, t_co~sconame, t_co~scotype, t_co~cmptype, t_df~version, t_df~pardecltyp, t_tx~descript
       FROM seosubco AS t_co
       INNER JOIN seosubcodf AS t_df
         ON  t_df~clsname = t_co~clsname
@@ -856,7 +911,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
         AND t_tx~sconame = t_co~sconame
         AND t_tx~langu   = @lv_lang
       WHERE t_co~clsname = @lv_class_key
-        AND t_co~scotype = '0'
+        AND t_co~scotype IN ( '0', '1' )
         AND t_co~cmpname IN @lr_method
       ORDER BY t_co~cmpname, t_co~sconame, t_df~version
       INTO TABLE @DATA(lt_rows).
@@ -880,6 +935,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       ELSE.
         APPEND VALUE #(
           name        = <ls_row>-sconame
+          kind        = subco_kind( <ls_row>-scotype )
           decl_type   = <ls_row>-pardecltyp
           version     = lv_version
           description = <ls_row>-descript
@@ -1144,6 +1200,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       class_name      = is_req-class_name
       method_name     = is_req-method_name
       parameter_name  = is_req-parameter_name
+      kind            = subco_kind( ls_co-scotype )
       language        = iv_lang
       master_language = iv_masterlang
       old_description = lv_old
@@ -1166,7 +1223,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    DATA(lv_error) = modify_param_text(
+    DATA(lv_error) = modify_subco_text(
       is_co          = ls_co
       is_df          = ls_df
       iv_lang        = iv_lang
@@ -1205,8 +1262,8 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       es_error = describe_missing_param( is_key = is_key is_req = is_req ).
       RETURN.
     ENDIF.
-    IF es_co-scotype <> gc_scotype_param.
-      es_error = VALUE #( code = 'PARAM_NOT_FOUND' message = |{ is_req-parameter_name } is not a parameter (it is an exception)| ).
+    IF es_co-scotype NA '01'.
+      es_error = VALUE #( code = 'PARAM_NOT_FOUND' message = |{ is_req-parameter_name } is neither a parameter nor an exception| ).
       RETURN.
     ENDIF.
 
@@ -1236,7 +1293,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       WHERE clsname = @is_key-clsname AND cmpname = @is_key-cmpname
       INTO @DATA(lv_cmp_found).
     IF sy-subrc = 0.
-      rs_error = VALUE #( code = 'PARAM_NOT_FOUND' message = |Parameter { is_req-parameter_name } not found in method { is_req-method_name }| ).
+      rs_error = VALUE #( code = 'PARAM_NOT_FOUND' message = |Parameter or exception { is_req-parameter_name } not found in method { is_req-method_name }| ).
     ELSEIF is_req-method_name CS '~'.
       rs_error = VALUE #( code = 'METHOD_NOT_FOUND' message = |Method { is_req-method_name } is inherited from an interface; change the text in the interface| ).
     ELSE.

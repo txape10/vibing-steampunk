@@ -2225,7 +2225,26 @@ the code permanently — it is the fix, not a placeholder.
 - Files: `embedded/abap/zcl_vsp_report_service.clas.abap`, `src/zcl_vsp_report_service.clas.abap`,
   `pkg/adt/class_param_texts.go` (+`_test.go`), `internal/mcp/handlers_description.go`,
   `internal/mcp/handlers_description_paramtexts_test.go`, `internal/mcp/tools_register.go`, `internal/mcp/handlers_help.go`.
-- **Pending**: Phase 4 (exception texts, `SEO_EXCEPTION_MODIFY`), Phase 2b (interfaces).
+- **Pending**: Phase 2b (interfaces). Phase 4 (exceptions) is done, see 2as.
+
+### 2as. Class method-parameter short texts (SE24) — Phase 4: exception texts (2026-10-08)
+- **What changed**: `set_param_text` / `param_texts` also handle method **exceptions** (`SEOSUBCO-SCOTYPE = 1`, classic
+  `EXCEPTIONS` and class-based `RAISING`). The same `parameter` argument resolves a parameter or an exception (the key
+  `clsname+cmpname+sconame` is unique); responses carry `kind` (`parameter` | `exception`). Error codes are unchanged
+  (`PARAM_NOT_FOUND` now says "Parameter or exception ..."); any other `SCOTYPE` is refused.
+- **ABAP** (`ZCL_VSP_REPORT_SERVICE`): `modify_subco_text` picks the writer by `SCOTYPE`: `SEO_PARAMETER_MODIFY` or the new
+  `modify_exception_text` (`SEO_EXCEPTION_MODIFY`, `EXCEPS TYPE SEOS_EXCEPTIONS_W`, line type `LIKE VSEOEXCEP`; no commit,
+  no CTS, same as the parameter writer). Everything else (class lock, transport validation, `record_change`, verification) is reused.
+- **Go**: `Kind` in `ClassParamText` and `SetClassParamTextResult`; descriptions/help updated.
+- **Verified live (2026-10-08)**: throwaway `ZCL_VSP_TST_EXCTXT` in `$TMP` (classic `NO_DATA`/`BAD_INPUT`, `RAISING cx_static_check`):
+  write, translation (EN row beside ES), `clear` (blank row), 60 chars ok / 61 refused, unknown name `PARAM_NOT_FOUND`, a plain parameter
+  still works, text survives a save of the class. The whole `SEOSUBCODF` row is preserved (only `CHANGEDBY`/`CHANGEDON` change);
+  note that in the classes tested the source-position fields (`SRCROW*`, `DISPID`, `EXCDECLTYP`) were all zero, so a case where
+  they are non-zero is not covered. Transportable: `ZCL_AUTHORITY` (package `ZSU01`) with an own request, recorded `LIMU CLSD`+`CPUB`
+  (public methods), text restored; `SEOCLSENQ` empty afterwards.
+- **Not verified**: what SE24 itself records for **protected/private** methods (`CPRO`/`CPRI` instead of `CPUB`?). Historical `E071` of
+  `ZCL_LISTIN2` shows `CPRO`/`CPRI` entries but from whole-class saves; `ZCL_LISTIN2` could not be used (method locks in an old foreign request).
+  The writer always records `CLSD`+`CPUB`.
 
 ## Known Open Issues (Not Fixed)
 

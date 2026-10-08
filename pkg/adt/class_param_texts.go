@@ -22,9 +22,10 @@ const maxParamTextLength = 60
 // transportNumberPattern is a workbench request number: <SID>K<6 digits>.
 var transportNumberPattern = regexp.MustCompile(`^[A-Z0-9]{3}K[0-9]{6}$`)
 
-// ClassParamText is one parameter of a method and its short text.
+// ClassParamText is one parameter or exception of a method and its short text.
 type ClassParamText struct {
 	Name        string `json:"name"`
+	Kind        string `json:"kind"`      // parameter | exception
 	DeclType    string `json:"decl_type"` // 0 importing, 1 exporting, 2 changing, 3 returning
 	Version     string `json:"version"`   // active | inactive | both
 	Description string `json:"description"`
@@ -67,6 +68,7 @@ type SetClassParamTextResult struct {
 	ClassName      string `json:"class_name"`
 	MethodName     string `json:"method_name"`
 	ParameterName  string `json:"parameter_name"`
+	Kind           string `json:"kind"` // parameter | exception
 	Language       string `json:"language"`
 	MasterLanguage string `json:"master_language"`
 	OldDescription string `json:"old_description"`

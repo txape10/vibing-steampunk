@@ -79,24 +79,25 @@ func (e errString) Error() string { return string(e) }
 func TestClassParamTexts_DecodesABAPResponses(t *testing.T) {
 	get := `{"class_name":"ZCL_X","package_name":"$TMP","master_language":"S","language":"E",
 	"method_list":[{"method_name":"M","cmp_type":"1","params":[
-	{"name":"IV_A","decl_type":"0","version":"both","description":"Factor","has_text":true}]}]}`
+	{"name":"IV_A","kind":"parameter","decl_type":"0","version":"both","description":"Factor","has_text":true},
+	{"name":"NO_EXISTE","kind":"exception","decl_type":"","version":"active","description":"","has_text":false}]}]}`
 	var g ClassParamTexts
 	if err := json.Unmarshal([]byte(get), &g); err != nil {
 		t.Fatal(err)
 	}
 	if g.ClassName != "ZCL_X" || g.PackageName != "$TMP" || g.MasterLanguage != "S" || g.Language != "E" ||
-		len(g.Methods) != 1 || g.Methods[0].MethodName != "M" || len(g.Methods[0].Params) != 1 ||
-		g.Methods[0].Params[0].Name != "IV_A" || g.Methods[0].Params[0].Version != "both" || !g.Methods[0].Params[0].HasText {
+		len(g.Methods) != 1 || g.Methods[0].MethodName != "M" || len(g.Methods[0].Params) != 2 ||
+		g.Methods[0].Params[0].Name != "IV_A" || g.Methods[0].Params[0].Kind != "parameter" || g.Methods[0].Params[1].Kind != "exception" || g.Methods[0].Params[0].Version != "both" || !g.Methods[0].Params[0].HasText {
 		t.Errorf("get response not decoded: %+v", g)
 	}
 
-	set := `{"status":"changed","class_name":"ZCL_X","method_name":"M","parameter_name":"IV_A","language":"E",
+	set := `{"status":"changed","class_name":"ZCL_X","method_name":"M","parameter_name":"IV_A","kind":"exception","language":"E",
 	"master_language":"S","old_description":"a","new_description":"b","row_state":"present","verified":true}`
 	var s SetClassParamTextResult
 	if err := json.Unmarshal([]byte(set), &s); err != nil {
 		t.Fatal(err)
 	}
-	if s.Status != "changed" || s.ParameterName != "IV_A" || s.OldDescription != "a" || s.NewDescription != "b" ||
+	if s.Status != "changed" || s.ParameterName != "IV_A" || s.Kind != "exception" || s.OldDescription != "a" || s.NewDescription != "b" ||
 		s.RowState != "present" || !s.Verified {
 		t.Errorf("set response not decoded: %+v", s)
 	}

@@ -65,7 +65,7 @@ Change the SE80/SE11 short description (no source rewrite):
   SAP(action="edit", target="PROG ZREPORT", params={"type": "set_description", "description": "New short text"})
   SAP(action="edit", target="FUNC Z_FM", params={"type": "set_description", "description": "...", "parent": "Z_FG"})
 
-Change the short text of ONE method parameter (SE24; local or transportable packages (the latter needs the transport param), needs ZADT_VSP):
+Change the short text of ONE method parameter or exception (SE24; "parameter" accepts exception names too; local or transportable packages (the latter needs the transport param), needs ZADT_VSP):
   SAP(action="edit", target="CLAS ZCL_X", params={"type": "set_param_text", "method": "M", "parameter": "IV_A", "description": "Text (max 60)", "language": "EN"})
   SAP(action="edit", target="CLAS ZCL_X", params={"type": "set_param_text", "method": "M", "parameter": "IV_A", "clear": true})
   SAP(action="edit", target="CLAS ZCL_X", params={"type": "set_param_text", "method": "M", "parameter": "IV_A", "description": "Text", "transport": "TR-EXAMPLE"}) - transportable package: your own workbench request, already holding a modifiable task of yours, is required
