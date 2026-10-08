@@ -66,7 +66,19 @@ CLASS zcl_vsp_report_service DEFINITION
       BEGIN OF ty_error,
         code    TYPE string,
         message TYPE string,
-      END OF ty_error.
+      END OF ty_error,
+
+      BEGIN OF ty_param_key,
+        clsname TYPE seosubco-clsname,
+        cmpname TYPE seosubco-cmpname,
+        sconame TYPE seosubco-sconame,
+      END OF ty_param_key.
+
+    CONSTANTS gc_trfunction_workbench TYPE e070-trfunction VALUE 'K'.
+    CONSTANTS gc_trstatus_modifiable  TYPE e070-trstatus VALUE 'D'.
+    CONSTANTS gc_version_active       TYPE seosubcodf-version VALUE '1'.
+    CONSTANTS gc_version_inactive     TYPE seosubcodf-version VALUE '0'.
+    CONSTANTS gc_scotype_param        TYPE seosubco-scotype VALUE '0'.
 
     METHODS handle_get_class_param_texts
       IMPORTING is_message         TYPE zif_vsp_service=>ty_message
@@ -92,6 +104,38 @@ CLASS zcl_vsp_report_service DEFINITION
                 iv_devclass     TYPE tadir-devclass
       RETURNING VALUE(rs_error) TYPE ty_error.
 
+    METHODS check_transport_given
+      IMPORTING is_req          TYPE ty_set_request
+                iv_devclass     TYPE tadir-devclass
+      RETURNING VALUE(rs_error) TYPE ty_error.
+
+    METHODS read_request_header
+      IMPORTING iv_request TYPE trkorr
+      EXPORTING es_header  TYPE e070
+                es_error   TYPE ty_error.
+
+    METHODS check_request_ownership
+      IMPORTING iv_request      TYPE trkorr
+                is_header       TYPE e070
+      RETURNING VALUE(rs_error) TYPE ty_error.
+
+    METHODS has_own_modifiable_task
+      IMPORTING iv_request         TYPE trkorr
+      RETURNING VALUE(rv_has_task) TYPE abap_bool.
+
+    METHODS check_class_lock
+      IMPORTING iv_request      TYPE trkorr
+                iv_class        TYPE string
+      RETURNING VALUE(rs_error) TYPE ty_error.
+
+    METHODS request_of_lock
+      IMPORTING iv_trkorr         TYPE trkorr
+      RETURNING VALUE(rv_request) TYPE trkorr.
+
+    METHODS check_class_original
+      IMPORTING iv_class        TYPE string
+      RETURNING VALUE(rs_error) TYPE ty_error.
+
     METHODS record_in_request
       IMPORTING iv_request      TYPE trkorr
                 iv_class        TYPE string
@@ -104,6 +148,45 @@ CLASS zcl_vsp_report_service DEFINITION
                 iv_lang            TYPE sy-langu
                 iv_masterlang      TYPE tadir-masterlang
       RETURNING VALUE(rs_response) TYPE zif_vsp_service=>ty_response.
+
+    METHODS build_param_key
+      IMPORTING is_req        TYPE ty_set_request
+      RETURNING VALUE(rs_key) TYPE ty_param_key.
+
+    METHODS read_param_rows
+      IMPORTING is_key   TYPE ty_param_key
+                is_req   TYPE ty_set_request
+      EXPORTING es_co    TYPE seosubco
+                es_df    TYPE seosubcodf
+                es_error TYPE ty_error.
+
+    METHODS describe_missing_param
+      IMPORTING is_key          TYPE ty_param_key
+                is_req          TYPE ty_set_request
+      RETURNING VALUE(rs_error) TYPE ty_error.
+
+    METHODS read_param_text
+      IMPORTING is_key    TYPE ty_param_key
+                iv_lang   TYPE sy-langu
+      EXPORTING ev_text   TYPE seosubcotx-descript
+                ev_exists TYPE abap_bool.
+
+    METHODS row_state
+      IMPORTING iv_exists       TYPE abap_bool
+                iv_text         TYPE seosubcotx-descript
+      RETURNING VALUE(rv_state) TYPE string.
+
+    METHODS record_change
+      IMPORTING is_req    TYPE ty_set_request
+      EXPORTING es_error  TYPE ty_error
+      CHANGING  cs_result TYPE ty_set_response.
+
+    METHODS verify_written_text
+      IMPORTING is_key    TYPE ty_param_key
+                is_req    TYPE ty_set_request
+                iv_lang   TYPE sy-langu
+      EXPORTING es_error  TYPE ty_error
+      CHANGING  cs_result TYPE ty_set_response.
 
     METHODS modify_param_text
       IMPORTING is_co           TYPE seosubco
@@ -865,11 +948,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
   METHOD validate_transport.
     CONSTANTS lc_local_package_prefix TYPE c LENGTH 1 VALUE '$'.
-    CONSTANTS lc_trfunction_workbench TYPE e070-trfunction VALUE 'K'.
-    CONSTANTS lc_trstatus_modifiable  TYPE e070-trstatus VALUE 'D'.
-    CONSTANTS lc_objtype_class        TYPE tadir-object VALUE 'CLAS'.
-    DATA lv_request TYPE trkorr.
-    DATA lv_class   TYPE tadir-obj_name.
+    DATA ls_header TYPE e070.
 
     IF iv_devclass(1) = lc_local_package_prefix.
       IF is_req-transport IS NOT INITIAL.
@@ -879,6 +958,33 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       RETURN.
     ENDIF.
 
+    rs_error = check_transport_given( is_req = is_req iv_devclass = iv_devclass ).
+    IF rs_error IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA(lv_request) = CONV trkorr( is_req-transport ).
+    read_request_header( EXPORTING iv_request = lv_request
+                         IMPORTING es_header  = ls_header
+                                   es_error   = rs_error ).
+    IF rs_error IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    rs_error = check_request_ownership( iv_request = lv_request is_header = ls_header ).
+    IF rs_error IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    rs_error = check_class_lock( iv_request = lv_request iv_class = is_req-class_name ).
+    IF rs_error IS NOT INITIAL.
+      RETURN.
+    ENDIF.
+
+    rs_error = check_class_original( is_req-class_name ).
+  ENDMETHOD.
+
+  METHOD check_transport_given.
     IF is_req-transport IS INITIAL.
       rs_error = VALUE #( code = 'TRANSPORT_REQUIRED'
                           message = |Class { is_req-class_name } is in transportable package { iv_devclass }; a workbench request must be given| ).
@@ -886,71 +992,87 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
     ENDIF.
     IF NOT matches( val = is_req-transport pcre = '[A-Z0-9]{3}K[0-9]{6}' ).
       rs_error = VALUE #( code = 'TRANSPORT_INVALID' message = |{ is_req-transport } is not a transport request number| ).
-      RETURN.
     ENDIF.
+  ENDMETHOD.
 
-    lv_request = is_req-transport.
+  METHOD read_request_header.
+    CLEAR: es_header, es_error.
     SELECT SINGLE trfunction, trstatus, strkorr, as4user FROM e070
-      WHERE trkorr = @lv_request
-      INTO @DATA(ls_request).
+      WHERE trkorr = @iv_request
+      INTO CORRESPONDING FIELDS OF @es_header.
     IF sy-subrc <> 0.
-      rs_error = VALUE #( code = 'TRANSPORT_NOT_FOUND' message = |Transport request { lv_request } does not exist| ).
+      es_error = VALUE #( code = 'TRANSPORT_NOT_FOUND' message = |Transport request { iv_request } does not exist| ).
       RETURN.
     ENDIF.
-    IF ls_request-strkorr IS NOT INITIAL.
-      rs_error = VALUE #( code = 'TRANSPORT_IS_TASK'
-                          message = |{ lv_request } is a task; give its request { ls_request-strkorr }| ).
+    IF es_header-strkorr IS NOT INITIAL.
+      es_error = VALUE #( code = 'TRANSPORT_IS_TASK'
+                          message = |{ iv_request } is a task; give its request { es_header-strkorr }| ).
       RETURN.
     ENDIF.
-    IF ls_request-trfunction <> lc_trfunction_workbench.
-      rs_error = VALUE #( code = 'TRANSPORT_INVALID' message = |{ lv_request } is not a workbench request| ).
+    IF es_header-trfunction <> gc_trfunction_workbench.
+      es_error = VALUE #( code = 'TRANSPORT_INVALID' message = |{ iv_request } is not a workbench request| ).
       RETURN.
     ENDIF.
-    IF ls_request-trstatus <> lc_trstatus_modifiable.
-      rs_error = VALUE #( code = 'TRANSPORT_NOT_MODIFIABLE' message = |Transport request { lv_request } is not modifiable| ).
-      RETURN.
+    IF es_header-trstatus <> gc_trstatus_modifiable.
+      es_error = VALUE #( code = 'TRANSPORT_NOT_MODIFIABLE' message = |Transport request { iv_request } is not modifiable| ).
     ENDIF.
+  ENDMETHOD.
 
+  METHOD check_request_ownership.
     " The request has to be the user's own, or hold a modifiable task of theirs
-    IF ls_request-as4user <> sy-uname.
-      SELECT SINGLE trkorr FROM e070
-        WHERE strkorr = @lv_request AND as4user = @sy-uname AND trstatus = @lc_trstatus_modifiable
-        INTO @DATA(lv_own_task).
-      IF sy-subrc <> 0.
-        rs_error = VALUE #( code = 'TRANSPORT_NOT_OWNED'
-                            message = |Transport request { lv_request } belongs to { ls_request-as4user } and you have no task in it| ).
-        RETURN.
-      ENDIF.
+    IF is_header-as4user = sy-uname.
+      RETURN.
     ENDIF.
+    IF has_own_modifiable_task( iv_request ) = abap_false.
+      rs_error = VALUE #( code = 'TRANSPORT_NOT_OWNED'
+                          message = |Transport request { iv_request } belongs to { is_header-as4user } and you have no task in it| ).
+    ENDIF.
+  ENDMETHOD.
 
+  METHOD has_own_modifiable_task.
+    SELECT SINGLE trkorr FROM e070
+      WHERE strkorr = @iv_request AND as4user = @sy-uname AND trstatus = @gc_trstatus_modifiable
+      INTO @DATA(lv_own_task).
+    rv_has_task = xsdbool( sy-subrc = 0 ).
+  ENDMETHOD.
+
+  METHOD check_class_lock.
     " TLOCK keeps every lock of a class (whole class, CLSD, CPUB, METH...) under
     " OBJECT = CLAS, LOKEY = name padded to 30 characters + a suffix
-    DATA(lv_lock_pattern) = replace( val = is_req-class_name sub = '_' with = '#_' occ = 0 ) && '%'.
+    DATA(lv_lock_pattern) = replace( val = iv_class sub = '_' with = '#_' occ = 0 ) && '%'.
     SELECT trkorr, author, lokey FROM tlock
       WHERE object = 'CLAS' AND lokey LIKE @lv_lock_pattern ESCAPE '#'
       INTO TABLE @DATA(lt_locks).
-    DATA lv_lock_parent TYPE e070-strkorr.
     LOOP AT lt_locks INTO DATA(ls_lock).
-      IF ls_lock-lokey(30) <> is_req-class_name.
+      IF ls_lock-lokey(30) <> iv_class.
         CONTINUE.
       ENDIF.
-      CLEAR lv_lock_parent.
-      SELECT SINGLE strkorr FROM e070 WHERE trkorr = @ls_lock-trkorr INTO @lv_lock_parent.
-      DATA(lv_lock_request) = COND trkorr( WHEN lv_lock_parent IS INITIAL THEN ls_lock-trkorr ELSE lv_lock_parent ).
-      IF lv_lock_request <> lv_request.
+      DATA(lv_lock_request) = request_of_lock( ls_lock-trkorr ).
+      IF lv_lock_request <> iv_request.
         rs_error = VALUE #( code = 'OBJECT_LOCKED_IN_OTHER_REQUEST'
-                            message = |Class { is_req-class_name } is already in request { lv_lock_request } (user { ls_lock-author })| ).
+                            message = |Class { iv_class } is already in request { lv_lock_request } (user { ls_lock-author })| ).
         RETURN.
       ENDIF.
     ENDLOOP.
+  ENDMETHOD.
 
-    lv_class = is_req-class_name.
+  METHOD request_of_lock.
+    DATA lv_parent TYPE e070-strkorr.
+    SELECT SINGLE strkorr FROM e070 WHERE trkorr = @iv_trkorr INTO @lv_parent.
+    rv_request = COND trkorr( WHEN lv_parent IS INITIAL THEN iv_trkorr ELSE lv_parent ).
+  ENDMETHOD.
+
+  METHOD check_class_original.
+    CONSTANTS lc_objtype_class TYPE tadir-object VALUE 'CLAS'.
+    DATA lv_class TYPE tadir-obj_name.
+
+    lv_class = iv_class.
     SELECT SINGLE srcsystem FROM tadir
       WHERE pgmid = 'R3TR' AND object = @lc_objtype_class AND obj_name = @lv_class
       INTO @DATA(lv_srcsystem).
     IF sy-subrc = 0 AND lv_srcsystem <> sy-sysid.
       rs_error = VALUE #( code = 'ORIGINAL_IN_OTHER_SYSTEM'
-                          message = |Class { is_req-class_name } has its original in system { lv_srcsystem }| ).
+                          message = |Class { iv_class } has its original in system { lv_srcsystem }| ).
     ENDIF.
   ENDMETHOD.
 
@@ -988,60 +1110,27 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
   METHOD apply_set_request.
     " Runs inside the class lock: everything read here is what gets rewritten.
-    CONSTANTS lc_version_active   TYPE seosubcodf-version VALUE '1'.
-    CONSTANTS lc_version_inactive TYPE seosubcodf-version VALUE '0'.
-    CONSTANTS lc_scotype_param    TYPE seosubco-scotype VALUE '0'.
-    DATA lv_cls TYPE seosubco-clsname.
-    DATA lv_cmp TYPE seosubco-cmpname.
-    DATA lv_sco TYPE seosubco-sconame.
+    DATA ls_co         TYPE seosubco.
+    DATA ls_df         TYPE seosubcodf.
+    DATA ls_error      TYPE ty_error.
+    DATA lv_old        TYPE seosubcotx-descript.
+    DATA lv_old_exists TYPE abap_bool.
 
-    lv_cls = is_req-class_name.
-    lv_cmp = is_req-method_name.
-    lv_sco = is_req-parameter_name.
-
-    SELECT SINGLE * FROM seosubco
-      WHERE clsname = @lv_cls AND cmpname = @lv_cmp AND sconame = @lv_sco
-      INTO @DATA(ls_co).
-    IF sy-subrc <> 0.
-      SELECT SINGLE cmpname FROM seocompo
-        WHERE clsname = @lv_cls AND cmpname = @lv_cmp
-        INTO @DATA(lv_cmp_found).
-      IF sy-subrc = 0.
-        rs_response = build_error( iv_id = iv_id iv_code = 'PARAM_NOT_FOUND' iv_message = |Parameter { is_req-parameter_name } not found in method { is_req-method_name }| ).
-      ELSEIF is_req-method_name CS '~'.
-        rs_response = build_error( iv_id = iv_id iv_code = 'METHOD_NOT_FOUND' iv_message = |Method { is_req-method_name } is inherited from an interface; change the text in the interface| ).
-      ELSE.
-        rs_response = build_error( iv_id = iv_id iv_code = 'METHOD_NOT_FOUND' iv_message = |Method { is_req-method_name } not found in class { is_req-class_name }| ).
-      ENDIF.
-      RETURN.
-    ENDIF.
-    IF ls_co-scotype <> lc_scotype_param.
-      rs_response = build_error( iv_id = iv_id iv_code = 'PARAM_NOT_FOUND' iv_message = |{ is_req-parameter_name } is not a parameter (it is an exception)| ).
+    DATA(ls_key) = build_param_key( is_req ).
+    read_param_rows( EXPORTING is_key   = ls_key
+                               is_req   = is_req
+                     IMPORTING es_co    = ls_co
+                               es_df    = ls_df
+                               es_error = ls_error ).
+    IF ls_error IS NOT INITIAL.
+      rs_response = build_error( iv_id = iv_id iv_code = ls_error-code iv_message = ls_error-message ).
       RETURN.
     ENDIF.
 
-    SELECT SINGLE * FROM seosubcodf
-      WHERE clsname = @lv_cls AND cmpname = @lv_cmp AND sconame = @lv_sco AND version = @lc_version_active
-      INTO @DATA(ls_df).
-    IF sy-subrc <> 0.
-      rs_response = build_error( iv_id = iv_id iv_code = 'PARAM_INACTIVE_ONLY' iv_message = |Parameter { is_req-parameter_name } has no active version; activate the class first| ).
-      RETURN.
-    ENDIF.
-
-    " With a pending inactive version it is not verified whether activating it
-    " keeps the text, so refuse instead of risking a lost change.
-    SELECT SINGLE version FROM seosubcodf
-      WHERE clsname = @lv_cls AND cmpname = @lv_cmp AND sconame = @lv_sco AND version = @lc_version_inactive
-      INTO @DATA(lv_inactive).
-    IF sy-subrc = 0.
-      rs_response = build_error( iv_id = iv_id iv_code = 'CLASS_HAS_INACTIVE_VERSION' iv_message = |Parameter { is_req-parameter_name } has a pending inactive version; activate the class first| ).
-      RETURN.
-    ENDIF.
-
-    SELECT SINGLE descript FROM seosubcotx
-      WHERE clsname = @lv_cls AND cmpname = @lv_cmp AND sconame = @lv_sco AND langu = @iv_lang
-      INTO @DATA(lv_old).
-    DATA(lv_row_existed) = xsdbool( sy-subrc = 0 ).
+    read_param_text( EXPORTING is_key    = ls_key
+                               iv_lang   = iv_lang
+                     IMPORTING ev_text   = lv_old
+                               ev_exists = lv_old_exists ).
 
     DATA(ls_result) = VALUE ty_set_response(
       class_name      = is_req-class_name
@@ -1052,29 +1141,21 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       old_description = lv_old
       new_description = is_req-description ).
 
-    IF ( lv_row_existed = abap_true AND lv_old = CONV seodescr( is_req-description ) )
-       OR ( lv_row_existed = abap_false AND is_req-description IS INITIAL ).
+    IF ( lv_old_exists = abap_true AND lv_old = CONV seodescr( is_req-description ) )
+       OR ( lv_old_exists = abap_false AND is_req-description IS INITIAL ).
       ls_result-status    = 'unchanged'.
-      ls_result-row_state = COND #( WHEN lv_row_existed = abap_false THEN 'absent'
-                                    WHEN lv_old IS INITIAL THEN 'blank'
-                                    ELSE 'present' ).
+      ls_result-row_state = row_state( iv_exists = lv_old_exists iv_text = lv_old ).
       ls_result-verified  = abap_true.
       rs_response = set_result( iv_id = iv_id is_result = ls_result ).
       RETURN.
     ENDIF.
 
-    IF is_req-transport IS NOT INITIAL.
-      record_in_request(
-        EXPORTING iv_request      = CONV trkorr( is_req-transport )
-                  iv_class        = is_req-class_name
-        IMPORTING ev_no_recording = DATA(lv_no_recording)
-                  ev_error        = DATA(lv_record_error) ).
-      IF lv_record_error IS NOT INITIAL.
-        rs_response = build_error( iv_id = iv_id iv_code = 'TRANSPORT_RECORD_FAILED' iv_message = lv_record_error ).
-        RETURN.
-      ENDIF.
-      ls_result-transport = is_req-transport.
-      ls_result-recording = COND #( WHEN lv_no_recording = abap_true THEN 'not_needed' ELSE 'recorded' ).
+    record_change( EXPORTING is_req    = is_req
+                   IMPORTING es_error  = ls_error
+                   CHANGING  cs_result = ls_result ).
+    IF ls_error IS NOT INITIAL.
+      rs_response = build_error( iv_id = iv_id iv_code = ls_error-code iv_message = ls_error-message ).
+      RETURN.
     ENDIF.
 
     DATA(lv_error) = modify_param_text(
@@ -1088,23 +1169,119 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    SELECT SINGLE descript FROM seosubcotx
-      WHERE clsname = @lv_cls AND cmpname = @lv_cmp AND sconame = @lv_sco AND langu = @iv_lang
-      INTO @DATA(lv_new).
-    DATA(lv_row_exists_after) = xsdbool( sy-subrc = 0 ).
-
-    ls_result-status    = 'changed'.
-    ls_result-row_state = COND #( WHEN lv_row_exists_after = abap_false THEN 'absent'
-                                  WHEN lv_new IS INITIAL THEN 'blank'
-                                  ELSE 'present' ).
-    ls_result-verified  = xsdbool( ( is_req-description IS INITIAL AND lv_new IS INITIAL )
-                                   OR ( is_req-description IS NOT INITIAL AND lv_new = CONV seodescr( is_req-description ) ) ).
-    IF ls_result-verified = abap_false.
-      rs_response = build_error( iv_id = iv_id iv_code = 'VERIFY_FAILED' iv_message = |The change may have been saved; the table shows '{ lv_new }'. Check with param_texts| ).
+    verify_written_text( EXPORTING is_key    = ls_key
+                                   is_req    = is_req
+                                   iv_lang   = iv_lang
+                         IMPORTING es_error  = ls_error
+                         CHANGING  cs_result = ls_result ).
+    IF ls_error IS NOT INITIAL.
+      rs_response = build_error( iv_id = iv_id iv_code = ls_error-code iv_message = ls_error-message ).
       RETURN.
     ENDIF.
 
     rs_response = set_result( iv_id = iv_id is_result = ls_result ).
+  ENDMETHOD.
+
+  METHOD build_param_key.
+    rs_key-clsname = is_req-class_name.
+    rs_key-cmpname = is_req-method_name.
+    rs_key-sconame = is_req-parameter_name.
+  ENDMETHOD.
+
+  METHOD read_param_rows.
+    CLEAR: es_co, es_df, es_error.
+    SELECT SINGLE * FROM seosubco
+      WHERE clsname = @is_key-clsname AND cmpname = @is_key-cmpname AND sconame = @is_key-sconame
+      INTO @es_co.
+    IF sy-subrc <> 0.
+      es_error = describe_missing_param( is_key = is_key is_req = is_req ).
+      RETURN.
+    ENDIF.
+    IF es_co-scotype <> gc_scotype_param.
+      es_error = VALUE #( code = 'PARAM_NOT_FOUND' message = |{ is_req-parameter_name } is not a parameter (it is an exception)| ).
+      RETURN.
+    ENDIF.
+
+    SELECT SINGLE * FROM seosubcodf
+      WHERE clsname = @is_key-clsname AND cmpname = @is_key-cmpname AND sconame = @is_key-sconame
+        AND version = @gc_version_active
+      INTO @es_df.
+    IF sy-subrc <> 0.
+      es_error = VALUE #( code = 'PARAM_INACTIVE_ONLY' message = |Parameter { is_req-parameter_name } has no active version; activate the class first| ).
+      RETURN.
+    ENDIF.
+
+    " With a pending inactive version it is not verified whether activating it
+    " keeps the text, so refuse instead of risking a lost change.
+    SELECT SINGLE version FROM seosubcodf
+      WHERE clsname = @is_key-clsname AND cmpname = @is_key-cmpname AND sconame = @is_key-sconame
+        AND version = @gc_version_inactive
+      INTO @DATA(lv_inactive).
+    IF sy-subrc = 0.
+      es_error = VALUE #( code = 'CLASS_HAS_INACTIVE_VERSION'
+                          message = |Parameter { is_req-parameter_name } has a pending inactive version; activate the class first| ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD describe_missing_param.
+    SELECT SINGLE cmpname FROM seocompo
+      WHERE clsname = @is_key-clsname AND cmpname = @is_key-cmpname
+      INTO @DATA(lv_cmp_found).
+    IF sy-subrc = 0.
+      rs_error = VALUE #( code = 'PARAM_NOT_FOUND' message = |Parameter { is_req-parameter_name } not found in method { is_req-method_name }| ).
+    ELSEIF is_req-method_name CS '~'.
+      rs_error = VALUE #( code = 'METHOD_NOT_FOUND' message = |Method { is_req-method_name } is inherited from an interface; change the text in the interface| ).
+    ELSE.
+      rs_error = VALUE #( code = 'METHOD_NOT_FOUND' message = |Method { is_req-method_name } not found in class { is_req-class_name }| ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD read_param_text.
+    CLEAR: ev_text, ev_exists.
+    SELECT SINGLE descript FROM seosubcotx
+      WHERE clsname = @is_key-clsname AND cmpname = @is_key-cmpname AND sconame = @is_key-sconame
+        AND langu = @iv_lang
+      INTO @ev_text.
+    ev_exists = xsdbool( sy-subrc = 0 ).
+  ENDMETHOD.
+
+  METHOD row_state.
+    rv_state = COND #( WHEN iv_exists = abap_false THEN 'absent'
+                       WHEN iv_text IS INITIAL THEN 'blank'
+                       ELSE 'present' ).
+  ENDMETHOD.
+
+  METHOD record_change.
+    CLEAR es_error.
+    IF is_req-transport IS INITIAL.
+      RETURN.
+    ENDIF.
+    record_in_request(
+      EXPORTING iv_request      = CONV trkorr( is_req-transport )
+                iv_class        = is_req-class_name
+      IMPORTING ev_no_recording = DATA(lv_no_recording)
+                ev_error        = DATA(lv_record_error) ).
+    IF lv_record_error IS NOT INITIAL.
+      es_error = VALUE #( code = 'TRANSPORT_RECORD_FAILED' message = lv_record_error ).
+      RETURN.
+    ENDIF.
+    cs_result-transport = is_req-transport.
+    cs_result-recording = COND #( WHEN lv_no_recording = abap_true THEN 'not_needed' ELSE 'recorded' ).
+  ENDMETHOD.
+
+  METHOD verify_written_text.
+    CLEAR es_error.
+    read_param_text( EXPORTING is_key    = is_key
+                               iv_lang   = iv_lang
+                     IMPORTING ev_text   = DATA(lv_new)
+                               ev_exists = DATA(lv_exists_after) ).
+    cs_result-status    = 'changed'.
+    cs_result-row_state = row_state( iv_exists = lv_exists_after iv_text = lv_new ).
+    cs_result-verified  = xsdbool( ( is_req-description IS INITIAL AND lv_new IS INITIAL )
+                                   OR ( is_req-description IS NOT INITIAL AND lv_new = CONV seodescr( is_req-description ) ) ).
+    IF cs_result-verified = abap_false.
+      es_error = VALUE #( code = 'VERIFY_FAILED' message = |The change may have been saved; the table shows '{ lv_new }'. Check with param_texts| ).
+    ENDIF.
   ENDMETHOD.
 
   METHOD handle_set_class_param_text.
