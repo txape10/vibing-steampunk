@@ -2379,26 +2379,32 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("GetClassParamTexts") {
 		s.mcpServer.AddTool(mcp.NewTool("GetClassParamTexts",
-			mcp.WithDescription("Get the short texts (SE24 'Description' column) of the method parameters of a class. Without 'method' all methods are returned. Exceptions of the methods are listed too (kind=exception). Methods inherited from an interface (ZIF~M) are not listed here."),
+			mcp.WithDescription("Get the short texts (SE24 'Description' column) of the method parameters of a class or interface. Without 'method' all methods are returned. Exceptions of the methods are listed too (kind=exception). Methods inherited from an interface (ZIF~M) are not listed here."),
 			mcp.WithString("class",
-				mcp.Description("Class name"),
+				mcp.Description("Class or interface name"),
 				mcp.Required(),
+			),
+			mcp.WithString("object_type",
+				mcp.Description("CLAS (default) or INTF."),
 			),
 			mcp.WithString("method",
 				mcp.Description("Method name (optional; default: all methods)"),
 			),
 			mcp.WithString("language",
-				mcp.Description("Language: one-character SAP key ('S') or ISO code ('ES'). Default: the class master language."),
+				mcp.Description("Language: one-character SAP key ('S') or ISO code ('ES'). Default: the master language of the class or interface."),
 			),
 		), s.handleGetClassParamTexts)
 	}
 
 	if shouldRegister("SetClassParamText") {
 		s.mcpServer.AddTool(mcp.NewTool("SetClassParamText",
-			mcp.WithDescription("Set or clear the short text of ONE method parameter or exception of a class (SE24). Classes in a transportable package need transport (an existing, modifiable workbench request of yours, never a task); it is never chosen or created for you. Texts of methods and attributes are NOT done here: write them with an ABAP Doc '\"! <p class=\"shorttext synchronized\">text</p>' line above the declaration."),
+			mcp.WithDescription("Set or clear the short text of ONE method parameter or exception of a class or interface (SE24). Objects in a transportable package need transport (an existing, modifiable workbench request of yours, never a task); it is never chosen or created for you. Texts of methods and attributes are NOT done here: write them with an ABAP Doc '\"! <p class=\"shorttext synchronized\">text</p>' line above the declaration."),
 			mcp.WithString("class",
-				mcp.Description("Class name"),
+				mcp.Description("Class or interface name"),
 				mcp.Required(),
+			),
+			mcp.WithString("object_type",
+				mcp.Description("CLAS (default) or INTF."),
 			),
 			mcp.WithString("method",
 				mcp.Description("Method name"),
@@ -2415,10 +2421,10 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 				mcp.Description("Empty the text (needed when description is empty)"),
 			),
 			mcp.WithString("language",
-				mcp.Description("Language: one-character SAP key ('S') or ISO code ('EN'). Default: the class master language. Each language has its own text, so this is also how a translation is written."),
+				mcp.Description("Language: one-character SAP key ('S') or ISO code ('EN'). Default: the master language of the class or interface. Each language has its own text, so this is also how a translation is written."),
 			),
 			mcp.WithString("transport",
-				mcp.Description("Workbench request the change is recorded in (LIMU CLSD + CPUB). Required for a class in a transportable package, refused for a local one. The request must already hold a modifiable task of yours. Needs --allow-transportable-edits."),
+				mcp.Description("Workbench request the change is recorded in (a class: LIMU CLSD + CPUB; an interface: R3TR INTF). Required for an object in a transportable package, refused for a local one. The request must already hold a modifiable task of yours. Needs --allow-transportable-edits."),
 			),
 		), s.handleSetClassParamText)
 	}

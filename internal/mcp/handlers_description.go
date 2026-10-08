@@ -56,7 +56,7 @@ func paramTextArgs(objectType, objectName string, params map[string]any) map[str
 	if objectName != "" {
 		args["class"] = objectName
 	}
-	for _, key := range []string{"class", "method", "parameter", "description", "language", "transport"} {
+	for _, key := range []string{"object_type", "class", "method", "parameter", "description", "language", "transport"} {
 		if v := getStringParam(params, key); v != "" {
 			args[key] = v
 		}
@@ -67,19 +67,33 @@ func paramTextArgs(objectType, objectName string, params map[string]any) map[str
 	return args
 }
 
+// paramTextObjectURL is the ADT URL of the class or interface whose texts are
+// written, for the package and transport policies. An empty type is a class.
+func paramTextObjectURL(objectType, name string) string {
+	kind := "classes"
+	if objectType == "INTF" {
+		kind = "interfaces"
+	}
+	return "/sap/bc/adt/oo/" + kind + "/" + url.PathEscape(strings.ToLower(name))
+}
+
 func (s *Server) handleGetClassParamTexts(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := request.GetArguments()
-	if t := getStringParam(args, "object_type"); t != "" && t != "CLAS" {
-		return newToolResultError("parameter texts are only supported for classes (CLAS); interfaces are not supported yet"), nil
+	objectType, err := adt.NormalizeParamTextObjectType(getStringParam(args, "object_type"))
+	if err != nil {
+		return newToolResultError(err.Error()), nil
+	}
+	if objectType == "" {
+		objectType = "CLAS"
 	}
 	class := getStringParam(args, "class")
 	if class == "" {
-		return newToolResultError("class is required (target \"CLAS ZCL_X\")"), nil
+		return newToolResultError("class is required (target \"CLAS ZCL_X\" or \"INTF ZIF_X\")"), nil
 	}
 	if errResult := s.ensureWSConnected(ctx, "GetClassParamTexts"); errResult != nil {
 		return errResult, nil
 	}
-	res, err := s.amdpWSClient.GetClassParamTexts(ctx, class, getStringParam(args, "method"), getStringParam(args, "language"))
+	res, err := s.amdpWSClient.GetClassParamTexts(ctx, class, getStringParam(args, "method"), getStringParam(args, "language"), objectType)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("GetClassParamTexts failed: %v", err)), nil
 	}
@@ -92,12 +106,19 @@ func (s *Server) handleSetClassParamText(ctx context.Context, request mcp.CallTo
 		return refused, nil
 	}
 	args := request.GetArguments()
-	if t := getStringParam(args, "object_type"); t != "" && t != "CLAS" {
-		return newToolResultError("parameter texts are only supported for classes (CLAS); interfaces are not supported yet"), nil
+	objectType, err := adt.NormalizeParamTextObjectType(getStringParam(args, "object_type"))
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("SetClassParamText: %v", err)), nil
+	}
+	// Without a type the object is a class, here and on the SAP side: the
+	// package and transport policies below look at that very object.
+	if objectType == "" {
+		objectType = "CLAS"
 	}
 	clearText, _ := getBoolParam(args, "clear")
 	p := adt.SetClassParamTextParams{
 		Class:       getStringParam(args, "class"),
+		ObjectType:  objectType,
 		Method:      getStringParam(args, "method"),
 		Parameter:   getStringParam(args, "parameter"),
 		Description: getStringParam(args, "description"),
@@ -112,7 +133,7 @@ func (s *Server) handleSetClassParamText(ctx context.Context, request mcp.CallTo
 	// --allow-transportable-edits, --allowed-transports) are enforced here,
 	// before the WebSocket is opened. Whether the request exists, is open and
 	// is the caller's is checked by SAP. A request is never chosen for the caller.
-	if _, err := s.adtClient.PrepareSourceUpdate(ctx, "/sap/bc/adt/oo/classes/"+url.PathEscape(strings.ToLower(p.Class)), p.Transport); err != nil {
+	if _, err := s.adtClient.PrepareSourceUpdate(ctx, paramTextObjectURL(objectType, p.Class), p.Transport); err != nil {
 		return newToolResultError(fmt.Sprintf("SetClassParamText: %v", err)), nil
 	}
 	if errResult := s.ensureWSConnected(ctx, "SetClassParamText"); errResult != nil {

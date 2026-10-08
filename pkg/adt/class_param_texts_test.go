@@ -36,6 +36,9 @@ func TestValidateClassParamTextParams(t *testing.T) {
 		{"missing class", func(p *SetClassParamTextParams) { p.Class = " " }, "required"},
 		{"missing method", func(p *SetClassParamTextParams) { p.Method = "" }, "required"},
 		{"missing parameter", func(p *SetClassParamTextParams) { p.Parameter = "" }, "required"},
+		{"object type interface", func(p *SetClassParamTextParams) { p.ObjectType = "intf" }, ""},
+		{"object type class", func(p *SetClassParamTextParams) { p.ObjectType = "CLAS" }, ""},
+		{"object type program", func(p *SetClassParamTextParams) { p.ObjectType = "PROG" }, "only supported for classes (CLAS) and interfaces (INTF)"},
 		{"language empty", func(p *SetClassParamTextParams) { p.Language = "" }, ""},
 		{"language SAP key", func(p *SetClassParamTextParams) { p.Language = "s" }, ""},
 		{"language ISO", func(p *SetClassParamTextParams) { p.Language = "en" }, ""},
@@ -59,6 +62,35 @@ func TestValidateClassParamTextParams(t *testing.T) {
 	}
 }
 
+func TestNormalizeParamTextObjectType(t *testing.T) {
+	for in, want := range map[string]string{"": "", " ": "", "clas": "CLAS", "INTF": "INTF", " intf ": "INTF"} {
+		got, err := NormalizeParamTextObjectType(in)
+		if err != nil || got != want {
+			t.Errorf("NormalizeParamTextObjectType(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if _, err := NormalizeParamTextObjectType("FUGR"); err == nil {
+		t.Error("FUGR must be refused")
+	}
+}
+
+func TestParamTextPayloads_CarryObjectType(t *testing.T) {
+	g := getParamTextsPayload("ZIF_X", "M", "EN", "INTF")
+	if g["object_type"] != "INTF" || g["class_name"] != "ZIF_X" || g["method_name"] != "M" || g["language"] != "EN" {
+		t.Errorf("get payload: %v", g)
+	}
+	if _, ok := getParamTextsPayload("ZCL_X", "", "", "")["object_type"]; ok {
+		t.Error("an empty type must not be sent")
+	}
+	s := setParamTextPayload(SetClassParamTextParams{Class: "ZIF_X", ObjectType: "intf", Method: "M", Parameter: "IV_A", Description: " t "})
+	if s["object_type"] != "INTF" || s["description"] != "t" {
+		t.Errorf("set payload: %v", s)
+	}
+	if _, ok := setParamTextPayload(SetClassParamTextParams{Class: "ZCL_X"})["object_type"]; ok {
+		t.Error("an empty type must not be sent")
+	}
+}
+
 func TestWrapParamTextsError(t *testing.T) {
 	err := wrapParamTextsError(errString("UNKNOWN_ACTION: Action 'setClassParamText' not supported"))
 	if !strings.Contains(err.Error(), "restart Claude Desktop") {
@@ -77,7 +109,7 @@ func (e errString) Error() string { return string(e) }
 // The keys the ABAP side emits (pretty_mode low_case) must land in the Go
 // types; a renamed key would otherwise only show up against a live system.
 func TestClassParamTexts_DecodesABAPResponses(t *testing.T) {
-	get := `{"class_name":"ZCL_X","package_name":"$TMP","master_language":"S","language":"E",
+	get := `{"class_name":"ZCL_X","object_type":"INTF","package_name":"$TMP","master_language":"S","language":"E",
 	"method_list":[{"method_name":"M","cmp_type":"1","params":[
 	{"name":"IV_A","kind":"parameter","decl_type":"0","version":"both","description":"Factor","has_text":true},
 	{"name":"NO_EXISTE","kind":"exception","decl_type":"","version":"active","description":"","has_text":false}]}]}`
@@ -85,19 +117,19 @@ func TestClassParamTexts_DecodesABAPResponses(t *testing.T) {
 	if err := json.Unmarshal([]byte(get), &g); err != nil {
 		t.Fatal(err)
 	}
-	if g.ClassName != "ZCL_X" || g.PackageName != "$TMP" || g.MasterLanguage != "S" || g.Language != "E" ||
+	if g.ObjectType != "INTF" || g.ClassName != "ZCL_X" || g.PackageName != "$TMP" || g.MasterLanguage != "S" || g.Language != "E" ||
 		len(g.Methods) != 1 || g.Methods[0].MethodName != "M" || len(g.Methods[0].Params) != 2 ||
 		g.Methods[0].Params[0].Name != "IV_A" || g.Methods[0].Params[0].Kind != "parameter" || g.Methods[0].Params[1].Kind != "exception" || g.Methods[0].Params[0].Version != "both" || !g.Methods[0].Params[0].HasText {
 		t.Errorf("get response not decoded: %+v", g)
 	}
 
-	set := `{"status":"changed","class_name":"ZCL_X","method_name":"M","parameter_name":"IV_A","kind":"exception","language":"E",
+	set := `{"status":"changed","class_name":"ZCL_X","object_type":"INTF","method_name":"M","parameter_name":"IV_A","kind":"exception","language":"E",
 	"master_language":"S","old_description":"a","new_description":"b","row_state":"present","verified":true}`
 	var s SetClassParamTextResult
 	if err := json.Unmarshal([]byte(set), &s); err != nil {
 		t.Fatal(err)
 	}
-	if s.Status != "changed" || s.ParameterName != "IV_A" || s.Kind != "exception" || s.OldDescription != "a" || s.NewDescription != "b" ||
+	if s.ObjectType != "INTF" || s.Status != "changed" || s.ParameterName != "IV_A" || s.Kind != "exception" || s.OldDescription != "a" || s.NewDescription != "b" ||
 		s.RowState != "present" || !s.Verified {
 		t.Errorf("set response not decoded: %+v", s)
 	}

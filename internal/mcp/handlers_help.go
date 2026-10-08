@@ -39,7 +39,7 @@ Read metadata:
   SAP(action="read", target="DEVC $TMP")             - Package info
   SAP(action="read", target="MSAG ZMSG_CLASS")       - Message class
   SAP(action="read", target="PROG ZREPORT", params={"type": "description"}) - SE80 short description
-  SAP(action="read", target="CLAS ZCL_X", params={"type": "param_texts", "method": "M", "language": "EN"}) - SE24 parameter short texts (method/language optional)
+  SAP(action="read", target="CLAS ZCL_X", params={"type": "param_texts", "method": "M", "language": "EN"}) - SE24 parameter short texts (method/language optional); target "INTF ZIF_X" for an interface
   SAP(action="read", target="TRAN SM30")              - Transaction info
   SAP(action="read", target="TYPE_INFO ZTYPE")        - Type info
   SAP(action="read", target="STRUCT ZSTRUCT")         - Structure definition
@@ -68,6 +68,7 @@ Change the SE80/SE11 short description (no source rewrite):
 Change the short text of ONE method parameter or exception (SE24; "parameter" accepts exception names too; local or transportable packages (the latter needs the transport param), needs ZADT_VSP):
   SAP(action="edit", target="CLAS ZCL_X", params={"type": "set_param_text", "method": "M", "parameter": "IV_A", "description": "Text (max 60)", "language": "EN"})
   SAP(action="edit", target="CLAS ZCL_X", params={"type": "set_param_text", "method": "M", "parameter": "IV_A", "clear": true})
+  SAP(action="edit", target="INTF ZIF_X", params={"type": "set_param_text", "method": "M", "parameter": "IV_A", "description": "Text"}) - interfaces: the transport records R3TR INTF
   SAP(action="edit", target="CLAS ZCL_X", params={"type": "set_param_text", "method": "M", "parameter": "IV_A", "description": "Text", "transport": "TR-EXAMPLE"}) - transportable package: your own workbench request, already holding a modifiable task of yours, is required
   language: 1-char SAP key or ISO code; default = class master language; each language has its own text.
   Method/attribute texts are NOT done here: use ABAP Doc "! <p class="shorttext synchronized">text</p> above the declaration.

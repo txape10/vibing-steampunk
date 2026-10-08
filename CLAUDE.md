@@ -2138,7 +2138,7 @@ the code permanently — it is the fix, not a placeholder.
   (`"clear": true` blanks the text). Language defaults to the class master language; ISO (2 chars) or SAP (1 char).
   Standalone tools `GetClassParamTexts` (also in focused mode) and `SetClassParamText`.
 - **Scope**: local packages (`$*`) and, since Phase 3 (2ar), transportable packages with an explicit `transport`.
-  Interfaces refused. Exceptions (`SCOTYPE=1`) not handled.
+  Interfaces and exceptions were added later (2as, 2at).
 - **ABAP side**: new actions `getClassParamTexts`/`setClassParamText` in `ZCL_VSP_REPORT_SERVICE` (`src/` and
   `embedded/abap/` identical). The writer is `SEO_PARAMETER_MODIFY`, which rewrites the whole active `SEOSUBCODF` row,
   so the full `SEOSUBCO`/`SEOSUBCODF` rows are moved into `seos_parameters_w` and only `LANGU`/`DESCRIPT` change.
@@ -2225,7 +2225,7 @@ the code permanently — it is the fix, not a placeholder.
 - Files: `embedded/abap/zcl_vsp_report_service.clas.abap`, `src/zcl_vsp_report_service.clas.abap`,
   `pkg/adt/class_param_texts.go` (+`_test.go`), `internal/mcp/handlers_description.go`,
   `internal/mcp/handlers_description_paramtexts_test.go`, `internal/mcp/tools_register.go`, `internal/mcp/handlers_help.go`.
-- **Pending**: Phase 2b (interfaces). Phase 4 (exceptions) is done, see 2as.
+- **Pending**: none of the phases; Phase 4 (exceptions) is 2as, Phase 2b (interfaces) is 2at.
 
 ### 2as. Class method-parameter short texts (SE24) — Phase 4: exception texts (2026-10-08)
 - **What changed**: `set_param_text` / `param_texts` also handle method **exceptions** (`SEOSUBCO-SCOTYPE = 1`, classic
@@ -2245,6 +2245,34 @@ the code permanently — it is the fix, not a placeholder.
 - **Not verified**: what SE24 itself records for **protected/private** methods (`CPRO`/`CPRI` instead of `CPUB`?). Historical `E071` of
   `ZCL_LISTIN2` shows `CPRO`/`CPRI` entries but from whole-class saves; `ZCL_LISTIN2` could not be used (method locks in an old foreign request).
   The writer always records `CLSD`+`CPUB`.
+
+### 2at. Class/interface method-parameter short texts (SE24) — Phase 2b: interfaces (2026-10-08)
+- **What changed**: `param_texts` / `set_param_text` accept interfaces: target `INTF ZIF_X` or `params.object_type` (`CLAS` default,
+  `INTF`; anything else is refused with `INVALID_PARAM`). Parameters and exceptions of interface methods use the same tables and
+  writers as classes (`SEOSUBCO`/`SEOSUBCODF`/`SEOSUBCOTX`, `SEO_PARAMETER_MODIFY`/`SEO_EXCEPTION_MODIFY`; verified live on an interface).
+  Responses carry `object_type`. An empty `object_type` is a class, in Go and in ABAP.
+- **ABAP** (`ZCL_VSP_REPORT_SERVICE`): `resolve_class` takes the expected type (TADIR `CLAS`/`INTF`) and returns the real one;
+  `AUTHORITY-CHECK S_DEVELOP` uses it as `OBJTYPE`; `check_class_lock`/`check_class_original`/`record_in_request` take it too.
+- **What SE24 records for an interface** (observed): one entry `R3TR INTF <name>` in the task, no LIMU entries. `record_in_request`
+  therefore records `R3TR INTF` for interfaces and keeps `LIMU CLSD`+`CPUB` for classes. Locks: TLOCK keeps interface locks under
+  `OBJECT = 'INTF'` (classes under `'CLAS'`); the editor lock is `SEOCLSENQ` with the name padded with `=` to 30, as for classes
+  (verified with `ENQUEUE_READ` while a user had the interface open in SE24).
+- **Go**: `NormalizeParamTextObjectType`, `ObjectType` in params/results, `paramTextObjectURL` (`/oo/classes|interfaces/<name>`) so the
+  package and transport policies look at the right object; payloads send `object_type` only when set.
+- **Verified live (2026-10-08)**: throwaway `ZIF_VSP_TST_IFTXT` in `$TMP` (since deleted by the user): read/write of parameters,
+  classic and class-based exceptions, event parameter, translation, `clear`, 60 characters, `TRANSPORT_NOT_ALLOWED` on `$TMP`.
+  Transportable `ZIF_VSP_SERVICE` (order with a task already holding `R3TR INTF`): `TRANSPORT_REQUIRED`, `TRANSPORT_IS_TASK`,
+  `OBJECT_LOCKED_IN_OTHER_REQUEST`, positive write (text restored), `FOREIGN_LOCK` while the user had it open in SE24, read-only
+  production connection refuses. Class regression on `ZCL_AUTHORITY`: still records `LIMU CLSD`+`CPUB`; text restored.
+- **Observed, unexplained**: the positive write on `ZIF_VSP_SERVICE` answered `recording: "recorded"` while `E071` showed no new
+  entry (only the pre-existing `R3TR INTF` of the task). Probably the object was already covered; not investigated.
+- **Not verified**: the `recorded` case for an interface in no request at all; that the text survives re-saving the interface in
+  SE24; what SE24 records for protected/private methods of classes (`CPRO`/`CPRI`, see 2as) and the interface equivalent.
+- **Note**: `ZIF_VSP_SERVICE` and most `ZCL_VSP_*` have master language `E`, not `ES`: `InstallZADTVSP` does not set it. Not changed.
+- Files: `embedded/abap/zcl_vsp_report_service.clas.abap`, `src/zcl_vsp_report_service.clas.abap`, `pkg/adt/class_param_texts.go`
+  (+`_test.go`), `internal/mcp/handlers_description.go`, `internal/mcp/handlers_description_paramtexts_test.go`,
+  `internal/mcp/tools_register.go`, `internal/mcp/handlers_help.go`.
+- Code review: APPROVE after fixing 2 MEDIUM (default `CLAS` in the Go handlers, payload tests).
 
 ## Known Open Issues (Not Fixed)
 

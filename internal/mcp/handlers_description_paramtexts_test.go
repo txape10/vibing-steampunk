@@ -66,7 +66,8 @@ func TestParamTexts_SetLocalRefusalsSendNothing(t *testing.T) {
 		"empty without clear":  {"CLAS ZCL_DEMO", func(p map[string]any) { p["description"] = "" }, "needs clear=true"},
 		"clear with text":      {"CLAS ZCL_DEMO", func(p map[string]any) { p["clear"] = true }, "cannot be combined"},
 		"unknown ISO language": {"CLAS ZCL_DEMO", func(p map[string]any) { p["language"] = "ET" }, "unknown language"},
-		"interface":            {"INTF ZIF_DEMO", func(p map[string]any) {}, "only supported for classes"},
+		"program":              {"PROG ZDEMO", func(p map[string]any) {}, "only supported for classes (CLAS) and interfaces (INTF)"},
+		"object_type override": {"INTF ZIF_DEMO", func(p map[string]any) { p["object_type"] = "PROG" }, "only supported for classes (CLAS) and interfaces (INTF)"},
 		"transport format":     {"CLAS ZCL_DEMO", func(p map[string]any) { p["transport"] = "NOT-A-REQUEST" }, "not a request number"},
 		"missing parameter":    {"CLAS ZCL_DEMO", func(p map[string]any) { delete(p, "parameter") }, "class, method and parameter are required"},
 	}
@@ -137,6 +138,57 @@ func TestParamTexts_SetWithAllowedTransportReachesHost(t *testing.T) {
 	}
 }
 
+// An interface goes through the same gates as a class: refused under
+// --read-only before anything is sent, and, with a control, past them without it.
+func TestParamTexts_SetInterfaceRefusedUnderReadOnly(t *testing.T) {
+	server, rc, _ := newReadOnlyTestServer(t, readOnly)
+	before := rc.count()
+	out := callSAP(t, server, map[string]any{"action": "edit", "target": "INTF ZIF_DEMO", "params": validSetParams()})
+	assertBlocked(t, out)
+	if n := rc.count() - before; n != 0 {
+		t.Errorf("a refused SetClassParamText on an interface sent %d request(s)", n)
+	}
+}
+
+func TestParamTexts_SetInterfaceReachesHostWithoutReadOnly(t *testing.T) {
+	server, rc, _ := newReadOnlyTestServer(t, nil)
+	before := rc.count()
+	out := callSAP(t, server, map[string]any{"action": "edit", "target": "INTF ZIF_DEMO", "params": validSetParams()})
+	if strings.Contains(out, "blocked by safety configuration") || strings.Contains(out, "only supported for classes") {
+		t.Fatalf("an interface must not be refused: %s", out)
+	}
+	if rc.count() == before {
+		t.Error("an interface should reach the ADT host")
+	}
+}
+
+func TestParamTexts_GetInterfaceUsesTheHandler(t *testing.T) {
+	server, _, _ := newReadOnlyTestServer(t, readOnly)
+	out := callSAP(t, server, map[string]any{"action": "read", "target": "INTF ZIF_DEMO",
+		"params": map[string]any{"type": "param_texts"}})
+	if strings.Contains(out, "only supported for classes") {
+		t.Fatalf("reading an interface must not be refused: %s", out)
+	}
+	if !strings.Contains(out, "GetClassParamTexts: WebSocket connect failed") {
+		t.Errorf("expected the answer to come from the GetClassParamTexts handler, got: %s", out)
+	}
+}
+
+// The package and transport policies must look at the object that is written:
+// an interface lives under /oo/interfaces/, not /oo/classes/.
+func TestParamTextObjectURL(t *testing.T) {
+	cases := map[string]string{
+		"":     "/sap/bc/adt/oo/classes/zcl_demo",
+		"CLAS": "/sap/bc/adt/oo/classes/zcl_demo",
+		"INTF": "/sap/bc/adt/oo/interfaces/zcl_demo",
+	}
+	for objectType, want := range cases {
+		if got := paramTextObjectURL(objectType, "ZCL_DEMO"); got != want {
+			t.Errorf("paramTextObjectURL(%q) = %q, want %q", objectType, got, want)
+		}
+	}
+}
+
 func TestParamTextArgs(t *testing.T) {
 	args := paramTextArgs("CLAS", "ZCL_DEMO", map[string]any{
 		"method": "M", "parameter": "IV_A", "clear": true, "language": "EN",
@@ -150,5 +202,9 @@ func TestParamTextArgs(t *testing.T) {
 	override := paramTextArgs("CLAS", "ZCL_DEMO", map[string]any{"class": "ZCL_OTHER"})
 	if override["class"] != "ZCL_OTHER" {
 		t.Errorf("params.class should override the target, got %v", override["class"])
+	}
+	typed := paramTextArgs("CLAS", "ZIF_DEMO", map[string]any{"object_type": "INTF"})
+	if typed["object_type"] != "INTF" {
+		t.Errorf("params.object_type should override the target type, got %v", typed["object_type"])
 	}
 }

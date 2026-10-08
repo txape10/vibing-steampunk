@@ -10,12 +10,14 @@ CLASS zcl_vsp_report_service DEFINITION
     TYPES:
       BEGIN OF ty_get_request,
         class_name  TYPE string,
+        object_type TYPE string,
         method_name TYPE string,
         language    TYPE string,
       END OF ty_get_request,
 
       BEGIN OF ty_set_request,
         class_name     TYPE string,
+        object_type    TYPE string,
         method_name    TYPE string,
         parameter_name TYPE string,
         description    TYPE string,
@@ -43,6 +45,7 @@ CLASS zcl_vsp_report_service DEFINITION
 
       BEGIN OF ty_get_response,
         class_name      TYPE string,
+        object_type     TYPE string,
         package_name    TYPE string,
         master_language TYPE string,
         language        TYPE string,
@@ -52,6 +55,7 @@ CLASS zcl_vsp_report_service DEFINITION
       BEGIN OF ty_set_response,
         status          TYPE string,
         class_name      TYPE string,
+        object_type     TYPE string,
         method_name     TYPE string,
         parameter_name  TYPE string,
         kind            TYPE string,
@@ -83,6 +87,8 @@ CLASS zcl_vsp_report_service DEFINITION
     CONSTANTS gc_version_active       TYPE seosubcodf-version VALUE '1'.
     CONSTANTS gc_version_inactive     TYPE seosubcodf-version VALUE '0'.
     CONSTANTS gc_scotype_exception    TYPE seosubco-scotype VALUE '1'.
+    CONSTANTS gc_objtype_class        TYPE tadir-object VALUE 'CLAS'.
+    CONSTANTS gc_objtype_interface    TYPE tadir-object VALUE 'INTF'.
 
     METHODS handle_get_class_param_texts
       IMPORTING is_message         TYPE zif_vsp_service=>ty_message
@@ -101,7 +107,8 @@ CLASS zcl_vsp_report_service DEFINITION
       EXPORTING es_error      TYPE ty_error
                 ev_lang       TYPE sy-langu
                 ev_masterlang TYPE tadir-masterlang
-                ev_devclass   TYPE tadir-devclass.
+                ev_devclass   TYPE tadir-devclass
+                ev_object     TYPE tadir-object.
 
     METHODS validate_transport
       IMPORTING is_req          TYPE ty_set_request
@@ -130,6 +137,7 @@ CLASS zcl_vsp_report_service DEFINITION
     METHODS check_class_lock
       IMPORTING iv_request      TYPE trkorr
                 iv_class        TYPE string
+                iv_object       TYPE tadir-object
       RETURNING VALUE(rs_error) TYPE ty_error.
 
     METHODS request_of_lock
@@ -138,11 +146,13 @@ CLASS zcl_vsp_report_service DEFINITION
 
     METHODS check_class_original
       IMPORTING iv_class        TYPE string
+                iv_object       TYPE tadir-object
       RETURNING VALUE(rs_error) TYPE ty_error.
 
     METHODS record_in_request
       IMPORTING iv_request      TYPE trkorr
                 iv_class        TYPE string
+                iv_object       TYPE tadir-object
       EXPORTING ev_no_recording TYPE abap_bool
                 ev_error        TYPE string.
 
@@ -219,9 +229,15 @@ CLASS zcl_vsp_report_service DEFINITION
 
     METHODS resolve_class
       IMPORTING iv_class      TYPE string
+                iv_expected   TYPE string OPTIONAL
       EXPORTING ev_found      TYPE abap_bool
+                ev_object     TYPE tadir-object
                 ev_devclass   TYPE tadir-devclass
                 ev_masterlang TYPE tadir-masterlang.
+
+    METHODS object_label
+      IMPORTING iv_object       TYPE clike
+      RETURNING VALUE(rv_label) TYPE string.
 
     METHODS resolve_language
       IMPORTING iv_language TYPE string
@@ -739,19 +755,36 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD resolve_class.
-    DATA lv_class TYPE tadir-obj_name.
+    DATA lv_class  TYPE tadir-obj_name.
+    DATA lr_object TYPE RANGE OF tadir-object.
 
     ev_found = abap_false.
     lv_class = to_upper( iv_class ).
 
-    SELECT SINGLE devclass, masterlang FROM tadir
+    " Classes and interfaces share one name space, so without an expected type
+    " the name decides which of the two it is.
+    IF iv_expected IS INITIAL.
+      lr_object = VALUE #( ( sign = 'I' option = 'EQ' low = gc_objtype_class )
+                           ( sign = 'I' option = 'EQ' low = gc_objtype_interface ) ).
+    ELSE.
+      lr_object = VALUE #( ( sign = 'I' option = 'EQ' low = iv_expected ) ).
+    ENDIF.
+
+    SELECT SINGLE object, devclass, masterlang FROM tadir
       WHERE pgmid    = 'R3TR'
-        AND object   = 'CLAS'
+        AND object   IN @lr_object
         AND obj_name = @lv_class
-      INTO ( @ev_devclass, @ev_masterlang ).
+      INTO ( @ev_object, @ev_devclass, @ev_masterlang ).
     IF sy-subrc = 0.
       ev_found = abap_true.
     ENDIF.
+  ENDMETHOD.
+
+  METHOD object_label.
+    rv_label = SWITCH #( iv_object
+                         WHEN gc_objtype_class     THEN 'Class'
+                         WHEN gc_objtype_interface THEN 'Interface'
+                         ELSE 'Class or interface' ).
   ENDMETHOD.
 
   METHOD resolve_language.
@@ -868,18 +901,25 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
     DATA(lv_class) = to_upper( ls_req-class_name ).
     DATA(lv_method) = to_upper( ls_req-method_name ).
+    DATA(lv_expected) = to_upper( ls_req-object_type ).
     IF lv_class IS INITIAL.
       rs_response = build_error( iv_id = is_message-id iv_code = 'MISSING_PARAM' iv_message = 'Parameter class_name is required' ).
+      RETURN.
+    ENDIF.
+    IF lv_expected IS NOT INITIAL AND lv_expected <> gc_objtype_class AND lv_expected <> gc_objtype_interface.
+      rs_response = build_error( iv_id = is_message-id iv_code = 'INVALID_PARAM' iv_message = 'object_type must be CLAS or INTF' ).
       RETURN.
     ENDIF.
 
     resolve_class(
       EXPORTING iv_class      = lv_class
+                iv_expected   = lv_expected
       IMPORTING ev_found      = DATA(lv_found)
+                ev_object     = DATA(lv_object)
                 ev_devclass   = DATA(lv_devclass)
                 ev_masterlang = DATA(lv_masterlang) ).
     IF lv_found = abap_false.
-      rs_response = build_error( iv_id = is_message-id iv_code = 'CLASS_NOT_FOUND' iv_message = |Class { lv_class } not found| ).
+      rs_response = build_error( iv_id = is_message-id iv_code = 'CLASS_NOT_FOUND' iv_message = |{ object_label( lv_expected ) } { lv_class } not found| ).
       RETURN.
     ENDIF.
 
@@ -917,6 +957,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       INTO TABLE @DATA(lt_rows).
 
     ls_response-class_name      = lv_class.
+    ls_response-object_type     = lv_object.
     ls_response-package_name    = lv_devclass.
     ls_response-master_language = lv_masterlang.
     ls_response-language        = lv_lang.
@@ -955,6 +996,8 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
     IF is_req-class_name IS INITIAL OR is_req-method_name IS INITIAL OR is_req-parameter_name IS INITIAL.
       rs_error = VALUE #( code = 'MISSING_PARAM' message = 'class_name, method_name and parameter_name are required' ).
+    ELSEIF is_req-object_type IS NOT INITIAL AND is_req-object_type <> gc_objtype_class AND is_req-object_type <> gc_objtype_interface.
+      rs_error = VALUE #( code = 'INVALID_PARAM' message = 'object_type must be CLAS or INTF' ).
     ELSEIF is_req-description IS INITIAL AND is_req-clear_text = abap_false.
       rs_error = VALUE #( code = 'CLEAR_REQUIRED' message = 'An empty description needs clear_text = true' ).
     ELSEIF is_req-description IS NOT INITIAL AND is_req-clear_text = abap_true.
@@ -968,17 +1011,18 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD locate_target.
-    CONSTANTS lc_objtype_class TYPE c LENGTH 4 VALUE 'CLAS'.
     CONSTANTS lc_actvt_change  TYPE c LENGTH 2 VALUE '02'.
     DATA lv_cls TYPE seosubco-clsname.
 
     resolve_class(
       EXPORTING iv_class      = is_req-class_name
+                iv_expected   = is_req-object_type
       IMPORTING ev_found      = DATA(lv_found)
+                ev_object     = ev_object
                 ev_devclass   = ev_devclass
                 ev_masterlang = ev_masterlang ).
     IF lv_found = abap_false.
-      es_error = VALUE #( code = 'CLASS_NOT_FOUND' message = |Class { is_req-class_name } not found| ).
+      es_error = VALUE #( code = 'CLASS_NOT_FOUND' message = |{ object_label( is_req-object_type ) } { is_req-class_name } not found| ).
       RETURN.
     ENDIF.
 
@@ -995,12 +1039,12 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
     lv_cls = is_req-class_name.
     AUTHORITY-CHECK OBJECT 'S_DEVELOP'
       ID 'DEVCLASS' FIELD ev_devclass
-      ID 'OBJTYPE'  FIELD lc_objtype_class
+      ID 'OBJTYPE'  FIELD ev_object
       ID 'OBJNAME'  FIELD lv_cls
       ID 'P_GROUP'  DUMMY
       ID 'ACTVT'    FIELD lc_actvt_change.
     IF sy-subrc <> 0.
-      es_error = VALUE #( code = 'NO_AUTHORIZATION' message = |No change authorization (S_DEVELOP) for class { is_req-class_name }| ).
+      es_error = VALUE #( code = 'NO_AUTHORIZATION' message = |No change authorization (S_DEVELOP) for { to_lower( object_label( ev_object ) ) } { is_req-class_name }| ).
     ENDIF.
   ENDMETHOD.
 
@@ -1011,7 +1055,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
     IF iv_devclass(1) = lc_local_package_prefix.
       IF is_req-transport IS NOT INITIAL.
         rs_error = VALUE #( code = 'TRANSPORT_NOT_ALLOWED'
-                            message = |Class { is_req-class_name } is in local package { iv_devclass }; no transport request is used| ).
+                            message = |{ object_label( is_req-object_type ) } { is_req-class_name } is in local package { iv_devclass }; no transport request is used| ).
       ENDIF.
       RETURN.
     ENDIF.
@@ -1034,18 +1078,21 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    rs_error = check_class_lock( iv_request = lv_request iv_class = is_req-class_name ).
+    rs_error = check_class_lock( iv_request = lv_request
+                                 iv_class   = is_req-class_name
+                                 iv_object  = CONV #( is_req-object_type ) ).
     IF rs_error IS NOT INITIAL.
       RETURN.
     ENDIF.
 
-    rs_error = check_class_original( is_req-class_name ).
+    rs_error = check_class_original( iv_class  = is_req-class_name
+                                     iv_object = CONV #( is_req-object_type ) ).
   ENDMETHOD.
 
   METHOD check_transport_given.
     IF is_req-transport IS INITIAL.
       rs_error = VALUE #( code = 'TRANSPORT_REQUIRED'
-                          message = |Class { is_req-class_name } is in transportable package { iv_devclass }; a workbench request must be given| ).
+                          message = |{ object_label( is_req-object_type ) } { is_req-class_name } is in transportable package { iv_devclass }; a workbench request must be given| ).
       RETURN.
     ENDIF.
     IF NOT matches( val = is_req-transport pcre = '[A-Z0-9]{3}K[0-9]{6}' ).
@@ -1102,10 +1149,11 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
   METHOD check_class_lock.
     " TLOCK keeps every lock of a class (whole class, CLSD, CPUB, METH...) under
-    " OBJECT = CLAS, LOKEY = name padded to 30 characters + a suffix
+    " OBJECT = CLAS, and of an interface under OBJECT = INTF; LOKEY = name padded
+    " to 30 characters + a suffix
     DATA(lv_lock_pattern) = replace( val = iv_class sub = '_' with = '#_' occ = 0 ) && '%'.
     SELECT trkorr, author, lokey FROM tlock
-      WHERE object = 'CLAS' AND lokey LIKE @lv_lock_pattern ESCAPE '#'
+      WHERE object = @iv_object AND lokey LIKE @lv_lock_pattern ESCAPE '#'
       INTO TABLE @DATA(lt_locks).
     LOOP AT lt_locks INTO DATA(ls_lock).
       IF ls_lock-lokey(30) <> iv_class.
@@ -1114,7 +1162,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       DATA(lv_lock_request) = request_of_lock( ls_lock-trkorr ).
       IF lv_lock_request <> iv_request.
         rs_error = VALUE #( code = 'OBJECT_LOCKED_IN_OTHER_REQUEST'
-                            message = |Class { iv_class } is already in request { lv_lock_request } (user { ls_lock-author })| ).
+                            message = |{ object_label( iv_object ) } { iv_class } is already in request { lv_lock_request } (user { ls_lock-author })| ).
         RETURN.
       ENDIF.
     ENDLOOP.
@@ -1127,30 +1175,37 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD check_class_original.
-    CONSTANTS lc_objtype_class TYPE tadir-object VALUE 'CLAS'.
     DATA lv_class TYPE tadir-obj_name.
 
     lv_class = iv_class.
     SELECT SINGLE srcsystem FROM tadir
-      WHERE pgmid = 'R3TR' AND object = @lc_objtype_class AND obj_name = @lv_class
+      WHERE pgmid = 'R3TR' AND object = @iv_object AND obj_name = @lv_class
       INTO @DATA(lv_srcsystem).
     IF sy-subrc = 0 AND lv_srcsystem <> sy-sysid.
       rs_error = VALUE #( code = 'ORIGINAL_IN_OTHER_SYSTEM'
-                          message = |Class { iv_class } has its original in system { lv_srcsystem }| ).
+                          message = |{ object_label( iv_object ) } { iv_class } has its original in system { lv_srcsystem }| ).
     ENDIF.
   ENDMETHOD.
 
   METHOD record_in_request.
+    CONSTANTS lc_pgmid_r3tr        TYPE c LENGTH 4 VALUE 'R3TR'.
     CONSTANTS lc_pgmid_limu        TYPE c LENGTH 4 VALUE 'LIMU'.
     CONSTANTS lc_object_class_def  TYPE c LENGTH 4 VALUE 'CLSD'.
     CONSTANTS lc_object_public     TYPE c LENGTH 4 VALUE 'CPUB'.
-    DATA lv_text TYPE string.
+    DATA lv_text    TYPE string.
+    DATA lt_objects TYPE tredt_objects.
 
-    " Same entries SE24 records for a change of a parameter text. The function
-    " never opens a dialog and needs the request: it cannot create one.
-    DATA(lt_objects) = VALUE tredt_objects(
-      ( pgmid = lc_pgmid_limu object = lc_object_class_def obj_name = iv_class )
-      ( pgmid = lc_pgmid_limu object = lc_object_public    obj_name = iv_class ) ).
+    " Same entries SE24 records for a change of a parameter text: for a class
+    " its definition and public section, for an interface the whole object (SE24
+    " writes no LIMU part for it). The function never opens a dialog and needs
+    " the request: it cannot create one.
+    IF iv_object = gc_objtype_interface.
+      lt_objects = VALUE #( ( pgmid = lc_pgmid_r3tr object = gc_objtype_interface obj_name = iv_class ) ).
+    ELSE.
+      lt_objects = VALUE #(
+        ( pgmid = lc_pgmid_limu object = lc_object_class_def obj_name = iv_class )
+        ( pgmid = lc_pgmid_limu object = lc_object_public    obj_name = iv_class ) ).
+    ENDIF.
 
     CALL FUNCTION 'TR_RECORD_OBJ_CHANGE_TO_REQ'
       EXPORTING
@@ -1168,7 +1223,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       ELSE.
         lv_text = |function ended with return code { sy-subrc } and no message|.
       ENDIF.
-      ev_error = |Could not record the class in request { iv_request }: { lv_text }|.
+      ev_error = |Could not record the { to_lower( object_label( iv_object ) ) } in request { iv_request }: { lv_text }|.
     ENDIF.
   ENDMETHOD.
 
@@ -1198,6 +1253,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
     DATA(ls_result) = VALUE ty_set_response(
       class_name      = is_req-class_name
+      object_type     = is_req-object_type
       method_name     = is_req-method_name
       parameter_name  = is_req-parameter_name
       kind            = subco_kind( ls_co-scotype )
@@ -1272,7 +1328,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
         AND version = @gc_version_active
       INTO @es_df.
     IF sy-subrc <> 0.
-      es_error = VALUE #( code = 'PARAM_INACTIVE_ONLY' message = |Parameter { is_req-parameter_name } has no active version; activate the class first| ).
+      es_error = VALUE #( code = 'PARAM_INACTIVE_ONLY' message = |Parameter { is_req-parameter_name } has no active version; activate the { to_lower( object_label( is_req-object_type ) ) } first| ).
       RETURN.
     ENDIF.
 
@@ -1284,7 +1340,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       INTO @DATA(lv_inactive).
     IF sy-subrc = 0.
       es_error = VALUE #( code = 'CLASS_HAS_INACTIVE_VERSION'
-                          message = |Parameter { is_req-parameter_name } has a pending inactive version; activate the class first| ).
+                          message = |Parameter { is_req-parameter_name } has a pending inactive version; activate the { to_lower( object_label( is_req-object_type ) ) } first| ).
     ENDIF.
   ENDMETHOD.
 
@@ -1297,7 +1353,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
     ELSEIF is_req-method_name CS '~'.
       rs_error = VALUE #( code = 'METHOD_NOT_FOUND' message = |Method { is_req-method_name } is inherited from an interface; change the text in the interface| ).
     ELSE.
-      rs_error = VALUE #( code = 'METHOD_NOT_FOUND' message = |Method { is_req-method_name } not found in class { is_req-class_name }| ).
+      rs_error = VALUE #( code = 'METHOD_NOT_FOUND' message = |Method { is_req-method_name } not found in { to_lower( object_label( is_req-object_type ) ) } { is_req-class_name }| ).
     ENDIF.
   ENDMETHOD.
 
@@ -1324,6 +1380,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
     record_in_request(
       EXPORTING iv_request      = CONV trkorr( is_req-transport )
                 iv_class        = is_req-class_name
+                iv_object       = CONV #( is_req-object_type )
       IMPORTING ev_no_recording = DATA(lv_no_recording)
                 ev_error        = DATA(lv_record_error) ).
     IF lv_record_error IS NOT INITIAL.
@@ -1361,6 +1418,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
     ENDTRY.
 
     ls_req-class_name     = to_upper( ls_req-class_name ).
+    ls_req-object_type    = to_upper( ls_req-object_type ).
     ls_req-method_name    = to_upper( ls_req-method_name ).
     ls_req-parameter_name = to_upper( ls_req-parameter_name ).
     ls_req-transport      = to_upper( condense( ls_req-transport ) ).
@@ -1374,9 +1432,11 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
         IMPORTING es_error      = ls_error
                   ev_lang       = DATA(lv_lang)
                   ev_masterlang = DATA(lv_masterlang)
-                  ev_devclass   = DATA(lv_devclass) ).
+                  ev_devclass   = DATA(lv_devclass)
+                  ev_object     = DATA(lv_object) ).
     ENDIF.
     IF ls_error IS INITIAL.
+      ls_req-object_type = lv_object.
       ls_error = validate_transport( is_req = ls_req iv_devclass = lv_devclass ).
     ENDIF.
     IF ls_error IS NOT INITIAL.
@@ -1404,10 +1464,10 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
     CASE sy-subrc.
       WHEN 0.
       WHEN 1.
-        rs_response = build_error( iv_id = is_message-id iv_code = 'FOREIGN_LOCK' iv_message = |Class { ls_req-class_name } is locked by user { sy-msgv1 }| ).
+        rs_response = build_error( iv_id = is_message-id iv_code = 'FOREIGN_LOCK' iv_message = |{ object_label( ls_req-object_type ) } { ls_req-class_name } is locked by user { sy-msgv1 }| ).
         RETURN.
       WHEN OTHERS.
-        rs_response = build_error( iv_id = is_message-id iv_code = 'LOCK_FAILED' iv_message = |Could not lock class { ls_req-class_name }| ).
+        rs_response = build_error( iv_id = is_message-id iv_code = 'LOCK_FAILED' iv_message = |Could not lock { to_lower( object_label( ls_req-object_type ) ) } { ls_req-class_name }| ).
         RETURN.
     ENDCASE.
 

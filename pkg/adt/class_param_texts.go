@@ -10,7 +10,8 @@ import (
 	"unicode/utf8"
 )
 
-// Short texts of method parameters (SE24) live in SEOSUBCOTX. The ABAP Doc
+// Short texts of method parameters (SE24) of a class or an interface live in
+// SEOSUBCOTX. The ABAP Doc
 // "shorttext synchronized" tag that covers methods and attributes does not
 // reach them, and ADT has no resource for them, so they go through the
 // report domain of the ZADT_VSP WebSocket service (SEO_PARAMETER_MODIFY on
@@ -42,6 +43,7 @@ type ClassMethodParamTexts struct {
 // ClassParamTexts is the answer of getClassParamTexts.
 type ClassParamTexts struct {
 	ClassName      string                  `json:"class_name"`
+	ObjectType     string                  `json:"object_type"` // CLAS | INTF
 	PackageName    string                  `json:"package_name"`
 	MasterLanguage string                  `json:"master_language"`
 	Language       string                  `json:"language"`
@@ -54,6 +56,7 @@ type ClassParamTexts struct {
 // it is never chosen or created for the caller.
 type SetClassParamTextParams struct {
 	Class       string
+	ObjectType  string // "" or CLAS = class, INTF = interface; "" lets SAP decide by name
 	Method      string
 	Parameter   string
 	Description string
@@ -66,6 +69,7 @@ type SetClassParamTextParams struct {
 type SetClassParamTextResult struct {
 	Status         string `json:"status"` // changed | unchanged
 	ClassName      string `json:"class_name"`
+	ObjectType     string `json:"object_type"` // CLAS | INTF
 	MethodName     string `json:"method_name"`
 	ParameterName  string `json:"parameter_name"`
 	Kind           string `json:"kind"` // parameter | exception
@@ -84,11 +88,25 @@ func NormalizeTransport(transport string) string {
 	return strings.ToUpper(strings.TrimSpace(transport))
 }
 
+// NormalizeParamTextObjectType upper-cases an object type and accepts only
+// "" (let SAP decide by name), CLAS and INTF.
+func NormalizeParamTextObjectType(t string) (string, error) {
+	n := strings.ToUpper(strings.TrimSpace(t))
+	switch n {
+	case "", "CLAS", "INTF":
+		return n, nil
+	}
+	return "", fmt.Errorf("parameter texts are only supported for classes (CLAS) and interfaces (INTF), not %q", t)
+}
+
 // ValidateClassParamTextParams checks everything that can be decided without
 // talking to SAP, so a bad request never opens the WebSocket.
 func ValidateClassParamTextParams(p SetClassParamTextParams) error {
 	if strings.TrimSpace(p.Class) == "" || strings.TrimSpace(p.Method) == "" || strings.TrimSpace(p.Parameter) == "" {
 		return fmt.Errorf("class, method and parameter are required")
+	}
+	if _, err := NormalizeParamTextObjectType(p.ObjectType); err != nil {
+		return err
 	}
 	// Blanks around the text do not survive SAP's CHAR60, so they do not count.
 	desc := strings.TrimSpace(p.Description)
@@ -132,22 +150,21 @@ func validateParamTextLanguage(lang string) error {
 	return fmt.Errorf("unknown language %q: use a one-character SAP key or a known two-letter ISO code", lang)
 }
 
-// GetClassParamTexts reads the parameter texts of a class, optionally for
-// one method and one language (default: the class master language).
-func (c *AMDPWebSocketClient) GetClassParamTexts(ctx context.Context, class, method, language string) (*ClassParamTexts, error) {
+// GetClassParamTexts reads the parameter texts of a class or interface,
+// optionally for one method and one language (default: the master language).
+// objectType is "", CLAS or INTF.
+func (c *AMDPWebSocketClient) GetClassParamTexts(ctx context.Context, class, method, language, objectType string) (*ClassParamTexts, error) {
 	if strings.TrimSpace(class) == "" {
 		return nil, fmt.Errorf("class is required")
 	}
 	if err := validateParamTextLanguage(language); err != nil {
 		return nil, err
 	}
-	params := map[string]interface{}{"class_name": class}
-	if method != "" {
-		params["method_name"] = method
+	objType, err := NormalizeParamTextObjectType(objectType)
+	if err != nil {
+		return nil, err
 	}
-	if language != "" {
-		params["language"] = language
-	}
+	params := getParamTextsPayload(class, method, language, objType)
 
 	resp, err := c.sendReportRequest(ctx, "getClassParamTexts", params)
 	if err != nil {
@@ -162,12 +179,23 @@ func (c *AMDPWebSocketClient) GetClassParamTexts(ctx context.Context, class, met
 	return &result, nil
 }
 
-// SetClassParamText writes (or clears) one parameter text. A write SAP
-// accepted but whose read-back differs is returned as an error.
-func (c *AMDPWebSocketClient) SetClassParamText(ctx context.Context, p SetClassParamTextParams) (*SetClassParamTextResult, error) {
-	if err := ValidateClassParamTextParams(p); err != nil {
-		return nil, err
+// getParamTextsPayload is the WebSocket payload of getClassParamTexts.
+func getParamTextsPayload(class, method, language, objType string) map[string]interface{} {
+	params := map[string]interface{}{"class_name": class}
+	if objType != "" {
+		params["object_type"] = objType
 	}
+	if method != "" {
+		params["method_name"] = method
+	}
+	if language != "" {
+		params["language"] = language
+	}
+	return params
+}
+
+// setParamTextPayload is the WebSocket payload of setClassParamText.
+func setParamTextPayload(p SetClassParamTextParams) map[string]interface{} {
 	params := map[string]interface{}{
 		"class_name":     p.Class,
 		"method_name":    p.Method,
@@ -175,12 +203,25 @@ func (c *AMDPWebSocketClient) SetClassParamText(ctx context.Context, p SetClassP
 		"description":    strings.TrimSpace(p.Description),
 		"clear_text":     p.Clear,
 	}
+	if objType, _ := NormalizeParamTextObjectType(p.ObjectType); objType != "" {
+		params["object_type"] = objType
+	}
 	if p.Language != "" {
 		params["language"] = p.Language
 	}
 	if tr := NormalizeTransport(p.Transport); tr != "" {
 		params["transport"] = tr
 	}
+	return params
+}
+
+// SetClassParamText writes (or clears) one parameter text. A write SAP
+// accepted but whose read-back differs is returned as an error.
+func (c *AMDPWebSocketClient) SetClassParamText(ctx context.Context, p SetClassParamTextParams) (*SetClassParamTextResult, error) {
+	if err := ValidateClassParamTextParams(p); err != nil {
+		return nil, err
+	}
+	params := setParamTextPayload(p)
 
 	resp, err := c.sendReportRequest(ctx, "setClassParamText", params)
 	if err != nil {
