@@ -2418,7 +2418,7 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 				mcp.Description("Language: one-character SAP key ('S') or ISO code ('EN'). Default: the class master language. Each language has its own text, so this is also how a translation is written."),
 			),
 			mcp.WithString("transport",
-				mcp.Description("Workbench request the change is recorded in (LIMU CLSD + CPUB). Required for a class in a transportable package, refused for a local one. Needs --allow-transportable-edits."),
+				mcp.Description("Workbench request the change is recorded in (LIMU CLSD + CPUB). Required for a class in a transportable package, refused for a local one. The request must already hold a modifiable task of yours. Needs --allow-transportable-edits."),
 			),
 		), s.handleSetClassParamText)
 	}

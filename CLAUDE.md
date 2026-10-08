@@ -2195,7 +2195,7 @@ the code permanently — it is the fix, not a placeholder.
   apply before the WebSocket is opened. Format check `^[A-Z0-9]{3}K[0-9]{6}$` (`NormalizeTransport`).
 - **ABAP side** (`ZCL_VSP_REPORT_SERVICE`): `validate_transport` runs before the class lock and checks, in this order:
   request exists (`TRANSPORT_NOT_FOUND`), is not a task (`TRANSPORT_IS_TASK`), is workbench (`TRANSPORT_INVALID`), is
-  modifiable (`TRANSPORT_NOT_MODIFIABLE`), is the user's own or holds a modifiable task of theirs (`TRANSPORT_NOT_OWNED`),
+  modifiable (`TRANSPORT_NOT_MODIFIABLE`), holds a modifiable task of the user (`TRANSPORT_NO_OWN_TASK` for their own request, `TRANSPORT_NOT_OWNED` for another's; task type `S` or `X`),
   the class is not locked in another request (`OBJECT_LOCKED_IN_OTHER_REQUEST`), the original is in this system
   (`ORIGINAL_IN_OTHER_SYSTEM`). Then, inside the class lock, `record_in_request` calls `TR_RECORD_OBJ_CHANGE_TO_REQ`
   (`LIMU CLSD` + `LIMU CPUB`) **before** `SEO_PARAMETER_MODIFY`; failure gives `TRANSPORT_RECORD_FAILED` and the text is
@@ -2212,9 +2212,11 @@ the code permanently — it is the fix, not a placeholder.
   - The entries land directly under the request, not under the task (as SAP does with entries of this kind).
   - `get_transport_info` did not list the test request although E070/E071/TLOCK show it; not investigated.
 - **Not verified / known limits**: `TRINT_OBJECTS_CHECK_AND_INSERT` runs `ROLLBACK WORK` on some error branches, illegal in
-  APC (uncatchable dump, lock held until the session ends); only reachable when the user has no task in the request and a
-  later step fails; not reproduced. Entries added to a request cannot be undone from vsp. A `clear` leaves a blank row.
-  `validate_transport` (~90 lines) and `apply_set_request` exceed the recommended method size (deferred).
+  APC (uncatchable dump, lock held until the session ends). The branch that opens a task is now closed by requiring an own
+  modifiable task (verified by reading the function: the rollbacks run only when `db_changes = 'X'`); still reachable when
+  the second entry (CPUB) fails after the first (CLSD) went in; not reproduced. Entries added to a request cannot be undone
+  from vsp. A `clear` leaves a blank row. `validate_transport` and `apply_set_request` were split into small methods
+  (refactor, same behaviour).
 - **Code review**: first pass 2 HIGH (TLOCK check never matching LIMU locks; real request numbers in versioned tests,
   fixtures now use synthetic `A4HK...`), both fixed; second pass APPROVE.
 - **Verified live (2026-10-08)**: negatives for no request, task, non-existent, released, another user's, class in another

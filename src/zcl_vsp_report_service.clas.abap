@@ -76,6 +76,8 @@ CLASS zcl_vsp_report_service DEFINITION
 
     CONSTANTS gc_trfunction_workbench TYPE e070-trfunction VALUE 'K'.
     CONSTANTS gc_trstatus_modifiable  TYPE e070-trstatus VALUE 'D'.
+    CONSTANTS gc_trfunction_correction TYPE e070-trfunction VALUE 'S'.
+    CONSTANTS gc_trfunction_unclassified TYPE e070-trfunction VALUE 'X'.
     CONSTANTS gc_version_active       TYPE seosubcodf-version VALUE '1'.
     CONSTANTS gc_version_inactive     TYPE seosubcodf-version VALUE '0'.
     CONSTANTS gc_scotype_param        TYPE seosubco-scotype VALUE '0'.
@@ -1019,11 +1021,16 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD check_request_ownership.
-    " The request has to be the user's own, or hold a modifiable task of theirs
-    IF is_header-as4user = sy-uname.
+    " The user needs a modifiable task of their own in the request: without one the
+    " CTS would open a task itself, and its error branches issue ROLLBACK WORK,
+    " which is not allowed in an APC handler.
+    IF has_own_modifiable_task( iv_request ) = abap_true.
       RETURN.
     ENDIF.
-    IF has_own_modifiable_task( iv_request ) = abap_false.
+    IF is_header-as4user = sy-uname.
+      rs_error = VALUE #( code = 'TRANSPORT_NO_OWN_TASK'
+                          message = |Transport request { iv_request } has no modifiable task of yours; create one in SE09| ).
+    ELSE.
       rs_error = VALUE #( code = 'TRANSPORT_NOT_OWNED'
                           message = |Transport request { iv_request } belongs to { is_header-as4user } and you have no task in it| ).
     ENDIF.
@@ -1032,6 +1039,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
   METHOD has_own_modifiable_task.
     SELECT SINGLE trkorr FROM e070
       WHERE strkorr = @iv_request AND as4user = @sy-uname AND trstatus = @gc_trstatus_modifiable
+        AND ( trfunction = @gc_trfunction_correction OR trfunction = @gc_trfunction_unclassified )
       INTO @DATA(lv_own_task).
     rv_has_task = xsdbool( sy-subrc = 0 ).
   ENDMETHOD.
