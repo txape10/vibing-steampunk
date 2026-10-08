@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -17,6 +18,9 @@ import (
 
 // maxParamTextLength is the width of SEODESCR (CHAR 60).
 const maxParamTextLength = 60
+
+// transportNumberPattern is a workbench request number: <SID>K<6 digits>.
+var transportNumberPattern = regexp.MustCompile(`^[A-Z0-9]{3}K[0-9]{6}$`)
 
 // ClassParamText is one parameter of a method and its short text.
 type ClassParamText struct {
@@ -44,7 +48,9 @@ type ClassParamTexts struct {
 }
 
 // SetClassParamTextParams are the inputs of SetClassParamText. Clear must be
-// set to empty a text; an empty Description without it is refused.
+// set to empty a text; an empty Description without it is refused. Transport
+// is the workbench request a change in a transportable package is recorded in;
+// it is never chosen or created for the caller.
 type SetClassParamTextParams struct {
 	Class       string
 	Method      string
@@ -52,6 +58,7 @@ type SetClassParamTextParams struct {
 	Description string
 	Language    string // "" = master language; 1 char = SAP key; 2 chars = ISO
 	Clear       bool
+	Transport   string
 }
 
 // SetClassParamTextResult is the answer of setClassParamText.
@@ -66,6 +73,13 @@ type SetClassParamTextResult struct {
 	NewDescription string `json:"new_description"`
 	RowState       string `json:"row_state"` // present | blank | absent
 	Verified       bool   `json:"verified"`
+	Transport      string `json:"transport,omitempty"`
+	Recording      string `json:"recording,omitempty"` // recorded | not_needed
+}
+
+// NormalizeTransport trims and upper-cases a request number.
+func NormalizeTransport(transport string) string {
+	return strings.ToUpper(strings.TrimSpace(transport))
 }
 
 // ValidateClassParamTextParams checks everything that can be decided without
@@ -93,6 +107,9 @@ func ValidateClassParamTextParams(p SetClassParamTextParams) error {
 		if r > 0xFFFF {
 			return fmt.Errorf("description contains a character outside the Basic Multilingual Plane")
 		}
+	}
+	if tr := NormalizeTransport(p.Transport); tr != "" && !transportNumberPattern.MatchString(tr) {
+		return fmt.Errorf("transport %q is not a request number (expected <SID>K<6 digits>)", p.Transport)
 	}
 	return validateParamTextLanguage(p.Language)
 }
@@ -158,6 +175,9 @@ func (c *AMDPWebSocketClient) SetClassParamText(ctx context.Context, p SetClassP
 	}
 	if p.Language != "" {
 		params["language"] = p.Language
+	}
+	if tr := NormalizeTransport(p.Transport); tr != "" {
+		params["transport"] = tr
 	}
 
 	resp, err := c.sendReportRequest(ctx, "setClassParamText", params)

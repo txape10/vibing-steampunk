@@ -2137,8 +2137,8 @@ the code permanently — it is the fix, not a placeholder.
   `SAP(action="edit", target="CLAS ZCL_X", params={"type":"set_param_text","method":"M","parameter":"IV_A","description":"…","language":"EN"})`
   (`"clear": true` blanks the text). Language defaults to the class master language; ISO (2 chars) or SAP (1 char).
   Standalone tools `GetClassParamTexts` (also in focused mode) and `SetClassParamText`.
-- **Scope today**: classes in **local packages (`$*`) only** (`NON_LOCAL_PACKAGE` otherwise; a `transport` param is
-  refused). Interfaces refused. Exceptions (`SCOTYPE=1`) not handled.
+- **Scope**: local packages (`$*`) and, since Phase 3 (2ar), transportable packages with an explicit `transport`.
+  Interfaces refused. Exceptions (`SCOTYPE=1`) not handled.
 - **ABAP side**: new actions `getClassParamTexts`/`setClassParamText` in `ZCL_VSP_REPORT_SERVICE` (`src/` and
   `embedded/abap/` identical). The writer is `SEO_PARAMETER_MODIFY`, which rewrites the whole active `SEOSUBCODF` row,
   so the full `SEOSUBCO`/`SEOSUBCODF` rows are moved into `seos_parameters_w` and only `LANGU`/`DESCRIPT` change.
@@ -2185,6 +2185,45 @@ the code permanently — it is the fix, not a placeholder.
   `internal/mcp/handlers_description_paramtexts_test.go`, `internal/mcp/tools_register.go`, `tools_groups.go`,
   `tools_focused.go`, `handlers_help.go`, `cmd/vsp/config_cmd.go`.
 - **Pending cleanup**: delete `ZCL_VSP_TST_PARTXT`/`ZIF_VSP_TST_PARTXT` from `$TMP` (needs explicit confirmation).
+
+### 2ar. Class method-parameter short texts (SE24) — Phase 3: transportable classes (2026-10-08)
+- **What changed**: `set_param_text` now works on classes in transportable packages. The `transport` param (a workbench
+  request, `<SID>K<6 digits>`) is **mandatory** there and **refused** for local packages (`TRANSPORT_REQUIRED` /
+  `TRANSPORT_NOT_ALLOWED`). It is never chosen or created for the caller (`planTransport` is deliberately not used).
+  Languages are not restricted: any language can be written, as in `$TMP`.
+- **Go side**: `transport` goes through `PrepareSourceUpdate`, so `--allow-transportable-edits` and `--allowed-transports`
+  apply before the WebSocket is opened. Format check `^[A-Z0-9]{3}K[0-9]{6}$` (`NormalizeTransport`).
+- **ABAP side** (`ZCL_VSP_REPORT_SERVICE`): `validate_transport` runs before the class lock and checks, in this order:
+  request exists (`TRANSPORT_NOT_FOUND`), is not a task (`TRANSPORT_IS_TASK`), is workbench (`TRANSPORT_INVALID`), is
+  modifiable (`TRANSPORT_NOT_MODIFIABLE`), is the user's own or holds a modifiable task of theirs (`TRANSPORT_NOT_OWNED`),
+  the class is not locked in another request (`OBJECT_LOCKED_IN_OTHER_REQUEST`), the original is in this system
+  (`ORIGINAL_IN_OTHER_SYSTEM`). Then, inside the class lock, `record_in_request` calls `TR_RECORD_OBJ_CHANGE_TO_REQ`
+  (`LIMU CLSD` + `LIMU CPUB`) **before** `SEO_PARAMETER_MODIFY`; failure gives `TRANSPORT_RECORD_FAILED` and the text is
+  untouched. The result carries `transport` and `recording` (`recorded` | `not_needed`).
+- **Findings**:
+  - **TLOCK keeps every lock of a class under `OBJECT = 'CLAS'`**, `LOKEY` = name padded to 30 + suffix (`CLSD`, `CPUB`,
+    `METH<name>`...), never as `OBJECT = 'CLSD'`. The first version of the check looked for the latter and would have
+    detected nothing (code-review HIGH); it now uses `LIKE <name>%` with `ESCAPE`, filters `lokey(30)` and maps task to
+    request with `E070-STRKORR`.
+  - **The CTS-internal `DB_COMMIT` of `TRINT_OBJECTS_CHECK_AND_INSERT` does not kill the APC session** (verified live: the
+    next call in the same session worked, no residual `SEOCLSENQ`).
+  - **Non-master languages record the same entries** (`LIMU CLSD` + `CPUB`): no reason to restrict them.
+  - **If `R3TR CLAS` is already in the task, nothing is added** to the request; the write is covered.
+  - The entries land directly under the request, not under the task (as SAP does with entries of this kind).
+  - `get_transport_info` did not list the test request although E070/E071/TLOCK show it; not investigated.
+- **Not verified / known limits**: `TRINT_OBJECTS_CHECK_AND_INSERT` runs `ROLLBACK WORK` on some error branches, illegal in
+  APC (uncatchable dump, lock held until the session ends); only reachable when the user has no task in the request and a
+  later step fails; not reproduced. Entries added to a request cannot be undone from vsp. A `clear` leaves a blank row.
+  `validate_transport` (~90 lines) and `apply_set_request` exceed the recommended method size (deferred).
+- **Code review**: first pass 2 HIGH (TLOCK check never matching LIMU locks; real request numbers in versioned tests,
+  fixtures now use synthetic `A4HK...`), both fixed; second pass APPROVE.
+- **Verified live (2026-10-08)**: negatives for no request, task, non-existent, released, another user's, class in another
+  own request; positives on a class without any open request (recorded `CLSD`+`CPUB`), in a non-master language, and on a
+  class already in a task as `R3TR CLAS` (nothing added). All texts restored afterwards.
+- Files: `embedded/abap/zcl_vsp_report_service.clas.abap`, `src/zcl_vsp_report_service.clas.abap`,
+  `pkg/adt/class_param_texts.go` (+`_test.go`), `internal/mcp/handlers_description.go`,
+  `internal/mcp/handlers_description_paramtexts_test.go`, `internal/mcp/tools_register.go`, `internal/mcp/handlers_help.go`.
+- **Pending**: Phase 4 (exception texts, `SEO_EXCEPTION_MODIFY`), Phase 2b (interfaces).
 
 ## Known Open Issues (Not Fixed)
 

@@ -67,7 +67,7 @@ func TestParamTexts_SetLocalRefusalsSendNothing(t *testing.T) {
 		"clear with text":      {"CLAS ZCL_DEMO", func(p map[string]any) { p["clear"] = true }, "cannot be combined"},
 		"unknown ISO language": {"CLAS ZCL_DEMO", func(p map[string]any) { p["language"] = "ET" }, "unknown language"},
 		"interface":            {"INTF ZIF_DEMO", func(p map[string]any) {}, "only supported for classes"},
-		"transport":            {"CLAS ZCL_DEMO", func(p map[string]any) { p["transport"] = "S4DK000001" }, "not supported yet"},
+		"transport format":     {"CLAS ZCL_DEMO", func(p map[string]any) { p["transport"] = "NOT-A-REQUEST" }, "not a request number"},
 		"missing parameter":    {"CLAS ZCL_DEMO", func(p map[string]any) { delete(p, "parameter") }, "class, method and parameter are required"},
 	}
 	for name, c := range cases {
@@ -84,6 +84,56 @@ func TestParamTexts_SetLocalRefusalsSendNothing(t *testing.T) {
 				t.Errorf("a locally refused call sent %d request(s)", n)
 			}
 		})
+	}
+}
+
+// A request number is a policy question before it is a SAP one: without
+// --allow-transportable-edits the call is refused and nothing is sent.
+func TestParamTexts_SetWithTransportBlockedWithoutTransportableEdits(t *testing.T) {
+	server, rc, _ := newReadOnlyTestServer(t, nil)
+	params := validSetParams()
+	params["transport"] = "A4HK000001"
+	before := rc.count()
+	out := callSAP(t, server, setParamTextArgs(params))
+	if !strings.Contains(out, "editing transportable objects is disabled") {
+		t.Errorf("expected the transportable-edits refusal, got: %s", out)
+	}
+	if n := rc.count() - before; n != 0 {
+		t.Errorf("a refused call sent %d request(s)", n)
+	}
+}
+
+func TestParamTexts_SetWithTransportOutsideWhitelistIsBlocked(t *testing.T) {
+	server, rc, _ := newReadOnlyTestServer(t, func(c *Config) {
+		c.AllowTransportableEdits = true
+		c.AllowedTransports = []string{"A4HK9*"}
+	})
+	params := validSetParams()
+	params["transport"] = "A4HK000001"
+	before := rc.count()
+	out := callSAP(t, server, setParamTextArgs(params))
+	assertBlocked(t, out)
+	if n := rc.count() - before; n != 0 {
+		t.Errorf("a refused call sent %d request(s)", n)
+	}
+}
+
+// Control for the two refusals above: with the flag and a matching whitelist
+// the same call gets past the policy and reaches the ADT host.
+func TestParamTexts_SetWithAllowedTransportReachesHost(t *testing.T) {
+	server, rc, _ := newReadOnlyTestServer(t, func(c *Config) {
+		c.AllowTransportableEdits = true
+		c.AllowedTransports = []string{"A4HK0*"}
+	})
+	params := validSetParams()
+	params["transport"] = "a4hk000001"
+	before := rc.count()
+	out := callSAP(t, server, setParamTextArgs(params))
+	if strings.Contains(out, "blocked by safety configuration") || strings.Contains(out, "transportable objects is disabled") {
+		t.Fatalf("an allowed transport must not be refused by policy: %s", out)
+	}
+	if rc.count() == before {
+		t.Error("an allowed transport should reach the ADT host")
 	}
 }
 

@@ -21,6 +21,7 @@ CLASS zcl_vsp_report_service DEFINITION
         description    TYPE string,
         language       TYPE string,
         clear_text     TYPE abap_bool,
+        transport      TYPE string,
       END OF ty_set_request,
 
       BEGIN OF ty_param_text,
@@ -58,6 +59,8 @@ CLASS zcl_vsp_report_service DEFINITION
         new_description TYPE string,
         row_state       TYPE string,
         verified        TYPE abap_bool,
+        transport       TYPE string,
+        recording       TYPE string,
       END OF ty_set_response,
 
       BEGIN OF ty_error,
@@ -81,7 +84,19 @@ CLASS zcl_vsp_report_service DEFINITION
       IMPORTING is_req        TYPE ty_set_request
       EXPORTING es_error      TYPE ty_error
                 ev_lang       TYPE sy-langu
-                ev_masterlang TYPE tadir-masterlang.
+                ev_masterlang TYPE tadir-masterlang
+                ev_devclass   TYPE tadir-devclass.
+
+    METHODS validate_transport
+      IMPORTING is_req          TYPE ty_set_request
+                iv_devclass     TYPE tadir-devclass
+      RETURNING VALUE(rs_error) TYPE ty_error.
+
+    METHODS record_in_request
+      IMPORTING iv_request      TYPE trkorr
+                iv_class        TYPE string
+      EXPORTING ev_no_recording TYPE abap_bool
+                ev_error        TYPE string.
 
     METHODS apply_set_request
       IMPORTING iv_id              TYPE string
@@ -812,26 +827,17 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD locate_target.
-    CONSTANTS lc_local_package_prefix TYPE c LENGTH 1 VALUE '$'.
-    CONSTANTS lc_objtype_class        TYPE c LENGTH 4 VALUE 'CLAS'.
-    CONSTANTS lc_actvt_change         TYPE c LENGTH 2 VALUE '02'.
+    CONSTANTS lc_objtype_class TYPE c LENGTH 4 VALUE 'CLAS'.
+    CONSTANTS lc_actvt_change  TYPE c LENGTH 2 VALUE '02'.
     DATA lv_cls TYPE seosubco-clsname.
 
     resolve_class(
       EXPORTING iv_class      = is_req-class_name
       IMPORTING ev_found      = DATA(lv_found)
-                ev_devclass   = DATA(lv_devclass)
+                ev_devclass   = ev_devclass
                 ev_masterlang = ev_masterlang ).
     IF lv_found = abap_false.
       es_error = VALUE #( code = 'CLASS_NOT_FOUND' message = |Class { is_req-class_name } not found| ).
-      RETURN.
-    ENDIF.
-
-    " Transportable packages are not supported yet: the change has to be
-    " recorded in a request (LIMU CLSD + CPUB), which this action does not do.
-    IF lv_devclass(1) <> lc_local_package_prefix.
-      es_error = VALUE #( code = 'NON_LOCAL_PACKAGE'
-                          message = |Class { is_req-class_name } is in transportable package { lv_devclass }; only local packages are supported| ).
       RETURN.
     ENDIF.
 
@@ -847,13 +853,136 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
 
     lv_cls = is_req-class_name.
     AUTHORITY-CHECK OBJECT 'S_DEVELOP'
-      ID 'DEVCLASS' FIELD lv_devclass
+      ID 'DEVCLASS' FIELD ev_devclass
       ID 'OBJTYPE'  FIELD lc_objtype_class
       ID 'OBJNAME'  FIELD lv_cls
       ID 'P_GROUP'  DUMMY
       ID 'ACTVT'    FIELD lc_actvt_change.
     IF sy-subrc <> 0.
       es_error = VALUE #( code = 'NO_AUTHORIZATION' message = |No change authorization (S_DEVELOP) for class { is_req-class_name }| ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD validate_transport.
+    CONSTANTS lc_local_package_prefix TYPE c LENGTH 1 VALUE '$'.
+    CONSTANTS lc_trfunction_workbench TYPE e070-trfunction VALUE 'K'.
+    CONSTANTS lc_trstatus_modifiable  TYPE e070-trstatus VALUE 'D'.
+    CONSTANTS lc_objtype_class        TYPE tadir-object VALUE 'CLAS'.
+    DATA lv_request TYPE trkorr.
+    DATA lv_class   TYPE tadir-obj_name.
+
+    IF iv_devclass(1) = lc_local_package_prefix.
+      IF is_req-transport IS NOT INITIAL.
+        rs_error = VALUE #( code = 'TRANSPORT_NOT_ALLOWED'
+                            message = |Class { is_req-class_name } is in local package { iv_devclass }; no transport request is used| ).
+      ENDIF.
+      RETURN.
+    ENDIF.
+
+    IF is_req-transport IS INITIAL.
+      rs_error = VALUE #( code = 'TRANSPORT_REQUIRED'
+                          message = |Class { is_req-class_name } is in transportable package { iv_devclass }; a workbench request must be given| ).
+      RETURN.
+    ENDIF.
+    IF NOT matches( val = is_req-transport pcre = '[A-Z0-9]{3}K[0-9]{6}' ).
+      rs_error = VALUE #( code = 'TRANSPORT_INVALID' message = |{ is_req-transport } is not a transport request number| ).
+      RETURN.
+    ENDIF.
+
+    lv_request = is_req-transport.
+    SELECT SINGLE trfunction, trstatus, strkorr, as4user FROM e070
+      WHERE trkorr = @lv_request
+      INTO @DATA(ls_request).
+    IF sy-subrc <> 0.
+      rs_error = VALUE #( code = 'TRANSPORT_NOT_FOUND' message = |Transport request { lv_request } does not exist| ).
+      RETURN.
+    ENDIF.
+    IF ls_request-strkorr IS NOT INITIAL.
+      rs_error = VALUE #( code = 'TRANSPORT_IS_TASK'
+                          message = |{ lv_request } is a task; give its request { ls_request-strkorr }| ).
+      RETURN.
+    ENDIF.
+    IF ls_request-trfunction <> lc_trfunction_workbench.
+      rs_error = VALUE #( code = 'TRANSPORT_INVALID' message = |{ lv_request } is not a workbench request| ).
+      RETURN.
+    ENDIF.
+    IF ls_request-trstatus <> lc_trstatus_modifiable.
+      rs_error = VALUE #( code = 'TRANSPORT_NOT_MODIFIABLE' message = |Transport request { lv_request } is not modifiable| ).
+      RETURN.
+    ENDIF.
+
+    " The request has to be the user's own, or hold a modifiable task of theirs
+    IF ls_request-as4user <> sy-uname.
+      SELECT SINGLE trkorr FROM e070
+        WHERE strkorr = @lv_request AND as4user = @sy-uname AND trstatus = @lc_trstatus_modifiable
+        INTO @DATA(lv_own_task).
+      IF sy-subrc <> 0.
+        rs_error = VALUE #( code = 'TRANSPORT_NOT_OWNED'
+                            message = |Transport request { lv_request } belongs to { ls_request-as4user } and you have no task in it| ).
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    " TLOCK keeps every lock of a class (whole class, CLSD, CPUB, METH...) under
+    " OBJECT = CLAS, LOKEY = name padded to 30 characters + a suffix
+    DATA(lv_lock_pattern) = replace( val = is_req-class_name sub = '_' with = '#_' occ = 0 ) && '%'.
+    SELECT trkorr, author, lokey FROM tlock
+      WHERE object = 'CLAS' AND lokey LIKE @lv_lock_pattern ESCAPE '#'
+      INTO TABLE @DATA(lt_locks).
+    DATA lv_lock_parent TYPE e070-strkorr.
+    LOOP AT lt_locks INTO DATA(ls_lock).
+      IF ls_lock-lokey(30) <> is_req-class_name.
+        CONTINUE.
+      ENDIF.
+      CLEAR lv_lock_parent.
+      SELECT SINGLE strkorr FROM e070 WHERE trkorr = @ls_lock-trkorr INTO @lv_lock_parent.
+      DATA(lv_lock_request) = COND trkorr( WHEN lv_lock_parent IS INITIAL THEN ls_lock-trkorr ELSE lv_lock_parent ).
+      IF lv_lock_request <> lv_request.
+        rs_error = VALUE #( code = 'OBJECT_LOCKED_IN_OTHER_REQUEST'
+                            message = |Class { is_req-class_name } is already in request { lv_lock_request } (user { ls_lock-author })| ).
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+
+    lv_class = is_req-class_name.
+    SELECT SINGLE srcsystem FROM tadir
+      WHERE pgmid = 'R3TR' AND object = @lc_objtype_class AND obj_name = @lv_class
+      INTO @DATA(lv_srcsystem).
+    IF sy-subrc = 0 AND lv_srcsystem <> sy-sysid.
+      rs_error = VALUE #( code = 'ORIGINAL_IN_OTHER_SYSTEM'
+                          message = |Class { is_req-class_name } has its original in system { lv_srcsystem }| ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD record_in_request.
+    CONSTANTS lc_pgmid_limu        TYPE c LENGTH 4 VALUE 'LIMU'.
+    CONSTANTS lc_object_class_def  TYPE c LENGTH 4 VALUE 'CLSD'.
+    CONSTANTS lc_object_public     TYPE c LENGTH 4 VALUE 'CPUB'.
+    DATA lv_text TYPE string.
+
+    " Same entries SE24 records for a change of a parameter text. The function
+    " never opens a dialog and needs the request: it cannot create one.
+    DATA(lt_objects) = VALUE tredt_objects(
+      ( pgmid = lc_pgmid_limu object = lc_object_class_def obj_name = iv_class )
+      ( pgmid = lc_pgmid_limu object = lc_object_public    obj_name = iv_class ) ).
+
+    CALL FUNCTION 'TR_RECORD_OBJ_CHANGE_TO_REQ'
+      EXPORTING
+        iv_request      = iv_request
+        it_objects      = lt_objects
+      IMPORTING
+        ev_no_recording = ev_no_recording
+      EXCEPTIONS
+        cancel          = 1
+        error_message   = 2
+        OTHERS          = 3.
+    IF sy-subrc <> 0.
+      IF sy-msgid IS NOT INITIAL.
+        MESSAGE ID sy-msgid TYPE 'E' NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO lv_text.
+      ELSE.
+        lv_text = |function ended with return code { sy-subrc } and no message|.
+      ENDIF.
+      ev_error = |Could not record the class in request { iv_request }: { lv_text }|.
     ENDIF.
   ENDMETHOD.
 
@@ -934,13 +1063,28 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
       RETURN.
     ENDIF.
 
+    IF is_req-transport IS NOT INITIAL.
+      record_in_request(
+        EXPORTING iv_request      = CONV trkorr( is_req-transport )
+                  iv_class        = is_req-class_name
+        IMPORTING ev_no_recording = DATA(lv_no_recording)
+                  ev_error        = DATA(lv_record_error) ).
+      IF lv_record_error IS NOT INITIAL.
+        rs_response = build_error( iv_id = iv_id iv_code = 'TRANSPORT_RECORD_FAILED' iv_message = lv_record_error ).
+        RETURN.
+      ENDIF.
+      ls_result-transport = is_req-transport.
+      ls_result-recording = COND #( WHEN lv_no_recording = abap_true THEN 'not_needed' ELSE 'recorded' ).
+    ENDIF.
+
     DATA(lv_error) = modify_param_text(
       is_co          = ls_co
       is_df          = ls_df
       iv_lang        = iv_lang
       iv_description = is_req-description ).
     IF lv_error IS NOT INITIAL.
-      rs_response = build_error( iv_id = iv_id iv_code = 'MODIFY_FAILED' iv_message = |{ lv_error } (state may be partial: check with param_texts)| ).
+      rs_response = build_error( iv_id = iv_id iv_code = 'MODIFY_FAILED'
+                                iv_message = |{ lv_error } (state may be partial: check with param_texts)| ).
       RETURN.
     ENDIF.
 
@@ -977,6 +1121,7 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
     ls_req-class_name     = to_upper( ls_req-class_name ).
     ls_req-method_name    = to_upper( ls_req-method_name ).
     ls_req-parameter_name = to_upper( ls_req-parameter_name ).
+    ls_req-transport      = to_upper( condense( ls_req-transport ) ).
     " Trailing blanks do not survive CHAR60, so compare and store the trimmed text
     ls_req-description    = shift_right( val = shift_left( val = ls_req-description sub = ` ` ) sub = ` ` ).
 
@@ -986,7 +1131,11 @@ CLASS zcl_vsp_report_service IMPLEMENTATION.
         EXPORTING is_req        = ls_req
         IMPORTING es_error      = ls_error
                   ev_lang       = DATA(lv_lang)
-                  ev_masterlang = DATA(lv_masterlang) ).
+                  ev_masterlang = DATA(lv_masterlang)
+                  ev_devclass   = DATA(lv_devclass) ).
+    ENDIF.
+    IF ls_error IS INITIAL.
+      ls_error = validate_transport( is_req = ls_req iv_devclass = lv_devclass ).
     ENDIF.
     IF ls_error IS NOT INITIAL.
       rs_response = build_error( iv_id = is_message-id iv_code = ls_error-code iv_message = ls_error-message ).

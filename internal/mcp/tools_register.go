@@ -2395,7 +2395,7 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("SetClassParamText") {
 		s.mcpServer.AddTool(mcp.NewTool("SetClassParamText",
-			mcp.WithDescription("Set or clear the short text of ONE method parameter of a class (SE24). Only classes in local packages ($*) for now. Texts of methods and attributes are NOT done here: write them with an ABAP Doc '\"! <p class=\"shorttext synchronized\">text</p>' line above the declaration."),
+			mcp.WithDescription("Set or clear the short text of ONE method parameter of a class (SE24). Classes in a transportable package need transport (an existing, modifiable workbench request of yours, never a task); it is never chosen or created for you. Texts of methods and attributes are NOT done here: write them with an ABAP Doc '\"! <p class=\"shorttext synchronized\">text</p>' line above the declaration."),
 			mcp.WithString("class",
 				mcp.Description("Class name"),
 				mcp.Required(),
@@ -2416,6 +2416,9 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 			),
 			mcp.WithString("language",
 				mcp.Description("Language: one-character SAP key ('S') or ISO code ('EN'). Default: the class master language. Each language has its own text, so this is also how a translation is written."),
+			),
+			mcp.WithString("transport",
+				mcp.Description("Workbench request the change is recorded in (LIMU CLSD + CPUB). Required for a class in a transportable package, refused for a local one. Needs --allow-transportable-edits."),
 			),
 		), s.handleSetClassParamText)
 	}

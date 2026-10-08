@@ -95,9 +95,6 @@ func (s *Server) handleSetClassParamText(ctx context.Context, request mcp.CallTo
 	if t := getStringParam(args, "object_type"); t != "" && t != "CLAS" {
 		return newToolResultError("parameter texts are only supported for classes (CLAS); interfaces are not supported yet"), nil
 	}
-	if getStringParam(args, "transport") != "" {
-		return newToolResultError("transportable classes are not supported yet: only classes in local packages ($*) can be changed"), nil
-	}
 	clearText, _ := getBoolParam(args, "clear")
 	p := adt.SetClassParamTextParams{
 		Class:       getStringParam(args, "class"),
@@ -106,13 +103,16 @@ func (s *Server) handleSetClassParamText(ctx context.Context, request mcp.CallTo
 		Description: getStringParam(args, "description"),
 		Language:    getStringParam(args, "language"),
 		Clear:       clearText,
+		Transport:   adt.NormalizeTransport(getStringParam(args, "transport")),
 	}
 	if err := adt.ValidateClassParamTextParams(p); err != nil {
 		return newToolResultError(fmt.Sprintf("SetClassParamText: %v", err)), nil
 	}
-	// The package policy (--allowed-packages) is enforced here, before the
-	// WebSocket is opened; the "local package only" rule is enforced by SAP.
-	if _, err := s.adtClient.PrepareSourceUpdate(ctx, "/sap/bc/adt/oo/classes/"+url.PathEscape(strings.ToLower(p.Class)), ""); err != nil {
+	// The package and transport policies (--allowed-packages,
+	// --allow-transportable-edits, --allowed-transports) are enforced here,
+	// before the WebSocket is opened. Whether the request exists, is open and
+	// is the caller's is checked by SAP. A request is never chosen for the caller.
+	if _, err := s.adtClient.PrepareSourceUpdate(ctx, "/sap/bc/adt/oo/classes/"+url.PathEscape(strings.ToLower(p.Class)), p.Transport); err != nil {
 		return newToolResultError(fmt.Sprintf("SetClassParamText: %v", err)), nil
 	}
 	if errResult := s.ensureWSConnected(ctx, "SetClassParamText"); errResult != nil {
