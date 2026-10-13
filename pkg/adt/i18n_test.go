@@ -264,7 +264,7 @@ func TestOverrideLanguageInRequest(t *testing.T) {
 // ST_ADT_MESSAGE_CLASS; the singular form this code once sent is ignored by
 // SAP without any error, so this test pins that it never comes back.
 func TestMessageClassMarshalXML(t *testing.T) {
-	mc := newMessageClassWriteBody("ZTEST_MC", "Test messages", "ES")
+	mc := newMessageClassWriteBody("ZTEST_MC", "Test messages", "ES", "")
 	mc.Messages = []messageClassWriteMessage{
 		{Number: "001", Text: "Enter a value"},
 	}
@@ -319,7 +319,7 @@ func TestMessageClassMarshalXML(t *testing.T) {
 // this fix came from explicitly flagged this as unverified rather than
 // assumed.
 func TestMessageClassMarshalXML_OmitsEmptyDescription(t *testing.T) {
-	mc := newMessageClassWriteBody("ZTEST_MC", "", "ES")
+	mc := newMessageClassWriteBody("ZTEST_MC", "", "ES", "")
 
 	body, err := xml.Marshal(mc)
 	if err != nil {

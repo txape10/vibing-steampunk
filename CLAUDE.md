@@ -2274,6 +2274,38 @@ the code permanently — it is the fix, not a placeholder.
   `internal/mcp/tools_register.go`, `internal/mcp/handlers_help.go`.
 - Code review: APPROVE after fixing 2 MEDIUM (default `CLAS` in the Go handlers, payload tests).
 
+### 2au. Message class writes in TRANSPORTABLE classes — `adtcore:packageRef` on the PUT body (2026-10-13)
+- **The bug** (reported from another project): `edit MSAG ZEDI` with `transport` answered success, the read-back
+  found nothing, and `T100` had no row in any language. 2ao had verified only `$TMP`; its "NOT verified live"
+  note on transportable classes was the gap.
+- **Root cause, read from the system (S4D) and confirmed by a live write**: `CL_ADT_MC_RES_CONTROLLER=>DO_UPDATE`
+  takes the package from the PUT **body** (`main_object-package_ref-name`) and the request from the URI `corrNr`.
+  `CL_ADT_MESSAGE_CLASS_API=>UPDATE_MESSAGE` runs, only when a request is present, `TRANSPORT( )` per message
+  (`LIMU MESS`, `devclass = iv_package`, `CTS_WBO_API_CHECK_OBJECTS`); if the check is not `'S'` it does `RETURN`
+  before the `MODIFY T100`, no error, and the controller ignores the result. vsp's body carried no package.
+  `DELETE` of a message passes the same package to `TR_TADIR_INTERFACE`. In `$TMP` there is no request, so the
+  check never runs — hence "works in `$TMP`, silent no-op with a request".
+- **Fix**: `messageClassWriteBody.PackageRef` (`<adtcore:packageRef adtcore:name=…/>`, **before** `mc:messages`;
+  the transformation is order-sensitive). `newMessageClassWriteBody(name, description, language, pkg)`. The package is
+  read from the description GET `WriteMessageClassTexts` already does inside the lock window (zero new requests,
+  issue #91); `MessageClass.PackageRef` (`json:"-"`, `read MSAG` output unchanged). With a transport and no package
+  the write is refused **before** the PUT (and the lock released). `CreateMessageClass` passes `opts.Package`.
+  `verifyMessageClassWrite` takes `transport, pkg` and, with a request, the error names the CTS cause (`ctsHint`).
+  `mc:corrno`/`mc:lockhandle` per message are **not** sent: they do not influence the package (read in the code).
+  `$TMP` now sends `packageRef $TMP` too (valid package for `TR_TADIR_INTERFACE` on delete).
+- **Real GET shape** (captured): `<adtcore:packageRef adtcore:uri=… adtcore:type="DEVC/K" adtcore:name="ZSU01"/>` is a
+  direct child of the root, before `mc:messages`.
+- **Tests**: `pkg/adt/msag_packageref_test.go` (new, 12) + two existing files adapted; 7 of them fail with the change
+  disabled (mutation-checked). Code review: APPROVE, 0 CRITICAL/HIGH.
+- **Verified live (2026-10-13)**: `edit MSAG ZEDI` `language ES`, `transport S4DK928904`, message 043 → `T100` row
+  `S`/`043`; `E071` has `LIMU MESS ZEDI043` in task `S4DK928905`; TADIR still `ZSU01`; description unchanged; no
+  `ES_MSGSI`/`SEOCLSENQ` enqueues left. **Not run**: the breakpoint on `TRANSPORT` (step 0 of the plan) — the fix
+  worked, so the hypothesis (empty package fails the CTS check) is now supported but the exact `CTS_WBO_API_CHECK_OBJECTS`
+  result was never inspected. **Not verified**: transportable **delete** (`delete_numbers`) and `CreateMessageClass` with a
+  request — covered by unit tests only; the `LIMU MESS ZEDI043` entry stays in the order (vsp cannot remove it).
+- Files: `pkg/adt/client.go`, `pkg/adt/i18n.go`, `pkg/adt/crud.go`, `pkg/adt/i18n_test.go`,
+  `pkg/adt/lock_corrnr_test.go`, `pkg/adt/msag_packageref_test.go`.
+
 ## Known Open Issues (Not Fixed)
 
 ### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused, not fixable in vsp alone (2026-09-22)

@@ -2574,7 +2574,7 @@ func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClass
 		// endpoint actually requires. Pass the real description (not "")
 		// so this PUT doesn't blank out what the shell POST just set —
 		// same risk WriteMessageClassTexts guards against for updates.
-		mc := newMessageClassWriteBody(opts.Name, opts.Description, opts.Language)
+		mc := newMessageClassWriteBody(opts.Name, opts.Description, opts.Language, opts.Package)
 		for _, m := range opts.Messages {
 			mc.Messages = append(mc.Messages, messageClassWriteMessage{Number: m.Number, Text: m.Text})
 		}
@@ -2617,7 +2617,7 @@ func (c *Client) CreateMessageClass(ctx context.Context, opts CreateMessageClass
 		// i18n.go, and the identical guard WriteMessageClassTexts applies to
 		// its own PUT against the same resource). Still inside the lock
 		// window, before unlock.
-		if verifyErr := c.verifyMessageClassWrite(ctx, objectURL, opts.Language, opts.Messages, nil); verifyErr != nil {
+		if verifyErr := c.verifyMessageClassWrite(ctx, objectURL, opts.Language, opts.Messages, nil, opts.Transport, opts.Package); verifyErr != nil {
 			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
 				return fmt.Errorf("%w — %s", verifyErr, strandedLockAdvice(objectURL, unlockErr))
 			}

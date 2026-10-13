@@ -1036,6 +1036,12 @@ type MessageClass struct {
 	Name        string                `xml:"name,attr" json:"name"`
 	Description string                `xml:"description,attr,omitempty" json:"description,omitempty"`
 	Messages    []MessageClassMessage `xml:"messages" json:"messages"`
+	// PackageRef is read only to feed the write body; json:"-" keeps the
+	// output of `read MSAG` unchanged. No namespace on the tag, for the
+	// reason given above.
+	PackageRef struct {
+		Name string `xml:"name,attr"`
+	} `xml:"packageRef" json:"-"`
 }
 
 // messageClassWriteBody is the marshal-only shape of a message class PUT
@@ -1057,6 +1063,17 @@ type MessageClass struct {
 // correspondingly strict and able to reject a GET response that doesn't
 // match exactly, regressing the two existing, already-working read paths
 // that share the type (GetMessageClass, GetMessageClassTexts).
+//
+// PackageRef carries the package of the class. CL_ADT_MC_RES_CONTROLLER=>
+// DO_UPDATE reads it from the body (main_object-package_ref-name) and hands it
+// to CL_ADT_MESSAGE_CLASS_API=>UPDATE_MESSAGE/DELETE. With a transport request
+// on the URI, UPDATE_MESSAGE runs a CTS check per message (LIMU MESS) that
+// uses this package, and on failure returns before the MODIFY of T100 — with
+// no error, so the PUT still answers 200. A body without the package is the
+// suspected cause of texts that never land in a transportable class (read from
+// the system's code, not yet confirmed by a write). It must precede
+// mc:messages: the transformation is order-sensitive and ignores what it does
+// not recognise.
 type messageClassWriteBody struct {
 	XMLName      xml.Name                     `xml:"mc:messageClass"`
 	XMLNSmc      string                       `xml:"xmlns:mc,attr"`
@@ -1064,8 +1081,16 @@ type messageClassWriteBody struct {
 	Name         string                       `xml:"adtcore:name,attr"`
 	Language     string                       `xml:"adtcore:language,attr,omitempty"`
 	Description  string                       `xml:"adtcore:description,attr,omitempty"`
+	PackageRef   *messageClassPackageRef      `xml:"adtcore:packageRef,omitempty"`
 	Messages     []messageClassWriteMessage   `xml:"mc:messages"`
 	Deleted      []messageClassDeletedMessage `xml:"mc:deletedmessages,omitempty"`
+}
+
+// messageClassPackageRef is the write-side <adtcore:packageRef>. Only the name
+// is sent: DO_UPDATE reads nothing else from it, and the shell POST in
+// CreateMessageClass already proves this shape against the system.
+type messageClassPackageRef struct {
+	Name string `xml:"adtcore:name,attr"`
 }
 
 // newMessageClassWriteBody fills in the two xmlns attributes so every call
@@ -1075,14 +1100,18 @@ type messageClassWriteBody struct {
 // language is required: see messageClassWriteBody's doc comment for why
 // omitting it is the defect this signature exists to make impossible to
 // repeat.
-func newMessageClassWriteBody(name, description, language string) messageClassWriteBody {
-	return messageClassWriteBody{
+func newMessageClassWriteBody(name, description, language, pkg string) messageClassWriteBody {
+	body := messageClassWriteBody{
 		XMLNSmc:      msagNS,
 		XMLNSadtcore: adtcoreNS,
 		Name:         name,
 		Language:     language,
 		Description:  description,
 	}
+	if pkg != "" {
+		body.PackageRef = &messageClassPackageRef{Name: pkg}
+	}
+	return body
 }
 
 // GetMessageClass retrieves all messages from an ABAP message class.

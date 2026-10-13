@@ -351,7 +351,12 @@ func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, 
 	// exists( ) check — not confirmed live); only then retry in the session
 	// language. Any other failure sends no description rather than echo the
 	// wrong language's. When the retry fails too, the description is empty.
+	//
+	// The same response carries the class's package, which the PUT body must
+	// repeat (see messageClassWriteBody) — taken here so no request is added
+	// inside the lock window (issue #91).
 	description := ""
+	pkg := ""
 	for _, query := range []url.Values{messageClassReadQuery(lang), nil} {
 		resp, err := c.transport.Request(ctx, path, &RequestOptions{
 			Method:           http.MethodGet,
@@ -370,14 +375,23 @@ func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, 
 		var current MessageClass
 		if xml.Unmarshal(resp.Body, &current) == nil {
 			description = current.Description
+			pkg = current.PackageRef.Name
 		}
 		break
+	}
+
+	// With a transport request SAP checks every message against CTS using this
+	// package and, when that fails, drops the write without an error. Sending
+	// the PUT without it would only reproduce that silence.
+	if transport != "" && pkg == "" {
+		return fmt.Errorf("write message class texts: could not read the package of %s, which SAP needs to record "+
+			"the messages in transport %s; nothing was sent", name, transport)
 	}
 
 	// Build XML body. messageClassWriteBody, not MessageClass — see its doc
 	// comment for why the write shape needs literal mc:/adtcore: prefixes
 	// that the read type must not carry.
-	mc := newMessageClassWriteBody(name, description, lang)
+	mc := newMessageClassWriteBody(name, description, lang, pkg)
 	for _, m := range texts {
 		mc.Messages = append(mc.Messages, messageClassWriteMessage{Number: m.Number, Text: m.Text})
 	}
@@ -434,7 +448,7 @@ func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, 
 	// project has already applied to installers and other writes that used
 	// to report success without verifying the result.
 	if len(texts) > 0 || len(deleteNumbers) > 0 {
-		if verifyErr := c.verifyMessageClassWrite(ctx, path, lang, texts, deleteNumbers); verifyErr != nil {
+		if verifyErr := c.verifyMessageClassWrite(ctx, path, lang, texts, deleteNumbers, transport, pkg); verifyErr != nil {
 			return verifyErr
 		}
 	}
@@ -451,7 +465,11 @@ func (c *Client) WriteMessageClassTexts(ctx context.Context, name, lang string, 
 // A failure to even read back is not itself reported as a write failure —
 // the PUT's own 2xx is the only signal available in that case, and this is a
 // best-effort safety net, not the source of truth.
-func (c *Client) verifyMessageClassWrite(ctx context.Context, path, lang string, texts []MessageClassMessage, deleteNumbers []string) error {
+//
+// transport and pkg only enrich the error: with a request on the PUT, a
+// missing text is most likely SAP's silent CTS-check failure (see
+// messageClassWriteBody), and the message says where to look.
+func (c *Client) verifyMessageClassWrite(ctx context.Context, path, lang string, texts []MessageClassMessage, deleteNumbers []string, transport, pkg string) error {
 	// Query: the GET answers in the session language unless told otherwise,
 	// which made a write in any other language read back the wrong text and
 	// look like a failed write (see messageClassReadQuery).
@@ -479,17 +497,35 @@ func (c *Client) verifyMessageClassWrite(ctx context.Context, path, lang string,
 		if got, ok := byNumber[want.Number]; !ok || got != want.Text {
 			return fmt.Errorf(
 				"write message class texts: PUT returned success but message %s does not have the expected text after read-back "+
-					"(got %q, want %q) — the write did not actually take effect", want.Number, got, want.Text)
+					"(got %q, want %q) — the write did not actually take effect%s", want.Number, got, want.Text, ctsHint(transport, pkg))
 		}
 	}
 	for _, num := range deleteNumbers {
 		if _, stillThere := byNumber[num]; stillThere {
 			return fmt.Errorf(
 				"write message class texts: PUT returned success but message %s is still present after read-back — "+
-					"the delete did not actually take effect", num)
+					"the delete did not actually take effect%s", num, ctsHint(transport, pkg))
 		}
 	}
 	return nil
+}
+
+// ctsHint explains the likeliest cause of a write SAP dropped silently while a
+// transport request was in play: UPDATE_MESSAGE/DELETE record each message as
+// LIMU MESS in the request and return before touching T100 when that CTS check
+// fails. Empty without a request, where that check does not run.
+func ctsHint(transport, pkg string) string {
+	if transport == "" {
+		return ""
+	}
+	pkgText := pkg
+	if pkgText == "" {
+		pkgText = "(empty — the package was not sent)"
+	}
+	return fmt.Sprintf(". With transport %s (package %s) SAP records every message as LIMU MESS and discards the write "+
+		"without an error when that check fails: confirm the request is a workbench request, open, with a task of "+
+		"your user, that the class or message is not locked in another request (SE03/SM12), and that the package is right",
+		transport, pkgText)
 }
 
 // WriteMessageClassTextsAutoLock updates message class texts, taking and

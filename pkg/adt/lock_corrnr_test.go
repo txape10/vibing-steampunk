@@ -119,7 +119,7 @@ func TestTransportChoice_LockCorrNr(t *testing.T) {
 
 // Without adtcore:language the messages were stored with an empty SPRSL.
 func TestMessageClassWriteCarriesTheLanguage(t *testing.T) {
-	mc := newMessageClassWriteBody("ZDEMO", "Demo", "DE")
+	mc := newMessageClassWriteBody("ZDEMO", "Demo", "DE", "")
 	mc.Messages = []messageClassWriteMessage{{Number: "001", Text: "Text"}}
 	b, err := xml.Marshal(mc)
 	if err != nil {
@@ -262,6 +262,12 @@ func TestWriteMessageClassTextsAutoLock_PlannedTransportGoesOnLock(t *testing.T)
 	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "cts/transportchecks") {
 			_, _ = io.WriteString(w, checkXML)
+			return
+		}
+		// A request in play needs the class's package for the PUT body, so the
+		// description GET has to answer with it.
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/messageclass/") {
+			_, _ = io.WriteString(w, msagGetXMLInPackage("ZDEMO_PKG", "Desc", map[string]string{"001": "Hola"}))
 			return
 		}
 		if !put.route(w, r) {
