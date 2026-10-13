@@ -2301,8 +2301,12 @@ the code permanently — it is the fix, not a placeholder.
   `S`/`043`; `E071` has `LIMU MESS ZEDI043` in task `S4DK928905`; TADIR still `ZSU01`; description unchanged; no
   `ES_MSGSI`/`SEOCLSENQ` enqueues left. **Not run**: the breakpoint on `TRANSPORT` (step 0 of the plan) — the fix
   worked, so the hypothesis (empty package fails the CTS check) is now supported but the exact `CTS_WBO_API_CHECK_OBJECTS`
-  result was never inspected. **Not verified**: transportable **delete** (`delete_numbers`) and `CreateMessageClass` with a
-  request — covered by unit tests only; the `LIMU MESS ZEDI043` entry stays in the order (vsp cannot remove it).
+  result was never inspected.
+- **Verified live later the same day (2026-10-13)**: transportable **delete** (`delete_numbers`) on `ZEDI` with the order:
+  scratch message 999 added and deleted, 043 intact; its `LIMU MESS ZEDI999` entry stays in the order (vsp cannot remove
+  it, same as 043). `$TMP` regression on a throwaway class `ZVSP_TST_MSAG` (since deleted): create with initial message,
+  add, translate to EN, delete — all fine with `packageRef $TMP`. **Still not verified**: `CreateMessageClass` with a
+  request in a transportable package (unit tests only).
 - Files: `pkg/adt/client.go`, `pkg/adt/i18n.go`, `pkg/adt/crud.go`, `pkg/adt/i18n_test.go`,
   `pkg/adt/lock_corrnr_test.go`, `pkg/adt/msag_packageref_test.go`.
 
