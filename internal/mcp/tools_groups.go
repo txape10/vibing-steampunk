@@ -38,9 +38,7 @@ func toolGroups() map[string][]string {
 		},
 		"I": { // Install/Setup tools
 			"InstallZADTVSP",
-			"InstallAbapGit",
 			"ListDependencies",
-			"InstallDummyTest",
 			"DeployZip",
 		},
 		"X": { // EXPERIMENTAL - Tools requiring special setup or with known limitations

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -320,24 +321,51 @@ func (c *Config) NewHTTPClient() *http.Client {
 	//     goes missing across a redirect, the second hop hits SAP with a
 	//     fresh (stateless) session-type or a missing CSRF token, and the
 	//     lock handle / mutation is rejected.
+	// Off the SAP host (an SSO identity provider, or a hop to the ICM's
+	// internal hostname) the credentials, CSRF token and session type must not
+	// follow: Go copies the two custom headers itself before CheckRedirect
+	// runs, so they are deleted here, not just left unset. A hop from https to
+	// http on the same host never keeps them either (see keepsSAPCredentials).
+	sapURL, _ := url.Parse(c.BaseURL)
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return fmt.Errorf("too many redirects")
 		}
-		if len(via) > 0 {
-			first := via[0]
-			if auth := first.Header.Get("Authorization"); auth != "" {
-				req.Header.Set("Authorization", auth)
-			}
-			if csrf := first.Header.Get("X-CSRF-Token"); csrf != "" {
-				req.Header.Set("X-CSRF-Token", csrf)
-			}
-			if st := first.Header.Get("X-sap-adt-sessiontype"); st != "" {
-				req.Header.Set("X-sap-adt-sessiontype", st)
-			}
+		if len(via) == 0 {
+			return nil
+		}
+		if !keepsSAPCredentials(sapURL, req.URL) {
+			req.Header.Del("Authorization")
+			req.Header.Del("X-CSRF-Token")
+			req.Header.Del("X-sap-adt-sessiontype")
+			return nil
+		}
+		first := via[0]
+		if auth := first.Header.Get("Authorization"); auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		if csrf := first.Header.Get("X-CSRF-Token"); csrf != "" {
+			req.Header.Set("X-CSRF-Token", csrf)
+		}
+		if st := first.Header.Get("X-sap-adt-sessiontype"); st != "" {
+			req.Header.Set("X-sap-adt-sessiontype", st)
 		}
 		return nil
 	}
 
 	return client
+}
+
+// keepsSAPCredentials reports whether a redirect target may still receive the
+// Basic credentials, the CSRF token and the session type of the request sent
+// to the SAP system at base: the same hostname (case-folded, port ignored) and
+// no downgrade from https to http. A BaseURL without a hostname keeps nothing.
+func keepsSAPCredentials(base, target *url.URL) bool {
+	if base == nil || target == nil || base.Hostname() == "" {
+		return false
+	}
+	if !strings.EqualFold(base.Hostname(), target.Hostname()) {
+		return false
+	}
+	return !strings.EqualFold(base.Scheme, "https") || strings.EqualFold(target.Scheme, "https")
 }

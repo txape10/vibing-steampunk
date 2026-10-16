@@ -181,6 +181,12 @@ func (s *Server) handleExecuteABAP(ctx context.Context, request mcp.CallToolRequ
 	fmt.Fprintf(&sb, "Execution Time: %.3f s\n", result.ExecutionTime)
 	fmt.Fprintf(&sb, "Cleaned Up: %t\n", result.CleanedUp)
 	fmt.Fprintf(&sb, "Message: %s\n", result.Message)
+	if result.Failure != nil {
+		fmt.Fprintf(&sb, "Failure: %s — %s\n", result.Failure.Kind, result.Failure.Title)
+		for _, d := range result.Failure.Details {
+			fmt.Fprintf(&sb, "  - %s\n", d)
+		}
+	}
 
 	if len(result.Output) > 0 {
 		sb.WriteString("\nOutput:\n")

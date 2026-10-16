@@ -11,6 +11,14 @@ import (
 // context detached from the caller's, so it needs a deadline of its own.
 const unlockAfterFailureTimeout = 30 * time.Second
 
+// failureCleanupContext returns the context for cleanup work that has to
+// happen after a mutation failed or was cancelled: detached from the caller's
+// cancellation (values, such as the per-object package marker, are kept) and
+// bounded by its own deadline. The caller must call the returned cancel.
+func failureCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), unlockAfterFailureTimeout)
+}
+
 // releaseLockAfterFailure releases a lock taken for a mutation that has since
 // failed.
 //

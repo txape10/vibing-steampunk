@@ -195,6 +195,9 @@ func (s *Server) registerReadTools(shouldRegister func(string) bool) {
 			mcp.WithString("sql_query",
 				mcp.Description("Optional ABAP SQL SELECT statement. Uses ABAP syntax: ASCENDING/DESCENDING work, ASC/DESC fail. Example: SELECT * FROM T000 WHERE MANDT = '001' ORDER BY MANDT DESCENDING"),
 			),
+			mcp.WithBoolean("all_rows",
+				mcp.Description("Return every row (up to ADT's ceiling, about 90,000). Wins over max_rows; max_rows 0 or -1 does not reach the server, so use this instead"),
+			),
 			mcp.WithNumber("offset",
 				mcp.Description("Skip first N rows (client-side pagination). Use with max_rows for paging through results"),
 			),
@@ -213,6 +216,9 @@ func (s *Server) registerReadTools(shouldRegister func(string) bool) {
 			),
 			mcp.WithNumber("max_rows",
 				mcp.Description("Maximum number of rows to retrieve (default 100). Use this instead of SQL LIMIT clause"),
+			),
+			mcp.WithBoolean("all_rows",
+				mcp.Description("Return every row (up to ADT's ceiling, about 90,000). Wins over max_rows; max_rows 0 or -1 does not reach the server, so use this instead"),
 			),
 		), s.handleRunQuery)
 	}
@@ -1057,6 +1063,9 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 			),
 			mcp.WithString("delivery_class",
 				mcp.Description("Delivery class: A=Application (default), C=Customizing, L=Temporary"),
+			),
+			mcp.WithBoolean("client_dependent",
+				mcp.Description("Client handling. Omitted or true: a client key field is added in front unless the first key field is already a client field (type MANDT/CLNT). false: client-independent table, nothing is added."),
 			),
 		), s.handleCreateTable)
 	}
@@ -2449,35 +2458,8 @@ func (s *Server) registerInstallTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("ListDependencies") {
 		s.mcpServer.AddTool(mcp.NewTool("ListDependencies",
-			mcp.WithDescription("List available dependency packages that can be installed via InstallAbapGit. Shows abapGit editions and other optional dependencies."),
+			mcp.WithDescription("List available dependency packages that can be installed with `vsp install abapgit`. Shows abapGit editions and other optional dependencies."),
 		), s.handleListDependencies)
-	}
-
-	if shouldRegister("InstallAbapGit") {
-		s.mcpServer.AddTool(mcp.NewTool("InstallAbapGit",
-			mcp.WithDescription("Deploy abapGit to SAP system from embedded ZIP. Supports standalone (single program) or developer edition (full package structure). Parses abapGit-format ZIP and deploys via WriteSource."),
-			mcp.WithString("edition",
-				mcp.Description("Edition to install: 'standalone' (single program ZABAPGIT) or 'dev' (full $ZGIT_DEV packages). Default: standalone"),
-			),
-			mcp.WithString("package",
-				mcp.Description("Target package name. Default: $ABAPGIT for standalone, $ZGIT_DEV for dev edition"),
-			),
-			mcp.WithBoolean("check_only",
-				mcp.Description("Only check prerequisites and show deployment plan without deploying (default: false)"),
-			),
-		), s.handleInstallAbapGit)
-	}
-
-	if shouldRegister("InstallDummyTest") {
-		s.mcpServer.AddTool(mcp.NewTool("InstallDummyTest",
-			mcp.WithDescription("Test tool that creates a simple interface and class to verify the Install* workflow (create, lock, update, unlock, activate, verify). Uses package $ZADT_INSTALL_TEST."),
-			mcp.WithBoolean("check_only",
-				mcp.Description("Only check prerequisites without deploying (default: false)"),
-			),
-			mcp.WithBoolean("cleanup",
-				mcp.Description("Delete test objects after verification (default: false)"),
-			),
-		), s.handleInstallDummyTest)
 	}
 
 	if shouldRegister("DeployZip") {

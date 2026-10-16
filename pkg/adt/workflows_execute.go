@@ -12,13 +12,26 @@ import (
 
 // ExecuteABAPResult represents the result of executing ABAP code via unit test.
 type ExecuteABAPResult struct {
-	Success       bool     `json:"success"`
-	ProgramName   string   `json:"programName"`
-	Output        []string `json:"output"`        // Values returned via assertion messages
+	Success       bool            `json:"success"`
+	ProgramName   string          `json:"programName"`
+	Output        []string        `json:"output"`              // Values returned via assertion messages
 	RawAlerts     []UnitTestAlert `json:"rawAlerts,omitempty"` // Full alert details for debugging
-	ExecutionTime float64  `json:"executionTime"` // Execution time in seconds
-	Message       string   `json:"message,omitempty"`
-	CleanedUp     bool     `json:"cleanedUp"`
+	ExecutionTime float64         `json:"executionTime"`       // Execution time in seconds
+	Message       string          `json:"message,omitempty"`
+	CleanedUp     bool            `json:"cleanedUp"`
+	// Failure is set when the code did not run to its end although every SAP
+	// call succeeded (see classifyExecuteRun). Success is then false.
+	Failure *ExecuteFailure `json:"failure,omitempty"`
+}
+
+// ExecuteFailure says why a run that reached ABAP Unit did not execute the
+// payload.
+type ExecuteFailure struct {
+	// Kind is "notRun": ABAP Unit listed no test method or refused the class
+	// (for instance because its risk level exceeds the system's limit).
+	Kind    string   `json:"kind"`
+	Title   string   `json:"title"`
+	Details []string `json:"details,omitempty"`
 }
 
 // ExecuteABAPOptions configures ExecuteABAP behavior.
@@ -99,7 +112,7 @@ func (c *Client) ExecuteABAP(ctx context.Context, code string, opts *ExecuteABAP
 	}
 
 	// Generate unique program name using timestamp
-	timestamp := fmt.Sprintf("%d", time.Now().UnixNano()/1000000) // milliseconds
+	timestamp := fmt.Sprintf("%d", time.Now().UnixNano()/1000000)                     // milliseconds
 	programName := strings.ToUpper(opts.ProgramPrefix + timestamp[len(timestamp)-8:]) // Last 8 digits
 	result.ProgramName = programName
 	objectURL := fmt.Sprintf("/sap/bc/adt/programs/programs/%s", url.PathEscape(programName))
@@ -158,26 +171,22 @@ ENDCLASS.
 	// this variable when it runs, so it sees the marked context too.
 	ctx = withMutationPackageChecked(ctx, objectURL)
 
-	// Ensure cleanup on any error (unless KeepProgram is set)
+	// Ensure cleanup on any error (unless KeepProgram is set). The cleanup runs
+	// on a context detached from the caller's: when the run ends because the
+	// caller's context was cancelled or timed out, cleaning up on that same
+	// context would fail before sending a byte and leave ZTEMP_EXEC_* and its
+	// lock behind. CleanedUp is set only once the DELETE is confirmed.
 	defer func() {
-		if !opts.KeepProgram {
-			// Try to delete the program
-			lock, lockErr := c.LockObject(ctx, objectURL, "MODIFY")
-			if lockErr == nil {
-				if delErr := c.DeleteObject(ctx, objectURL, lock.LockHandle, ""); delErr != nil {
-					// The lock this defer just took was never released: not
-					// a compensating unlock reusing a dead ctx (issue #91's
-					// usual shape), but a bare absence of one. Detached
-					// release, same as everywhere else in this file.
-					if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
-						result.Message = fmt.Sprintf("%s (cleanup also failed: %v — %s)",
-							result.Message, delErr, strandedLockAdvice(objectURL, unlockErr))
-					}
-				} else {
-					result.CleanedUp = true
-				}
-			}
+		if opts.KeepProgram {
+			return
 		}
+		cleanupCtx, cancel := failureCleanupContext(ctx)
+		defer cancel()
+		if warnings := c.deleteTemporaryProgram(cleanupCtx, objectURL, programName); len(warnings) > 0 {
+			result.Message = appendExecuteCleanupWarning(result.Message, warnings)
+			return
+		}
+		result.CleanedUp = true
 	}()
 
 	// Step 2: Lock and update source
@@ -201,7 +210,13 @@ ENDCLASS.
 	// Step 3: Unlock
 	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
 	if err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock: %v", err)
+		// Retry the release on a detached context: the cleanup below must
+		// not meet a lock this call still holds.
+		if retryErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); retryErr != nil {
+			result.Message = fmt.Sprintf("Failed to unlock: %v — %s", err, strandedLockAdvice(objectURL, retryErr))
+		} else {
+			result.Message = fmt.Sprintf("Failed to unlock: %v (released on a retry)", err)
+		}
 		return result, nil
 	}
 
@@ -252,6 +267,12 @@ ENDCLASS.
 		}
 	}
 
+	if failure := classifyExecuteRun(testResult); failure != nil && len(result.Output) == 0 {
+		result.Failure = failure
+		result.Message = fmt.Sprintf("Not executed: %s", failure.Title)
+		return result, nil
+	}
+
 	result.Success = true
 	if len(result.Output) > 0 {
 		result.Message = fmt.Sprintf("Executed successfully, %d output(s) returned", len(result.Output))
@@ -297,4 +318,61 @@ func (c *Client) ExecuteABAPMultiple(ctx context.Context, code string, opts *Exe
 `
 
 	return c.ExecuteABAP(ctx, wrappedCode, opts)
+}
+
+// classifyExecuteRun reports a run in which ABAP Unit did not execute the
+// payload: no test class came back, a class came back with no test method, or
+// a class carries alerts of its own (ABAP Unit reports a class whose risk
+// level exceeds the system's limit as one tolerable warning, "No execution,
+// risk level of test class exceeds upper limit", and runs nothing). Without
+// this, such a run was answered "Executed successfully" for code that never
+// ran. Returns nil when at least one test method ran.
+func classifyExecuteRun(res *UnitTestResult) *ExecuteFailure {
+	if res == nil || len(res.Classes) == 0 {
+		return &ExecuteFailure{Kind: "notRun", Title: "ABAP Unit returned no test class for the temporary program"}
+	}
+	for _, class := range res.Classes {
+		if len(class.TestMethods) > 0 {
+			return nil
+		}
+	}
+	failure := &ExecuteFailure{Kind: "notRun", Title: "ABAP Unit ran no test method"}
+	for _, class := range res.Classes {
+		for _, alert := range class.Alerts {
+			if failure.Title == "ABAP Unit ran no test method" && alert.Title != "" {
+				failure.Title = alert.Title
+			}
+			failure.Details = append(failure.Details, alert.Title)
+			failure.Details = append(failure.Details, alert.Details...)
+		}
+	}
+	return failure
+}
+
+// deleteTemporaryProgram locks and deletes the temporary program and returns
+// one warning per step that failed; none means the DELETE was confirmed. The
+// DELETE is attempted once and never retried: after a failed or timed-out
+// DELETE its outcome is unknown. A lock this function took and could not use
+// is released on a detached context.
+func (c *Client) deleteTemporaryProgram(ctx context.Context, objectURL, programName string) []string {
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+	if err != nil {
+		return []string{fmt.Sprintf("could not lock %s for cleanup: %v", programName, err)}
+	}
+	if delErr := c.DeleteObject(ctx, objectURL, lock.LockHandle, ""); delErr != nil {
+		warnings := []string{fmt.Sprintf("could not delete %s: %v", programName, delErr)}
+		if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+			warnings = append(warnings, strandedLockAdvice(objectURL, unlockErr))
+		}
+		return warnings
+	}
+	return nil
+}
+
+func appendExecuteCleanupWarning(message string, warnings []string) string {
+	text := "Cleanup warning: " + strings.Join(warnings, "; ")
+	if message == "" {
+		return text
+	}
+	return message + " — " + text
 }

@@ -161,9 +161,7 @@ func focusedToolSet() map[string]bool {
 
 		// Install/Setup tools
 		"InstallZADTVSP":   true, // Deploy ZADT_VSP WebSocket handler to SAP
-		"InstallAbapGit":   true, // Deploy abapGit (standalone or dev edition) to SAP
 		"ListDependencies": true, // List available dependencies for installation
-		"InstallDummyTest": true, // Test tool for verifying Install* workflow
 		"DeployZip":        true, // Deploy objects from abapGit-format ZIP to SAP package
 
 		// Custom hardcode table analysis (ZTCA_HARDCODE)

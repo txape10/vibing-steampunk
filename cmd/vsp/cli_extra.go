@@ -351,7 +351,10 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		sql += " ORDER BY " + orderBy
 	}
 
-	maxRows := 100
+	// --top 0 is documented as "all rows". Only an explicit 0 means that: an
+	// unset flag is also 0 for cobra's Int.
+	topExplicit := cmd.Flags().Changed("top")
+	maxRows := adt.ResolveRowLimit(topExplicit && top == 0, top)
 	if top > 0 {
 		maxRows = top + skip
 	}
@@ -624,6 +627,12 @@ func runExecute(cmd *cobra.Command, args []string) error {
 	}
 	if result.Message != "" {
 		fmt.Fprintf(os.Stderr, "%s\n", result.Message)
+	}
+	if result.Failure != nil {
+		for _, d := range result.Failure.Details {
+			fmt.Fprintf(os.Stderr, "  - %s\n", d)
+		}
+		return fmt.Errorf("code was not executed (%s): %s", result.Failure.Kind, result.Failure.Title)
 	}
 	return nil
 }

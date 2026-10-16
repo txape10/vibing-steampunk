@@ -660,9 +660,14 @@ func (c *Client) packageExists(ctx context.Context, packageName string) bool {
 		// API call failed — could be CSRF, auth, network, etc.
 		// Be optimistic: let the actual create call handle real errors
 		// rather than blocking on a false negative.
-		errStr := err.Error()
-		if strings.Contains(errStr, "404") || strings.Contains(errStr, "not found") {
-			return false
+		// Only SAP's own answer counts as "missing". err.Error() carries the
+		// request URL, so a timeout against a host or port that merely
+		// contains 404 used to read as "package does not exist".
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			if apiErr.StatusCode == http.StatusNotFound || strings.Contains(strings.ToLower(apiErr.Message), "not found") {
+				return false
+			}
 		}
 		return true
 	}
@@ -1558,6 +1563,10 @@ type CreateTableOptions struct {
 	Transport     string       `json:"transport,omitempty"`     // Transport request (optional for $TMP)
 	DeliveryClass string       `json:"deliveryClass,omitempty"` // A=Application, C=Customizing, L=Temp, etc. (default: A)
 	TableCategory string       `json:"tableCategory,omitempty"` // TRANSPARENT (default), STRUCTURE, etc.
+	// ClientDependent: nil or true puts a client key field first (the
+	// caller's own first key field of client type is used as is); false
+	// creates a client-independent table. See tableClientPlan.
+	ClientDependent *bool `json:"clientDependent,omitempty"`
 	// Chosen, when given, receives the request picked for a transportable
 	// table created with no Transport named — reused or created — and why.
 	Chosen *TransportChoice `json:"-"`
@@ -1598,6 +1607,13 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 		return err
 	}
 
+	// Generate the DDL now, before anything that can create a request or an
+	// object: an invalid client-field specification must leave nothing behind.
+	ddlSource, err := generateTableDDL(opts)
+	if err != nil {
+		return err
+	}
+
 	// A transportable table with no request named: pick one the way the
 	// editor would (PR #203). Skipped for local packages, same as
 	// CreateObject. The prospective object URL is passed rather than "" —
@@ -1623,9 +1639,6 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 		}
 	}
 
-	// Generate DDL source
-	ddlSource := generateTableDDL(opts)
-
 	// Step 1: Create table object
 	createBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <blue:blueSource xmlns:blue="http://www.sap.com/wbobj/blue"
@@ -1641,7 +1654,7 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 		params.Set("corrNr", opts.Transport)
 	}
 
-	_, err := c.transport.Request(ctx, "/sap/bc/adt/ddic/tables", &RequestOptions{
+	_, err = c.transport.Request(ctx, "/sap/bc/adt/ddic/tables", &RequestOptions{
 		Method:      http.MethodPost,
 		Query:       params,
 		Body:        []byte(createBody),
@@ -1685,15 +1698,137 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 	}
 
 	// Step 3: Activate
-	if _, err := c.Activate(ctx, tableURL, opts.Name); err != nil {
+	activation, err := c.Activate(ctx, tableURL, opts.Name)
+	if err != nil {
 		return fmt.Errorf("activating table: %w", err)
+	}
+	// A refused activation is a 200 with the reason in the body; returning nil
+	// here promised a table that was never there.
+	if !activation.Success {
+		var problems []string
+		for _, m := range activation.Messages {
+			problems = append(problems, m.ShortText)
+		}
+		return fmt.Errorf("table %s was created but did not activate: %s", opts.Name, strings.Join(problems, "; "))
 	}
 
 	return nil
 }
 
+// isClientFieldType reports whether a field spec types the field as an SAP
+// client (data element MANDT, built-in CLNT).
+func isClientFieldType(f TableField) bool {
+	switch strings.ToUpper(strings.TrimSpace(f.Type)) {
+	case "MANDT", "CLIENT", "CLNT", "ABAP.CLNT":
+		return true
+	}
+	return false
+}
+
+// isClientFieldName reports whether a field is named like a client field.
+func isClientFieldName(name string) bool {
+	n := strings.ToUpper(strings.TrimSpace(name))
+	return n == "MANDT" || n == "CLIENT"
+}
+
+// tableClientPlan decides the client field for CreateTable (issue #254). It
+// used to put a `key client` in front of every field list, so one that
+// already began with MANDT came out with two client key fields.
+//
+// It returns add=true when vsp puts its own `key client : abap.clnt` in front,
+// and own=0 when the caller's first field is the client field (own=-1
+// otherwise). The rules, fail-closed wherever a second client field could
+// slip in:
+//
+//   - client_dependent false: nothing is added; a client-typed first key
+//     field contradicts it and is refused.
+//   - A client-typed (MANDT, CLIENT, CLNT, abap.clnt) first key field is the
+//     client field.
+//   - A first key field named MANDT or CLIENT whose type is some other data
+//     element (SYMANDT, ZMANDT) may or may not be a client field; vsp cannot
+//     tell. It is refused unless client_dependent is given: true makes it the
+//     client field as is, false is refused too (SAP would see a client field
+//     there if the data element is one, so the table may well not be
+//     client-independent).
+//   - A first key field named MANDT or CLIENT with a built-in type (CHAR3,
+//     NUMC3, INT4, STRING, abap.char(3)) is never a client field to SAP: the
+//     table is client-independent. client_dependent false accepts it as a
+//     plain field; left out or true, it is refused, since the name says
+//     client field and the table would not be client-dependent.
+//   - Otherwise (nil or true) CLIENT is added in front.
+//   - A later client-typed key field is refused: only the first key field can
+//     be the client field.
+//   - When CLIENT is added: a field named CLIENT collides and is refused, and
+//     so is a non-key client-typed field named MANDT (a missing "key": true,
+//     most likely). Other non-key client-typed columns (SRC_CLIENT) are plain
+//     data columns and are allowed.
+func tableClientPlan(opts CreateTableOptions) (add bool, own int, err error) {
+	own = -1
+	if len(opts.Fields) == 0 {
+		return false, own, fmt.Errorf("at least one field is required")
+	}
+	first := opts.Fields[0]
+	firstTyped := first.IsKey && isClientFieldType(first)
+	firstNamed := first.IsKey && !isClientFieldType(first) && isClientFieldName(first.Name)
+
+	// A built-in type is never a client field to SAP; a data element might be.
+	firstBuiltin := firstNamed && strings.HasPrefix(mapFieldType(first), "abap.")
+	firstName := strings.ToUpper(strings.TrimSpace(first.Name))
+
+	if opts.ClientDependent != nil && !*opts.ClientDependent {
+		if firstTyped {
+			return false, own, fmt.Errorf("client_dependent is false, but the first key field %s has client type %s, which makes the table client-dependent; drop the field or leave client_dependent out",
+				firstName, first.Type)
+		}
+		if firstNamed && !firstBuiltin {
+			return false, own, fmt.Errorf("client_dependent is false, but %s looks like a client field; rename it or pass client_dependent:true (it is the first key field, and if its type %s is a client data element, SAP makes the table client-dependent)",
+				firstName, first.Type)
+		}
+		return false, own, nil
+	}
+
+	if firstBuiltin {
+		return false, own, fmt.Errorf("field 1 is a key field named %s with built-in type %s, which SAP never treats as a client field, so the table would not be client-dependent; is %s your client field? give it type MANDT if so, or rename it, or pass client_dependent:false for a client-independent table",
+			firstName, first.Type, firstName)
+	}
+	if firstNamed && opts.ClientDependent == nil {
+		return false, own, fmt.Errorf("field 1 is a key field named %s with type %s, which vsp does not know as a client type; is %s your client field? pass client_dependent:true if so (and the field will be used as is), or rename it",
+			firstName, first.Type, firstName)
+	}
+	if firstTyped || firstNamed {
+		own = 0
+	}
+
+	for i, f := range opts.Fields {
+		if i == own {
+			continue
+		}
+		if i > 0 && f.IsKey && isClientFieldType(f) {
+			return false, own, fmt.Errorf("field %d (%s) is a key field of client type %s, but only the first key field can be the client field; put your own client key field first, once, or set client_dependent to false",
+				i+1, strings.ToUpper(f.Name), f.Type)
+		}
+		if own >= 0 {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(f.Name), "CLIENT") {
+			return false, own, fmt.Errorf("field %d is named CLIENT, which collides with the client key field vsp adds; make it the first key field with type MANDT, rename it, or set client_dependent to false",
+				i+1)
+		}
+		if !f.IsKey && isClientFieldType(f) && strings.EqualFold(strings.TrimSpace(f.Name), "MANDT") {
+			return false, own, fmt.Errorf("field %d (MANDT) has client type %s but no \"key\": true, so vsp would add a client key field of its own; to make it the client field, mark it key and put it first, or rename it",
+				i+1, f.Type)
+		}
+	}
+	return own < 0, own, nil
+}
+
 // generateTableDDL converts CreateTableOptions to CDS-style DDL source.
-func generateTableDDL(opts CreateTableOptions) string {
+func generateTableDDL(opts CreateTableOptions) (string, error) {
+	addClient, _, err := tableClientPlan(opts)
+	if err != nil {
+		return "", err
+	}
+
 	var sb strings.Builder
 
 	// Annotations - must match SAP's expected format
@@ -1704,8 +1839,11 @@ func generateTableDDL(opts CreateTableOptions) string {
 	sb.WriteString("@AbapCatalog.dataMaintenance : #ALLOWED\n")
 	sb.WriteString(fmt.Sprintf("define table %s {\n\n", strings.ToLower(opts.Name)))
 
-	// Auto-add MANDT as first key field (standard SAP practice)
-	sb.WriteString("  key client : abap.clnt not null;\n")
+	// The client key field, only when the caller's list has none of its own
+	// and did not ask for a client-independent table.
+	if addClient {
+		sb.WriteString("  key client : abap.clnt not null;\n")
+	}
 
 	// User-defined fields
 	for _, f := range opts.Fields {
@@ -1722,7 +1860,7 @@ func generateTableDDL(opts CreateTableOptions) string {
 	}
 
 	sb.WriteString("\n}\n")
-	return sb.String()
+	return sb.String(), nil
 }
 
 // mapFieldType converts a simple type spec to ABAP DDL type.
@@ -1779,6 +1917,8 @@ func mapFieldType(f TableField) string {
 		return "sysuuid_x16"
 	case "MANDT", "CLIENT":
 		return "mandt"
+	case "CLNT", "ABAP.CLNT":
+		return "abap.clnt"
 	}
 
 	// Check for CHARnn, NUMCnn shorthand (e.g., CHAR32, NUMC10)

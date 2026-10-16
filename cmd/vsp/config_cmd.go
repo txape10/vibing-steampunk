@@ -820,7 +820,7 @@ func GetAllToolNames() []string {
 		// Git/abapGit (requires ZADT_VSP)
 		"GitTypes", "GitExport",
 		// Install tools
-		"InstallZADTVSP", "InstallAbapGit", "ListDependencies", "InstallDummyTest",
+		"InstallZADTVSP", "ListDependencies",
 		// UI5/BSP
 		"UI5ListApps", "UI5GetApp", "UI5GetFileContent",
 		"UI5CreateApp", "UI5DeleteApp", "UI5DeleteFile", "UI5UploadFile",

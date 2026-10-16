@@ -63,6 +63,9 @@ func (s *Server) routeReadAction(ctx context.Context, action, objectType, object
 			if v, ok := getFloatParam(params, "max_rows"); ok {
 				args["max_rows"] = v
 			}
+			if v, ok := getBoolParam(params, "all_rows"); ok {
+				args["all_rows"] = v
+			}
 			if v := getStringParam(params, "sql_query"); v != "" {
 				args["sql_query"] = v
 			}
@@ -97,6 +100,9 @@ func (s *Server) routeReadAction(ctx context.Context, action, objectType, object
 			if v, ok := getFloatParam(params, "max_rows"); ok {
 				args["max_rows"] = v
 			}
+			if v, ok := getBoolParam(params, "all_rows"); ok {
+				args["all_rows"] = v
+			}
 			if v := getStringParam(params, "sql_query"); v != "" {
 				args["sql_query"] = v
 			}
@@ -106,6 +112,9 @@ func (s *Server) routeReadAction(ctx context.Context, action, objectType, object
 				args := map[string]any{"sql_query": sqlQuery}
 				if v, ok := getFloatParam(params, "max_rows"); ok {
 					args["max_rows"] = v
+				}
+				if v, ok := getBoolParam(params, "all_rows"); ok {
+					args["all_rows"] = v
 				}
 				return s.callHandler(ctx, s.handleRunQuery, args)
 			}
@@ -227,10 +236,12 @@ func (s *Server) handleGetTableContents(ctx context.Context, request mcp.CallToo
 		return newToolResultError("table_name is required"), nil
 	}
 
-	maxRows := 100
-	if mr, ok := request.GetArguments()["max_rows"].(float64); ok && mr > 0 {
-		maxRows = int(mr)
+	requested := 0
+	if mr, ok := request.GetArguments()["max_rows"].(float64); ok {
+		requested = int(mr)
 	}
+	allRows, _ := request.GetArguments()["all_rows"].(bool)
+	maxRows := adt.ResolveRowLimit(allRows, requested)
 
 	sqlQuery := ""
 	if sq, ok := request.GetArguments()["sql_query"].(string); ok {
@@ -247,9 +258,12 @@ func (s *Server) handleGetTableContents(ctx context.Context, request mcp.CallToo
 		columnsOnly = co
 	}
 
-	// Fetch extra rows to support client-side offset
+	// Fetch extra rows to support client-side offset. Not for all_rows: the
+	// sentinel is already the most ADT honors before it silently truncates
+	// (see adt.UnlimitedRows), so adding the offset could push the request
+	// back over that threshold.
 	fetchRows := maxRows
-	if offset > 0 {
+	if offset > 0 && !allRows {
 		fetchRows = maxRows + offset
 	}
 	if columnsOnly {
@@ -288,10 +302,12 @@ func (s *Server) handleRunQuery(ctx context.Context, request mcp.CallToolRequest
 		return newToolResultError("sql_query is required"), nil
 	}
 
-	maxRows := 100
-	if mr, ok := request.GetArguments()["max_rows"].(float64); ok && mr > 0 {
-		maxRows = int(mr)
+	requested := 0
+	if mr, ok := request.GetArguments()["max_rows"].(float64); ok {
+		requested = int(mr)
 	}
+	allRows, _ := request.GetArguments()["all_rows"].(bool)
+	maxRows := adt.ResolveRowLimit(allRows, requested)
 
 	contents, err := s.adtClient.RunQuery(ctx, sqlQuery, maxRows)
 	if err != nil {

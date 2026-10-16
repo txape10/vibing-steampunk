@@ -286,23 +286,25 @@ func (t *Transport) doRequest(ctx context.Context, path string, opts *RequestOpt
 		// on the request's own session kind: for a stateful write it lands
 		// between the failed attempt and the retry, and an unmarked probe
 		// there retires the session the lock handle belongs to (issue #91).
+		//
+		// When the refresh fails too, SAP's own answer to the write is kept
+		// (wrapped, so errors.As still finds the *APIError): it says whether
+		// this was a stale token or a real refusal, and callers such as
+		// isLockConflictError read the message key out of it.
 		if err := t.fetchCSRFTokenFor(ctx, opts.Stateful); err != nil {
-			return nil, fmt.Errorf("refreshing CSRF token: %w", err)
+			refused := &APIError{
+				StatusCode: resp.StatusCode,
+				Message:    string(body),
+				Path:       path,
+			}
+			return nil, fmt.Errorf("%w (refreshing the CSRF token after this 403 also failed: %v)", refused, err)
 		}
 
 		// Retry the request
 		return t.retryRequest(ctx, path, opts)
 	}
 
-	// Store CSRF token from response
-	if token := resp.Header.Get("X-CSRF-Token"); token != "" && token != "Required" {
-		t.setCSRFToken(token)
-	}
-
-	// Store session ID
-	if sessionID := t.extractSessionID(resp); sessionID != "" {
-		t.setSessionID(sessionID)
-	}
+	t.rememberSession(resp)
 
 	// Check for error status codes
 	if resp.StatusCode >= 400 {
@@ -361,6 +363,16 @@ func (t *Transport) doRequest(ctx context.Context, path string, opts *RequestOpt
 	}, nil
 }
 
+// rememberSession keeps the CSRF token and session id a response carries.
+func (t *Transport) rememberSession(resp *http.Response) {
+	if token := resp.Header.Get("X-CSRF-Token"); token != "" && token != "Required" {
+		t.setCSRFToken(token)
+	}
+	if sessionID := t.extractSessionID(resp); sessionID != "" {
+		t.setSessionID(sessionID)
+	}
+}
+
 // retryRequest retries a request after CSRF token refresh.
 func (t *Transport) retryRequest(ctx context.Context, path string, opts *RequestOptions) (*Response, error) {
 	reqURL, err := t.buildURL(path, opts.Query, opts.OverrideLanguage)
@@ -403,6 +415,11 @@ func (t *Transport) retryRequest(ctx context.Context, path string, opts *Request
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
 	traceHTTPResponse(resp, body)
+
+	// A retry runs exactly when SAP has just issued a new session (CSRF refresh
+	// after a 403, session expiry, re-authentication), so the token and session
+	// id on this response are the ones the next request must carry.
+	t.rememberSession(resp)
 
 	if resp.StatusCode >= 400 {
 		return nil, &APIError{

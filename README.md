@@ -1008,7 +1008,7 @@ See [AI-Powered RCA Workflows](reports/2025-12-05-013-ai-powered-rca-workflows.m
 - **Diagnostics:** GetDumps, GetDump, ListTraces, GetTrace, GetSQLTraceState, ListSQLTraces
 - **Git:** GitTypes, GitExport (requires abapGit on SAP)
 - **Reports:** RunReport, GetVariants, GetTextElements, SetTextElements
-- **Install:** InstallZADTVSP, InstallAbapGit, ListDependencies
+- **Install:** InstallZADTVSP, ListDependencies
 
 See [README_TOOLS.md](README_TOOLS.md) for complete tool documentation (147 tools).
 

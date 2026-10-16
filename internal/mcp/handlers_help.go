@@ -309,8 +309,6 @@ Git/abapGit:
 
 Install tools:
   SAP(action="system", params={"type": "install_zadt_vsp"})
-  SAP(action="system", params={"type": "install_abapgit"})
-  SAP(action="system", params={"type": "install_dummy_test"})
   SAP(action="system", params={"type": "list_dependencies"})
   SAP(action="system", params={"type": "deploy_zip", "source": "abapgit-standalone", "package": "$ZGIT"})
 

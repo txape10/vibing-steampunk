@@ -324,15 +324,21 @@ func (s *Server) handleCreateTable(ctx context.Context, request mcp.CallToolRequ
 		deliveryClass = strings.ToUpper(dc)
 	}
 
+	var clientDependent *bool
+	if cd, ok := request.GetArguments()["client_dependent"].(bool); ok {
+		clientDependent = &cd
+	}
+
 	var chosen adt.TransportChoice
 	opts := adt.CreateTableOptions{
-		Name:          name,
-		Description:   description,
-		Package:       pkg,
-		Fields:        fields,
-		Transport:     transport,
-		DeliveryClass: deliveryClass,
-		Chosen:        &chosen,
+		ClientDependent: clientDependent,
+		Name:            name,
+		Description:     description,
+		Package:         pkg,
+		Fields:          fields,
+		Transport:       transport,
+		DeliveryClass:   deliveryClass,
+		Chosen:          &chosen,
 	}
 
 	err := s.adtClient.CreateTable(ctx, opts)

@@ -127,8 +127,17 @@ func ParseABAPFile(filePath string) (*ABAPFileInfo, error) {
 	case strings.HasSuffix(baseName, ".srvd.srvdsrv"):
 		info.ObjectType = ObjectTypeSRVD
 	case ext == ".abap":
-		// Generic .abap: detect from content
-		return parseFromContent(filePath)
+		// Generic .abap: the type comes from the first recognizable
+		// statement; name and description are then read below like for any
+		// typed file.
+		objType, err := detectObjectTypeFromContent(filePath)
+		if err != nil {
+			return nil, err
+		}
+		info.ObjectType = objType
+		if objType == ObjectTypeClass {
+			info.ClassIncludeType = ClassIncludeMain
+		}
 	default:
 		return nil, fmt.Errorf("unsupported file extension: %s (expected .clas.abap, .clas.testclasses.abap, .clas.locals_def.abap, .clas.locals_imp.abap, .prog.abap, .intf.abap, .fugr.abap, .func.abap, .ddls.asddls, .bdef.asbdef, or .srvd.srvdsrv)", ext)
 	}
@@ -251,11 +260,13 @@ func ParseABAPFile(filePath string) (*ABAPFileInfo, error) {
 	return info, nil
 }
 
-// parseFromContent detects object type by scanning file content
-func parseFromContent(filePath string) (*ABAPFileInfo, error) {
+// detectObjectTypeFromContent detects the object type of a generic .abap file
+// by scanning its content for the first statement that names one. It must not
+// call ParseABAPFile back: that sent every such file into unbounded recursion.
+func detectObjectTypeFromContent(filePath string) (CreatableObjectType, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer file.Close()
 
@@ -263,30 +274,24 @@ func parseFromContent(filePath string) (*ABAPFileInfo, error) {
 	for scanner.Scan() {
 		line := strings.ToUpper(strings.TrimSpace(scanner.Text()))
 
-		if strings.HasPrefix(line, "CLASS ") && strings.Contains(line, "DEFINITION") {
-			// Re-parse with known type
-			file.Close()
-			return ParseABAPFile(filePath)
-		}
-		if strings.HasPrefix(line, "REPORT ") || strings.HasPrefix(line, "PROGRAM ") {
-			file.Close()
-			return ParseABAPFile(filePath)
-		}
-		if strings.HasPrefix(line, "INTERFACE ") {
-			file.Close()
-			return ParseABAPFile(filePath)
-		}
-		if strings.HasPrefix(line, "FUNCTION-POOL ") {
-			file.Close()
-			return ParseABAPFile(filePath)
-		}
-		if strings.HasPrefix(line, "FUNCTION ") {
-			file.Close()
-			return ParseABAPFile(filePath)
+		switch {
+		case strings.HasPrefix(line, "CLASS ") && strings.Contains(line, "DEFINITION"):
+			return ObjectTypeClass, nil
+		case strings.HasPrefix(line, "REPORT "), strings.HasPrefix(line, "PROGRAM "):
+			return ObjectTypeProgram, nil
+		case strings.HasPrefix(line, "INTERFACE "):
+			return ObjectTypeInterface, nil
+		case strings.HasPrefix(line, "FUNCTION-POOL "):
+			return ObjectTypeFunctionGroup, nil
+		case strings.HasPrefix(line, "FUNCTION "):
+			return ObjectTypeFunctionMod, nil
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("reading file: %w", err)
+	}
 
-	return nil, fmt.Errorf("could not detect object type from file content")
+	return "", fmt.Errorf("could not detect object type from file content")
 }
 
 // parseClassName extracts class name from CLASS <name> DEFINITION
