@@ -2310,9 +2310,48 @@ the code permanently — it is the fix, not a placeholder.
 - Files: `pkg/adt/client.go`, `pkg/adt/i18n.go`, `pkg/adt/crud.go`, `pkg/adt/i18n_test.go`,
   `pkg/adt/lock_corrnr_test.go`, `pkg/adt/msag_packageref_test.go`.
 
+### 2av. Freestyle SQL — lines over 250 runes are broken automatically before sending (2026-10-16)
+- **What it closes**: the SAP-side truncation of every line of the freestyle body at 255 characters (see the
+  Known Open Issues entry on freestyle SQL). Instead of every caller having to remember to insert `\n`,
+  `runFreestyleQuery` (`pkg/adt/client.go`) calls the new pure function `wrapFreestyleSQL`
+  (`pkg/adt/freestyle_wrap.go`) first. It is the only place both `RunQuery` and `GetTableContents` (with a
+  filter) pass through. Many internal callers build `IN (...)` lists with `strings.Join(quoted, ",")` and no
+  spaces (`cmd/vsp/acquire.go`, `changelog.go`, `changes.go`, `cli_cr_config_audit.go`, `cli_extra.go`,
+  `transport_choice.go`...); those were silently truncated when long and are now served too.
+- **Rules**: limit 250 runes (not bytes — CHAR255 counts characters). A query whose lines are all short is
+  returned byte for byte unchanged, LF or CRLF. Break preference: in front of a `"` comment > in front of a
+  keyword (AND OR WHERE FROM GROUP ORDER HAVING UNION INNER LEFT RIGHT CROSS JOIN ON FIELDS INTO UP OFFSET) >
+  any blank > right after a comma (inserts the newline, nothing replaced). Never inside `'..'`, `` `..` ``,
+  `|..|` (escapes `''`, ` `` `, `\|` handled) or a comment, and never so that the next line starts with `*`
+  (that would turn `COUNT( * )` into a comment line). A line with no safe break point (a literal or token over
+  250 runes) fails locally with `ErrFreestyleLineTooLong` and nothing is sent. Over-long `*` comment lines and
+  `"` comments are cut locally instead (SAP used to drop only their excess). Trailing blanks are dropped.
+- **Observed on this system, not a vsp bug**: a `"` comment at the end of the **last** line is rejected by SAP
+  even in a short query ("Solo se permite la instrucción SELECT"); a comment on its own line followed by more
+  SQL is accepted. When a code line plus its comment crosses the limit, the comment moves to its own line.
+- **Tests**: `pkg/adt/freestyle_wrap_test.go` — table of pure cases (including the real 275-character query,
+  which must break exactly before `AND tv~intercentro`), idempotency, and three wire tests against an `httptest`
+  server (`RunQuery`, filtered `GetTableContents`, unwrappable query sends nothing). Mutation-checked: without
+  the call the wire tests fail; without the `*` guard and without quote tracking the corresponding tests fail.
+  Two first versions of tests were vacuous (the literal crossed the window only by position) and were rewritten
+  after the code review.
+- **Code review**: APPROVE, 0 CRITICAL/HIGH. 3 MEDIUM (two vacuous tests; long comment / blank-only lines went
+  from harmless to an error) fixed; 2 LOW: `||`, `"` inside a literal and tabs are now covered; `|{ |x| }|`
+  nested templates are not followed (documented in the code; ABAP SQL has no string templates).
+- **Behaviour change to remember**: internal queries that used to be truncated silently now return correct
+  results or an explicit error.
+- **Verified live (2026-10-16)**, development and the read-only production connection, after a Claude Desktop
+  restart: the 275-character single-line query gives `253952` (before: `558383` in production, a 400 in
+  development); a 31-name `IN (...)` list without spaces (over 255 characters) gives `31`, equal to the same
+  query split by hand; a code line plus `"` comment crossing the limit followed by one more condition gives
+  `253952`; a 300-character literal fails locally; `SELECT mandt FROM t000` unchanged. The line-break-after-comma
+  and comment cases were accepted by SAP's parser. `SAP(action="help", target="query")` shows the new text.
+- Files: `pkg/adt/freestyle_wrap.go`, `pkg/adt/freestyle_wrap_test.go`, `pkg/adt/client.go`,
+  `internal/mcp/handlers_help.go`.
+
 ## Known Open Issues (Not Fixed)
 
-### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused, not fixable in vsp alone (2026-09-22)
+### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused (2026-09-22); MITIGATED in vsp by 2av (2026-10-16)
 - **Symptom**: a `COUNT(*)` over a 2-table JOIN with 6 WHERE conditions returns an identical result
   with and without the 6th condition (`AND tv~intercentro <> 'X'`, `558383` both ways) — no error, no
   warning, just a silently wrong result. Two other, more visible failure modes were seen for other
@@ -2357,15 +2396,10 @@ the code permanently — it is the fix, not a placeholder.
   unchanged `558383`; the same query with one `\n` inserted before the 6th condition gives the
   correct, different `253952`. Documented for users at `~/.claude/sap-mcp-servers.md` ("Cómo escribir
   consultas largas").
-- **Not fixed in vsp itself, and no user-facing SAP incident opened (explicit user decision)** — this
-  is purely a SAP-side ABAP defect; vsp's `runFreestyleQuery` (`pkg/adt/client.go:1301`) already sends
-  the caller's SQL byte-for-byte unmodified (`Body: []byte(sqlQuery)`), which is correct behavior — it
-  doesn't corrupt anything itself. A **possible future improvement, not started, not requested**: vsp
-  could defensively auto-insert a line break before character 255 in any single-line query passed to
-  `runFreestyleQuery`/`GetTableContents`'s freestyle path, protecting every caller (including this
-  MCP's own `action="query", target="SQL"`) from ever hitting this SAP bug without needing to know
-  about it — would need the same "break before a keyword, never mid-identifier/literal" care as the
-  manual workaround above.
+- **Mitigated in vsp by 2av (2026-10-16)**: `runFreestyleQuery` now breaks every line over 250 runes at a
+  safe point before sending, so no caller meets this truncation any more. The SAP defect itself is still
+  there (a client other than vsp, e.g. Eclipse's SQL console with a one-line query, still hits it), and no
+  user-facing SAP incident was opened (explicit user decision).
 
 ### `SAP_READ_ONLY` does not gate `CALL_RFC`/`RUN_REPORT`/`RUN_REPORT_ASYNC` — RESOLVED in code by 2ap (2026-10-05; first documented 2026-09-22)
 > **Resolved (see 2ap)** and verified live on the production read-only connection on 2026-10-05. The analysis

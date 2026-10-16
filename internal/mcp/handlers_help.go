@@ -126,7 +126,12 @@ Table contents:
   SAP(action="query", target="TABL_CONTENTS ZTABLE", params={"max_rows": 50})
 
 Free SQL:
-  SAP(action="query", target="SQL", params={"sql_query": "SELECT * FROM T000 WHERE MANDT = '001'", "max_rows": 100})`)
+  SAP(action="query", target="SQL", params={"sql_query": "SELECT * FROM T000 WHERE MANDT = '001'", "max_rows": 100})
+  JOIN and subqueries work here. Use this form, not TABL_CONTENTS, for anything beyond a simple filter.
+  Long SQL: SAP's endpoint silently cuts every line at 255 characters, dropping the end of the query.
+  Lines over 250 characters are therefore broken automatically at a safe point (before a keyword,
+  at a blank, or after a comma; never inside a literal). If a line has no safe break point
+  (a literal or token over 250 characters) the call fails locally and nothing is sent to SAP.`)
 
 	case "test":
 		return mcp.NewToolResultText(`SAP(action="test") - Run tests

@@ -1338,11 +1338,17 @@ func (c *Client) runFreestyleQuery(ctx context.Context, sqlQuery string, maxRows
 	params := url.Values{}
 	params.Set("rowNumber", fmt.Sprintf("%d", maxRows))
 
+	// SAP cuts every line of the body at 255 characters without an error.
+	body, err := wrapFreestyleSQL(sqlQuery, freestyleMaxLineRunes)
+	if err != nil {
+		return nil, fmt.Errorf("running query: %w", err)
+	}
+
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/datapreview/freestyle", &RequestOptions{
 		Method:      http.MethodPost,
 		Query:       params,
 		Accept:      "application/*",
-		Body:        []byte(sqlQuery),
+		Body:        []byte(body),
 		ContentType: "text/plain",
 	})
 	if err != nil {
