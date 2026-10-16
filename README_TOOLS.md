@@ -55,13 +55,13 @@ These tools replace 11 granular read/write operations with intelligent parameter
 | `GetFunctionGroup` | Get function group structure | Focused |
 | `GetInclude` | Get ABAP include source | Expert |
 | `GetTable` | Get table structure definition | Focused |
-| `GetTableContents` | Get table data (supports SQL filtering) | Focused |
+| `GetTableContents` | Get table data (supports SQL filtering; `all_rows` lifts the row cap to 90,000) | Focused |
 | `GetStructure` | Get structure definition | Expert |
 | `GetPackage` | Get package contents | Focused |
 | `GetTransaction` | Get transaction details | Expert |
 | `GetTypeInfo` | Get data type information | Expert |
 | `GetCDSDependencies` | Get CDS view dependency tree | Focused |
-| `RunQuery` | Execute freestyle SQL query | Focused |
+| `RunQuery` | Execute freestyle SQL query (`all_rows` lifts the row cap to 90,000) | Focused |
 
 ---
 
@@ -100,7 +100,7 @@ These tools replace 11 granular read/write operations with intelligent parameter
 | `CompareSource` | Unified diff between any two ABAP objects | Focused |
 | `CloneObject` | Copy PROG/CLAS/INTF to new name | Focused |
 | `GetClassInfo` | Quick class metadata (methods, attrs, interfaces) | Focused |
-| `CreateTable` | Create DDIC table from JSON definition | Focused |
+| `CreateTable` | Create DDIC table from JSON definition (adds the client key field unless the first key is its own; `client_dependent:false` for a client-independent table) | Focused |
 | `CreatePackage` | Create local package ($...) | Focused |
 
 ---
@@ -226,8 +226,8 @@ Solves token limit problem for large files:
 |------|-------------|------|
 | `CreateTransport` | Create transport request | Expert |
 | `GetTransportInfo` | Get transport details | Expert |
-| `ReleaseTransport` | Release transport | Expert |
-| `GetUserTransports` | List user's transports | Expert |
+| `ReleaseTransport` | Release transport (reports the outcome ADT really gave; `ignore_locks` for transports of copies) | Expert |
+| `GetUserTransports` | List user's transports (workbench, customizing and transports of copies) | Expert |
 | `GetInactiveObjects` | List inactive objects | Expert |
 
 ---

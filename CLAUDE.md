@@ -2349,6 +2349,25 @@ the code permanently — it is the fix, not a placeholder.
 - Files: `pkg/adt/freestyle_wrap.go`, `pkg/adt/freestyle_wrap_test.go`, `pkg/adt/client.go`,
   `internal/mcp/handlers_help.go`.
 
+### 2aw. Upstream wave 1 — eleven small ports (2026-10-16)
+- Source: `docs/upstream-review-2026-10-priority-list.md` (gitignored). Commit `0d9c2e2`. Each item was adapted by hand (upstream refactored; nothing applies verbatim).
+- **#257** `CheckRedirect` (`pkg/adt/config.go`): `keepsSAPCredentials` — Authorization, CSRF and session-type headers are dropped on a redirect to another host or an https→http downgrade.
+- **#258** `rememberSession` (`pkg/adt/http.go`) saves CSRF and session id after a retry too; **#362** a 403 on a write keeps SAP's own body in the error.
+- **#305** `detectObjectTypeFromContent` ends the `ParseABAPFile`↔`parseFromContent` recursion for generic `.abap` files. **#338** `packageExists` uses `errors.As` instead of matching "404" in the URL.
+- **#307** `CreateTable` adds `key client` only when the first key is not already a client field; `client_dependent:false` for client-independent tables; a first key named like a client field with a built-in type is refused with an explanation; the table activation is checked. **Behaviour change**: tables whose first key is a client field no longer get a second one.
+- **#264/#227** `ExecuteABAPResult.Failure` when ABAP Unit ran nothing; cleanup runs on `failureCleanupContext` (detached) and `CleanedUp` is true only if the DELETE was confirmed.
+- **#164** `all_rows` (MCP) / `--top 0` (CLI) via `pkg/adt/limits.go` (`UnlimitedRows = 90000`). **#334** `InstallAbapGit`/`InstallDummyTest` stubs removed.
+- **#208** not applied to K/W: requestStatus/requestType explicit (see 2ax).
+- Tests per item (`redirect_credentials_test.go`, `http_retry_session_test.go`, `fileparser_generic_test.go`, `package_exists_test.go`, `workflows_execute_cleanup_test.go`, `table_client_test.go`, `limits_test.go`, `handlers_read_rows_test.go`, `handlers_install_stubs_test.go`).
+- **Verified live (2026-10-16)**: #307 with and without `client_dependent:false` (DD03L: `CLIENT` key added / absent), `execute_abap` runs and cleans up, `all_rows` accepted on dev and read-only prod. **Not verified live**: #257 (needs `VSP_HTTP_TRACE=1` in the server's environment), the `Failure` path of #264 (only unit tests), `CreateTable` failing on a bad field list leaves an empty table shell (pre-existing).
+
+### 2ax. Transports of copies and honest release (2026-10-16)
+- Commit `a1d0c0f`. The user works daily with transports of copies (E070-TRFUNCTION `T`). `GetUserTransports`/`ListTransports` now send `requestType=KWT` and `requestStatus=D` explicitly and list copies in their own section ("Transports of Copies", `UserTransports.TransportOfCopies`); the SQL fallback reads `K/W/T` and descriptions in the session language (`e07tLanguage`). `E070/E071/E07T` removed from the response-cache `stableTables` (an open request changes under you).
+- **Release**: ADT answers HTTP 200 whatever happens; the outcome is `chkrun:status` (`released`, `relwithignlock`…). `parseReleaseResult`/`releaseOutcome` report it; a refused release is an error with SAP's own messages. Copies always need `ignore_locks` (their objects stay locked in the original request) → `relwithignlock` with a `tm:root` document. `ReleaseTransportV2` refuses `IgnoreLocks && SkipATC`.
+- **Parked: #247 `copy_to_toc`** — `TR_COPY_COMM` is not RFC-enabled (TFDIR FMODE empty) and `TRINT_COPY_COMM` does `ROLLBACK WORK` (a dump in APC).
+- **Verified live**: a copy (status D, target S4Q) appears under "Transports of Copies" together with the older ones. **Not verified**: release of a copy (needs one the user releases anyway); the raw XML of a copy was not captured, the parser routes on `tm:type="T"`.
+- Tests: `transport_copies_test.go`, `transport_release_test.go`.
+
 ## Known Open Issues (Not Fixed)
 
 ### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused (2026-09-22); MITIGATED in vsp by 2av (2026-10-16)
