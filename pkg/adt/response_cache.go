@@ -204,7 +204,8 @@ var stableTables = map[string]bool{
 	"TFDIR": true, "TFTIT": true, "ENLFDIR": true, "SEOCLASS": true, "SEOCLASSDF": true, "SEOCLASSTX": true, "SEOMETAREL": true, "SEOCOMPO": true, "SEOCOMPODF": true,
 	"T100": true, "T100T": true, "DOKIL": true, "DOKTL": true, "DOKHL": true,
 	"TSTC": true, "TSTCT": true, "CUS_IMGACH": true, "CUS_IMGACT": true, "TNODEIMG": true, "TNODEIMGR": true, "TNODEIMGT": true,
-	"E070": true, "E071": true, "E07T": true,
+	// E070/E071/E07T are not here: a request changes state (released, objects
+	// added) while the cache is warm, and a stale listing would hide it.
 }
 
 var fromTable = regexp.MustCompile(`(?i)\b(?:FROM|JOIN)\s+([A-Za-z0-9_/]+)`)

@@ -2098,7 +2098,7 @@ func (s *Server) registerTransportTools(shouldRegister func(string) bool) {
 				mcp.Description("Transport request number"),
 			),
 			mcp.WithBoolean("ignore_locks",
-				mcp.Description("Release even with locked objects (default: false)"),
+				mcp.Description("Release even with locked objects (default: false). A transport of copies always needs it: its objects stay locked in the original request, and without it ADT releases nothing and the call returns an error naming the locks"),
 			),
 			mcp.WithBoolean("skip_atc",
 				mcp.Description("Skip ATC quality checks (default: false)"),

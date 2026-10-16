@@ -1,6 +1,7 @@
 package adt
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -42,19 +43,31 @@ type TransportObject struct {
 type UserTransports struct {
 	Workbench   []TransportRequest `json:"workbench"`
 	Customizing []TransportRequest `json:"customizing"`
+	// TransportOfCopies holds requests of type T (SE01 "transport of copies").
+	// ADT's organizer lists them with the other requests; without their own
+	// group they would be filed as workbench requests.
+	TransportOfCopies []TransportRequest `json:"transportOfCopies"`
 }
+
+// Request types and status the organizer listing is asked for. ADT answers a
+// listing without requestStatus with released requests of the last two weeks
+// only, and without requestType it leaves out the transports of copies.
+const (
+	listRequestTypes  = "KWT" // workbench, customizing, transport of copies
+	listRequestStatus = "D"   // modifiable
+)
 
 // TransportInfo represents information about an object's transport status
 type TransportInfo struct {
-	PGMID          string             `json:"pgmid"`
-	Object         string             `json:"object"`
-	ObjectName     string             `json:"objectName"`
-	Operation      string             `json:"operation"`
-	DevClass       string             `json:"devClass"`
-	Recording      string             `json:"recording"`
-	Transports     []TransportRequest `json:"transports,omitempty"`
-	LockedByUser   string             `json:"lockedByUser,omitempty"`
-	LockedInTask   string             `json:"lockedInTask,omitempty"`
+	PGMID        string             `json:"pgmid"`
+	Object       string             `json:"object"`
+	ObjectName   string             `json:"objectName"`
+	Operation    string             `json:"operation"`
+	DevClass     string             `json:"devClass"`
+	Recording    string             `json:"recording"`
+	Transports   []TransportRequest `json:"transports,omitempty"`
+	LockedByUser string             `json:"lockedByUser,omitempty"`
+	LockedInTask string             `json:"lockedInTask,omitempty"`
 }
 
 const (
@@ -76,7 +89,10 @@ func (c *Client) GetUserTransports(ctx context.Context, userName string) (*UserT
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/cts/transportrequests", &RequestOptions{
 		Method: http.MethodGet,
-		Query:  map[string][]string{"user": {userName}, "targets": {"true"}},
+		Query: map[string][]string{
+			"user": {userName}, "targets": {"true"},
+			"requestType": {listRequestTypes}, "requestStatus": {listRequestStatus},
+		},
 		Accept: acceptTransportOrganizerTreeV1 + ", " + acceptTransportOrganizerV1 + ";q=0.9",
 	})
 	if err != nil {
@@ -88,7 +104,7 @@ func (c *Client) GetUserTransports(ctx context.Context, userName string) (*UserT
 		return nil, err
 	}
 
-	if len(transports.Workbench) > 0 || len(transports.Customizing) > 0 {
+	if len(transports.Workbench) > 0 || len(transports.Customizing) > 0 || len(transports.TransportOfCopies) > 0 {
 		return transports, nil
 	}
 
@@ -121,7 +137,10 @@ func (c *Client) userTransportsViaSQL(ctx context.Context, user string) (*UserTr
 			Status:      row.Status,
 			Target:      row.Target,
 		}
-		if row.Type == "W" {
+		if row.Type == "T" {
+			tr.Type = "copies"
+			result.TransportOfCopies = append(result.TransportOfCopies, tr)
+		} else if row.Type == "W" {
 			tr.Type = "customizing"
 			result.Customizing = append(result.Customizing, tr)
 		} else {
@@ -170,7 +189,10 @@ func parseUserTransports(data []byte) (*UserTransports, error) {
 
 		// A document that separates workbench from customizing says so
 		// structurally; one that does not carries it in tm:type (K/W).
-		if r.Section == "customizing" || (r.Section == "" && r.Type == "W") {
+		if r.Type == "T" {
+			tr.Type = "copies"
+			result.TransportOfCopies = append(result.TransportOfCopies, tr)
+		} else if r.Section == "customizing" || (r.Section == "" && r.Type == "W") {
 			tr.Type = "customizing"
 			result.Customizing = append(result.Customizing, tr)
 		} else {
@@ -307,51 +329,122 @@ func (c *Client) ReleaseTransport(ctx context.Context, transportNumber string, i
 	}
 
 	endpoint := fmt.Sprintf("/sap/bc/adt/cts/transportrequests/%s/%s", transportNumber, action)
-	resp, err := c.transport.Request(ctx, endpoint, &RequestOptions{
+	reqOpts := &RequestOptions{
 		Method: http.MethodPost,
 		Accept: "application/*",
-	})
+	}
+	applyReleaseAction(reqOpts, action, transportNumber)
+	resp, err := c.transport.Request(ctx, endpoint, reqOpts)
 	if err != nil {
 		return nil, fmt.Errorf("release transport failed: %w", err)
 	}
 
-	return parseReleaseResult(resp.Body)
+	reports, err := parseReleaseReports(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	messages := releaseMessages(reports)
+	if err := releaseOutcome(transportNumber, reports); err != nil {
+		return messages, err
+	}
+	return messages, nil
 }
 
-func parseReleaseResult(data []byte) ([]string, error) {
-	// Extract messages from release result
+// applyReleaseAction gives a release request the document ADT wants with it.
+// The answer to a plain release that could not lock everything is a question
+// ("release anyway?"); relwithignlock is the answer, and ADT refuses it
+// without the tm:root document its own client sends back.
+func applyReleaseAction(opts *RequestOptions, action, number string) {
+	if action == "newreleasejobs" {
+		return
+	}
+	opts.ContentType = acceptTransportOrganizerV1
+	opts.Body = []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>`+
+		`<tm:root xmlns:tm="http://www.sap.com/cts/adt/tm" tm:useraction="%s" tm:number="%s"/>`,
+		action, escapeXMLAttr(number)))
+}
+
+// releaseReport is one chkrun:checkReport of a release answer.
+type releaseReport struct {
+	Reporter   string `xml:"reporter,attr"`
+	Status     string `xml:"status,attr"`
+	StatusText string `xml:"statusText,attr"`
+	Messages   []struct {
+		Type string `xml:"type,attr"`
+		Text string `xml:"shortText,attr"`
+	} `xml:"checkMessageList>checkMessage"`
+}
+
+// parseReleaseReports reads the check reports of a release answer. An empty
+// answer has none; one that is there but cannot be read is an error, not
+// "no reports" -- that would read as a release that went through.
+func parseReleaseReports(data []byte) ([]releaseReport, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, nil
+	}
 	xmlStr := string(data)
 	xmlStr = strings.ReplaceAll(xmlStr, "tm:", "")
 	xmlStr = strings.ReplaceAll(xmlStr, "chkrun:", "")
 
-	type message struct {
-		Type string `xml:"type,attr"`
-		Text string `xml:"shortText,attr"`
-	}
-	type report struct {
-		Reporter  string    `xml:"reporter,attr"`
-		Status    string    `xml:"status,attr"`
-		Messages  []message `xml:"checkMessageList>checkMessage"`
-	}
 	type root struct {
-		Reports []report `xml:"releasereports>checkReport"`
+		Reports []releaseReport `xml:"releasereports>checkReport"`
 	}
-
 	var resp root
 	if err := xml.Unmarshal([]byte(xmlStr), &resp); err != nil {
-		// If parsing fails, return empty
-		return []string{}, nil
+		return nil, fmt.Errorf("the release answer cannot be read (%v), so whether the request was released is unknown; check it in the transport organizer", err)
 	}
+	return resp.Reports, nil
+}
 
-	var messages []string
-	for _, r := range resp.Reports {
+func releaseMessages(reports []releaseReport) []string {
+	messages := []string{}
+	for _, r := range reports {
 		messages = append(messages, fmt.Sprintf("[%s] Status: %s", r.Reporter, r.Status))
 		for _, m := range r.Messages {
 			messages = append(messages, fmt.Sprintf("  [%s] %s", m.Type, m.Text))
 		}
 	}
+	return messages
+}
 
-	return messages, nil
+func parseReleaseResult(data []byte) ([]string, error) {
+	reports, err := parseReleaseReports(data)
+	if err != nil {
+		return nil, err
+	}
+	return releaseMessages(reports), nil
+}
+
+// releaseOutcome turns a release answer into an error unless it says the
+// request was released. ADT answers HTTP 200 either way: a request whose
+// objects are locked elsewhere (every transport of copies, since its objects
+// stay locked in the original request) comes back with status relwithignlock
+// and the locks listed, and nothing is released. An answer with no report at
+// all keeps the old reading, success on the HTTP status alone.
+func releaseOutcome(number string, reports []releaseReport) error {
+	if len(reports) == 0 {
+		return nil
+	}
+	var details []string
+	for _, r := range reports {
+		if r.Status == "released" {
+			return nil
+		}
+		if t := strings.TrimSpace(strings.Join(strings.Fields(r.StatusText), " ")); t != "" {
+			details = append(details, t)
+		}
+		for _, m := range r.Messages {
+			details = append(details, fmt.Sprintf("[%s] %s", m.Type, m.Text))
+		}
+	}
+	msg := fmt.Sprintf("transport %s was not released (status %s)", number, reports[0].Status)
+	if len(details) > 0 {
+		msg += ": " + strings.Join(details, "; ")
+	}
+	if reports[0].Status == "relwithignlock" {
+		msg += " -- to release it anyway, repeat with ignore_locks"
+	}
+	return fmt.Errorf("%s", msg)
 }
 
 // --- New Transport Management Types and Methods ---
@@ -361,8 +454,8 @@ type TransportSummary struct {
 	Number      string `json:"number"`
 	Owner       string `json:"owner"`
 	Description string `json:"description"`
-	Type        string `json:"type"`       // K=Workbench, W=Customizing, S=Task
-	Status      string `json:"status"`     // D=Modifiable, R=Released
+	Type        string `json:"type"`   // K=Workbench, W=Customizing, S=Task
+	Status      string `json:"status"` // D=Modifiable, R=Released
 	StatusText  string `json:"statusText"`
 	Target      string `json:"target"`
 	TargetDesc  string `json:"targetDesc"`
@@ -391,8 +484,8 @@ type TransportTaskV2 struct {
 
 // TransportObjectV2 represents an object in a transport (extended version)
 type TransportObjectV2 struct {
-	PgmID    string `json:"pgmid"`  // R3TR, LIMU, CORR
-	Type     string `json:"type"`   // PROG, CLAS, DEVC, etc.
+	PgmID    string `json:"pgmid"` // R3TR, LIMU, CORR
+	Type     string `json:"type"`  // PROG, CLAS, DEVC, etc.
 	Name     string `json:"name"`
 	WBType   string `json:"wbtype"` // PROG/P, CLAS/OC, etc.
 	Info     string `json:"info"`   // "Program", "Class", etc.
@@ -428,7 +521,10 @@ func (c *Client) ListTransports(ctx context.Context, user string) ([]TransportSu
 	// Try ADT API first
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/cts/transportrequests", &RequestOptions{
 		Method: http.MethodGet,
-		Query:  map[string][]string{"user": {strings.ToUpper(user)}},
+		Query: map[string][]string{
+			"user":        {strings.ToUpper(user)},
+			"requestType": {listRequestTypes}, "requestStatus": {listRequestStatus},
+		},
 		Accept: acceptTransportOrganizerTreeV1,
 	})
 	if err != nil {
@@ -507,7 +603,7 @@ func (c *Client) listTransportsViaSQL(ctx context.Context, user string) ([]Trans
 	// Query modifiable workbench requests (K) for the user
 	// TRFUNCTION: K=Workbench request, W=Customizing request, S=Task
 	// TRSTATUS: D=Modifiable, R=Released, N=Released (import started)
-	conditions := []string{"e070~TRSTATUS = 'D'", "e070~TRFUNCTION IN ('K', 'W')"}
+	conditions := []string{"e070~TRSTATUS = 'D'", "e070~TRFUNCTION IN ('K', 'W', 'T')"}
 	if predicate != "" {
 		conditions = append([]string{predicate}, conditions...)
 	}
@@ -515,7 +611,7 @@ func (c *Client) listTransportsViaSQL(ctx context.Context, user string) ([]Trans
 	query := `SELECT e070~TRKORR, e070~TRFUNCTION, e070~TRSTATUS, e070~TARSYSTEM,
 		e070~AS4USER, e070~AS4DATE, e070~AS4TIME, e07t~AS4TEXT
 		FROM E070 AS e070
-		LEFT OUTER JOIN E07T AS e07t ON e070~TRKORR = e07t~TRKORR AND e07t~LANGU = 'E'
+		LEFT OUTER JOIN E07T AS e07t ON e070~TRKORR = e07t~TRKORR AND e07t~LANGU = '` + e07tLanguage(c.config.Language) + `'
 		WHERE ` + strings.Join(conditions, "\n\t\tAND ") + `
 		ORDER BY e070~TRKORR DESCENDING`
 
@@ -528,12 +624,12 @@ func (c *Client) listTransportsViaSQL(ctx context.Context, user string) ([]Trans
 	var transports []TransportSummary
 	for _, row := range result.Rows {
 		tr := TransportSummary{
-			Number:     getString(row, "TRKORR"),
-			Owner:      getString(row, "AS4USER"),
+			Number:      getString(row, "TRKORR"),
+			Owner:       getString(row, "AS4USER"),
 			Description: getString(row, "AS4TEXT"),
-			Type:       getString(row, "TRFUNCTION"),
-			Status:     getString(row, "TRSTATUS"),
-			Target:     getString(row, "TARSYSTEM"),
+			Type:        getString(row, "TRFUNCTION"),
+			Status:      getString(row, "TRSTATUS"),
+			Target:      getString(row, "TARSYSTEM"),
 		}
 
 		// Map status code to text
@@ -554,6 +650,9 @@ func (c *Client) listTransportsViaSQL(ctx context.Context, user string) ([]Trans
 		case "W":
 			tr.Type = "W"
 			tr.TargetDesc = "Customizing Request"
+		case "T":
+			tr.Type = "T"
+			tr.TargetDesc = "Transport of Copies"
 		}
 
 		// Format date/time if available
@@ -863,6 +962,13 @@ func (c *Client) ReleaseTransportV2(ctx context.Context, number string, opts Rel
 		return fmt.Errorf("transport number is required")
 	}
 
+	// Which action ADT takes for "skip the ATC checks and ignore the locks"
+	// is not known; picking one would release nothing for a transport of
+	// copies, which needs the locks ignored. Refuse instead of guessing.
+	if opts.IgnoreLocks && opts.SkipATC {
+		return fmt.Errorf("ignore_locks and skip_atc cannot be combined: release with ignore_locks first, or skip the ATC checks, not both in one call")
+	}
+
 	// Determine release action
 	action := "newreleasejobs"
 	if opts.IgnoreLocks {
@@ -872,17 +978,24 @@ func (c *Client) ReleaseTransportV2(ctx context.Context, number string, opts Rel
 		action = "relObjigchkatc"
 	}
 
-	path := fmt.Sprintf("/sap/bc/adt/cts/transportrequests/%s/%s", strings.ToUpper(number), action)
+	number = strings.ToUpper(number)
+	path := fmt.Sprintf("/sap/bc/adt/cts/transportrequests/%s/%s", number, action)
 
-	_, err := c.transport.Request(ctx, path, &RequestOptions{
+	reqOpts := &RequestOptions{
 		Method: http.MethodPost,
 		Accept: acceptTransportOrganizerV1,
-	})
+	}
+	applyReleaseAction(reqOpts, action, number)
+	resp, err := c.transport.Request(ctx, path, reqOpts)
 	if err != nil {
 		return fmt.Errorf("releasing transport %s: %w", number, err)
 	}
 
-	return nil
+	reports, err := parseReleaseReports(resp.Body)
+	if err != nil {
+		return fmt.Errorf("releasing transport %s: %w", number, err)
+	}
+	return releaseOutcome(number, reports)
 }
 
 // DeleteTransport deletes a transport request
@@ -910,3 +1023,13 @@ func (c *Client) DeleteTransport(ctx context.Context, number string) error {
 }
 
 // escapeXMLAttr is defined in ui5.go
+
+// e07tLanguage is the SAP language key request texts (E07T) are read in: the
+// session's, "E" when none is set. The join used to be fixed to "E", so a
+// system logged on in Spanish listed every request without a description.
+func e07tLanguage(sessionLanguage string) string {
+	if l := spras(sessionLanguage); len(l) == 1 && l[0] >= 'A' && l[0] <= 'Z' {
+		return l
+	}
+	return "E"
+}

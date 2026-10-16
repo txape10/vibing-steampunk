@@ -76,6 +76,13 @@ func (s *Server) handleGetUserTransports(ctx context.Context, request mcp.CallTo
 		sb.WriteString("No customizing requests found.\n")
 	}
 
+	if len(transports.TransportOfCopies) > 0 {
+		sb.WriteString("\n=== Transports of Copies ===\n")
+		for _, tr := range transports.TransportOfCopies {
+			formatTransportRequest(&sb, &tr)
+		}
+	}
+
 	return mcp.NewToolResultText(sb.String()), nil
 }
 
