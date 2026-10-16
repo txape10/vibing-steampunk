@@ -2,8 +2,13 @@ package adt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
+
+// ErrLockReleaseFailed marks a WithObjectLock result whose write succeeded but
+// whose UNLOCK did not: the change is in, the lock may still be held.
+var ErrLockReleaseFailed = errors.New("write succeeded but releasing the lock failed")
 
 // WithObjectLock runs fn under a lock on lockURL that this call takes and
 // releases itself, so the handle never has to survive a model turn (#169).
@@ -62,7 +67,7 @@ func (c *Client) WithObjectLock(ctx context.Context, opName, lockURL, transport 
 		// The handle is spent or the unlock failed; either way the deferred
 		// release must not send a second UNLOCK for a handle already tried.
 		unlocked = true
-		return fmt.Errorf("%s succeeded but releasing the lock failed: %w — %s", opName, err, strandedLockAdvice(lockURL, err))
+		return fmt.Errorf("%s: %w: %v — %s", opName, ErrLockReleaseFailed, err, strandedLockAdvice(lockURL, err))
 	}
 	unlocked = true
 	return nil

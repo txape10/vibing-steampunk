@@ -173,3 +173,35 @@ func TestWithObjectLock_NoTransportNamed_PlansOneBeforeTheLock(t *testing.T) {
 		t.Error("the transport check must run before the LOCK")
 	}
 }
+
+func TestWithObjectLock_UnlockFailureAfterWriteIsTheSentinel(t *testing.T) {
+	const objectURL = "/sap/bc/adt/programs/programs/ZDEMO_SCOPE"
+
+	rec := &adtRecorder{}
+	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Query().Get("_action") == "UNLOCK" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		lockScopeRoute(w, r)
+	})
+
+	wrote := false
+	err := client.WithObjectLock(context.Background(), "UpdateSource", objectURL, "",
+		func(ctx context.Context, handle, transport string) error { wrote = true; return nil })
+	if !wrote {
+		t.Fatal("the write never ran")
+	}
+	if !errors.Is(err, ErrLockReleaseFailed) {
+		t.Fatalf("err = %v, want ErrLockReleaseFailed so callers can tell a landed write from a failed one", err)
+	}
+	unlocks := 0
+	for _, c := range rec.snapshot() {
+		if isUnlock(c) {
+			unlocks++
+		}
+	}
+	if unlocks != 1 {
+		t.Errorf("%d UNLOCK requests, want exactly 1 (no second attempt for a handle already tried)", unlocks)
+	}
+}

@@ -862,6 +862,9 @@ func (s *Server) handleGetClassInfo(ctx context.Context, request mcp.CallToolReq
 // — typically because another user holds a lock or because DeleteObject
 // itself failed. The operator can copy those directly into SAPGUI.
 func (s *Server) handleRecoverFailedCreate(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if refused := s.refuseUnderSafety(adt.OpDelete, "RecoverFailedCreate"); refused != nil {
+		return refused, nil
+	}
 	objectType, ok := request.GetArguments()["object_type"].(string)
 	if !ok || objectType == "" {
 		return newToolResultError("object_type is required"), nil

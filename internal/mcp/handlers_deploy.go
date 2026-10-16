@@ -4,14 +4,20 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oisee/vibing-steampunk/embedded/deps"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
+
+// deployTransportFormat is the shape of a workbench request number, checked
+// before the first object is created so a typo cannot leave shells behind.
+var deployTransportFormat = regexp.MustCompile(`^[A-Z0-9]{3}K[0-9]{6}$`)
 
 // objectTypeMapping maps deployment type strings to CreatableObjectType and URL patterns
 var objectTypeMapping = map[string]struct {
@@ -55,9 +61,33 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 		typeFilter = strings.ToUpper(tf)
 	}
 
+	transportArg, _ := request.GetArguments()["transport"].(string)
+	transport := adt.NormalizeTransport(transportArg)
+
 	nameFilter := ""
 	if nf, ok := request.GetArguments()["name_filter"].(string); ok {
 		nameFilter = strings.ToUpper(nf)
+	}
+
+	if !dryRun {
+		// A real run writes: refuse before any request (or any work on the ZIP) when
+		// the policy forbids it. A dry run changes nothing and stays allowed.
+		for _, op := range []adt.OperationType{adt.OpCreate, adt.OpUpdate, adt.OpActivate} {
+			if refused := s.refuseUnderSafety(op, "DeployZip"); refused != nil {
+				return refused, nil
+			}
+		}
+		// A transportable package needs a request the caller names; SAP must never
+		// generate one on its own.
+		if strings.HasPrefix(packageName, "$") {
+			if transport != "" {
+				return newToolResultError("transport is not allowed for a local package ($...)"), nil
+			}
+		} else if transport == "" {
+			return newToolResultError(fmt.Sprintf("transport is required: %s is a transportable package and a request is never chosen or created for you", packageName)), nil
+		} else if !deployTransportFormat.MatchString(transport) {
+			return newToolResultError(fmt.Sprintf("transport %q is not a request number (expected e.g. S4DK900001)", transport)), nil
+		}
 	}
 
 	// Get ZIP data
@@ -155,6 +185,7 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 			ObjectType:  adt.ObjectTypePackage,
 			Name:        packageName,
 			Description: fmt.Sprintf("Deployed from %s", source),
+			Transport:   transport,
 		})
 		if err != nil {
 			// Tolerate "already exists" - GetPackage may fail for $ packages
@@ -195,6 +226,7 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 			Name:        obj.Name,
 			Description: desc,
 			PackageName: packageName,
+			Transport:   transport,
 		})
 		if err != nil {
 			if strings.Contains(err.Error(), "AlreadyExists") || strings.Contains(err.Error(), "already exist") {
@@ -217,7 +249,7 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 	// ================================================================
 	sb.WriteString("Phase 2: Uploading source code...\n")
 	var uploadSuccess, uploadFailed int
-	var uploadFailures []string
+	var uploadFailures, uploadWarnings []string
 
 	for i, obj := range deployable {
 		typeInfo, ok := objectTypeMapping[obj.Type]
@@ -231,31 +263,23 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 
 		fmt.Fprintf(&sb, "  [%d/%d] Upload %s %s... ", i+1, len(deployable), obj.Type, obj.Name)
 
-		// Lock
-		lockResult, err := s.adtClient.LockObject(ctx, objectURL, "MODIFY")
-		if err != nil {
-			fmt.Fprintf(&sb, "LOCK FAIL: %v\n", err)
-			uploadFailed++
-			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: lock failed: %v", obj.Type, obj.Name, err))
+		err := s.adtClient.WithObjectLock(ctx, "DeployZip", objectURL, transport,
+			func(ctx context.Context, lockHandle, tr string) error {
+				// No syntax check on purpose: objects reference each other.
+				return s.adtClient.UpdateSource(ctx, sourceURL, obj.MainSource, lockHandle, tr)
+			})
+		if errors.Is(err, adt.ErrLockReleaseFailed) {
+			// The source is in; only the unlock failed.
+			fmt.Fprintf(&sb, "uploaded, but: %v\n", err)
+			uploadSuccess++
+			uploadWarnings = append(uploadWarnings, fmt.Sprintf("%s %s: %v", obj.Type, obj.Name, err))
 			continue
 		}
-
-		// Upload source (no syntax check!)
-		err = s.adtClient.UpdateSource(ctx, sourceURL, obj.MainSource, lockResult.LockHandle, "")
 		if err != nil {
-			// Always try to unlock even if upload fails
-			_ = s.adtClient.UnlockObject(ctx, objectURL, lockResult.LockHandle)
 			fmt.Fprintf(&sb, "UPLOAD FAIL: %v\n", err)
 			uploadFailed++
-			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: upload failed: %v", obj.Type, obj.Name, err))
+			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: %v", obj.Type, obj.Name, err))
 			continue
-		}
-
-		// Unlock
-		err = s.adtClient.UnlockObject(ctx, objectURL, lockResult.LockHandle)
-		if err != nil {
-			fmt.Fprintf(&sb, "UNLOCK FAIL: %v\n", err)
-			// Source was uploaded, just couldn't unlock - not fatal
 		}
 
 		fmt.Fprintf(&sb, "ok\n")
@@ -292,6 +316,13 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 	fmt.Fprintf(&sb, "  Phase 2 (Upload):   %d ok, %d failed\n", uploadSuccess, uploadFailed)
 	if iterResult != nil {
 		fmt.Fprintf(&sb, "  Phase 3 (Activate): %s\n", iterResult.Summary)
+	}
+
+	if len(uploadWarnings) > 0 {
+		sb.WriteString("\nUploaded, but the lock may still be held (check SM12):\n")
+		for _, w := range uploadWarnings {
+			fmt.Fprintf(&sb, "  • %s\n", w)
+		}
 	}
 
 	if len(uploadFailures) > 0 {

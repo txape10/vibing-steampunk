@@ -111,6 +111,12 @@ func (s *Server) handleInstallZADTVSP(ctx context.Context, request mcp.CallToolR
 		return mcp.NewToolResultText(sb.String()), nil
 	}
 
+	for _, op := range []adt.OperationType{adt.OpCreate, adt.OpUpdate, adt.OpActivate} {
+		if refused := s.refuseUnderSafety(op, "InstallZADTVSP"); refused != nil {
+			return refused, nil
+		}
+	}
+
 	// Temporarily allow the install target package to bypass SAP_ALLOWED_PACKAGES restrictions.
 	// Install operations are self-contained bootstrap operations that should not be blocked.
 	cleanupPkgSafety := s.adtClient.AllowPackageTemporarily(packageName)
