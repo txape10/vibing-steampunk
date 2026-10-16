@@ -127,10 +127,9 @@ func (s *Server) handleUpdateSource(ctx context.Context, request mcp.CallToolReq
 		return newToolResultError("source is required"), nil
 	}
 
-	lockHandle, ok := request.GetArguments()["lock_handle"].(string)
-	if !ok || lockHandle == "" {
-		return newToolResultError("lock_handle is required"), nil
-	}
+	// Optional: left empty this call takes and releases its own lock, so the
+	// handle never has to survive a model turn (#169).
+	lockHandle, _ := request.GetArguments()["lock_handle"].(string)
 
 	transport := ""
 	if t, ok := request.GetArguments()["transport"].(string); ok {
@@ -143,7 +142,15 @@ func (s *Server) handleUpdateSource(ctx context.Context, request mcp.CallToolReq
 		sourceURL = objectURL + "/source/main"
 	}
 
-	err := s.adtClient.UpdateSource(ctx, sourceURL, source, lockHandle, transport)
+	var err error
+	if lockHandle != "" {
+		err = s.adtClient.UpdateSource(ctx, sourceURL, source, lockHandle, transport)
+	} else {
+		err = s.adtClient.WithObjectLock(ctx, "UpdateSource", objectURL, transport,
+			func(ctx context.Context, handle, tr string) error {
+				return s.adtClient.UpdateSource(ctx, sourceURL, source, handle, tr)
+			})
+	}
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to update source: %v", err)), nil
 	}

@@ -53,17 +53,24 @@ func (s *Server) handleCreateTestInclude(ctx context.Context, request mcp.CallTo
 		return newToolResultError("class_name is required"), nil
 	}
 
-	lockHandle, ok := request.GetArguments()["lock_handle"].(string)
-	if !ok || lockHandle == "" {
-		return newToolResultError("lock_handle is required"), nil
-	}
+	// Optional: left empty this call takes and releases its own lock, so the
+	// handle never has to survive a model turn (#169).
+	lockHandle, _ := request.GetArguments()["lock_handle"].(string)
 
 	transport := ""
 	if t, ok := request.GetArguments()["transport"].(string); ok {
 		transport = t
 	}
 
-	err := s.adtClient.CreateTestInclude(ctx, className, lockHandle, transport)
+	var err error
+	if lockHandle != "" {
+		err = s.adtClient.CreateTestInclude(ctx, className, lockHandle, transport)
+	} else {
+		err = s.adtClient.WithObjectLock(ctx, "CreateTestInclude", adt.GetObjectURL(adt.ObjectTypeClass, className, ""), transport,
+			func(ctx context.Context, handle, tr string) error {
+				return s.adtClient.CreateTestInclude(ctx, className, handle, tr)
+			})
+	}
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to create test include: %v", err)), nil
 	}
@@ -87,17 +94,24 @@ func (s *Server) handleUpdateClassInclude(ctx context.Context, request mcp.CallT
 		return newToolResultError("source is required"), nil
 	}
 
-	lockHandle, ok := request.GetArguments()["lock_handle"].(string)
-	if !ok || lockHandle == "" {
-		return newToolResultError("lock_handle is required"), nil
-	}
+	// Optional: left empty this call takes and releases its own lock, so the
+	// handle never has to survive a model turn (#169).
+	lockHandle, _ := request.GetArguments()["lock_handle"].(string)
 
 	transport := ""
 	if t, ok := request.GetArguments()["transport"].(string); ok {
 		transport = t
 	}
 
-	err := s.adtClient.UpdateClassInclude(ctx, className, adt.ClassIncludeType(includeType), source, lockHandle, transport)
+	var err error
+	if lockHandle != "" {
+		err = s.adtClient.UpdateClassInclude(ctx, className, adt.ClassIncludeType(includeType), source, lockHandle, transport)
+	} else {
+		err = s.adtClient.WithObjectLock(ctx, "UpdateClassInclude", adt.GetObjectURL(adt.ObjectTypeClass, className, ""), transport,
+			func(ctx context.Context, handle, tr string) error {
+				return s.adtClient.UpdateClassInclude(ctx, className, adt.ClassIncludeType(includeType), source, handle, tr)
+			})
+	}
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to update class include: %v", err)), nil
 	}

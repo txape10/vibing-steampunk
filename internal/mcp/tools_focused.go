@@ -57,9 +57,10 @@ func focusedToolSet() map[string]bool {
 		"CloneObject":        true,  // Copy object to new name
 		"GetClassInfo":       true,  // Quick class metadata
 
-		// Advanced/Edge cases (2)
-		"LockObject":   true,
-		"UnlockObject": true,
+		// LockObject and UnlockObject used to sit here, but focused mode has
+		// nothing that spends a lock handle (no UpdateSource, DeleteObject or
+		// include writers): a lock taken here could only be stranded. Writing
+		// is covered by WriteSource and EditSource, which lock internally (#169).
 
 		// File-based operations (2)
 		"ImportFromFile": true, // File → SAP (replaces DeployFromFile)
