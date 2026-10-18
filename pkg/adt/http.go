@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -98,7 +99,8 @@ type Transport struct {
 	// the cached CSRF token and in-memory sessionID alone are not enough
 	// — SAP keeps replying ICMENOSESSION until the dead contextid cookie
 	// stops leaking back into outgoing requests.
-	jar http.CookieJar
+	jar   http.CookieJar
+	jarMu sync.RWMutex // guards jar: clearSAPSessionCookies swaps it
 
 	// CSRF token management
 	csrfToken string
@@ -116,15 +118,27 @@ type Transport struct {
 	// from triggering simultaneous SAML dances.
 	reauthMu   sync.Mutex
 	lastReauth time.Time
+
+	// locks is the owning client's lock window. While it holds a handle,
+	// stateless requests are kept out of the stateful context (see do).
+	locks *lockWindow
+
+	// contextGate admits one request at a time into the stateful context and
+	// keeps a stateless request that may end the context from racing one that
+	// is using it. contextInFlight counts the stateful requests under way or
+	// waiting.
+	contextGate     contextGate
+	contextInFlight atomic.Int32
 }
 
 // NewTransport creates a new Transport with the given configuration.
 func NewTransport(cfg *Config) *Transport {
 	hc := cfg.NewHTTPClient()
 	t := &Transport{
-		config:     cfg,
-		httpClient: hc,
-		jar:        hc.Jar,
+		config:      cfg,
+		httpClient:  hc,
+		jar:         hc.Jar,
+		contextGate: newContextGate(),
 	}
 	if cfg.Cache {
 		t.cache = newResponseCache(cfg.CacheStore, cfg.CacheTTL)
@@ -136,8 +150,9 @@ func NewTransport(cfg *Config) *Transport {
 // This is useful for testing with mock HTTP clients.
 func NewTransportWithClient(cfg *Config, client HTTPDoer) *Transport {
 	t := &Transport{
-		config:     cfg,
-		httpClient: client,
+		config:      cfg,
+		httpClient:  client,
+		contextGate: newContextGate(),
 	}
 	if hc, ok := client.(*http.Client); ok {
 		t.jar = hc.Jar
@@ -267,7 +282,7 @@ func (t *Transport) doRequest(ctx context.Context, path string, opts *RequestOpt
 
 	// Execute request
 	traceHTTPRequest(req, opts.Body)
-	resp, err := t.httpClient.Do(req)
+	resp, err := t.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
@@ -316,6 +331,13 @@ func (t *Transport) doRequest(ctx context.Context, path string, opts *RequestOpt
 
 		// Handle session timeout - refresh session and retry once
 		if apiErr.IsSessionExpired() {
+			// A stateless request that went out isolated (without the stateful
+			// context's id) while another caller's lock is outstanding says
+			// nothing about that context: dropping the jar here would delete
+			// the sap-contextid the lock chain needs and orphan its enqueue.
+			if !opts.Stateful && t.config.SessionType != SessionStateful && t.isolatingNow() {
+				return nil, apiErr
+			}
 			// Clear cached CSRF token, session ID, AND the stale sap-contextid /
 			// SAP_SESSIONID cookies. Without dropping the jar entries SAP keeps
 			// routing the retry to the same dead context and replies
@@ -404,7 +426,7 @@ func (t *Transport) retryRequest(ctx context.Context, path string, opts *Request
 	}
 
 	traceHTTPRequest(req, opts.Body)
-	resp, err := t.httpClient.Do(req)
+	resp, err := t.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing retry request: %w", err)
 	}
@@ -485,7 +507,7 @@ func (t *Transport) fetchCSRFTokenFor(ctx context.Context, stateful bool) error 
 	}
 
 	traceHTTPRequest(req, nil)
-	headResp, err := t.httpClient.Do(req)
+	headResp, err := t.do(req)
 	if err != nil {
 		return fmt.Errorf("executing request: %w", err)
 	}
@@ -519,7 +541,7 @@ func (t *Transport) fetchCSRFTokenFor(ctx context.Context, stateful bool) error 
 			reqGet.Header.Set("X-sap-adt-sessiontype", "stateful")
 		}
 		traceHTTPRequest(reqGet, nil)
-		getResp, err := t.httpClient.Do(reqGet)
+		getResp, err := t.do(reqGet)
 		if err != nil {
 			return fmt.Errorf("executing GET fallback: %w", err)
 		}
@@ -667,7 +689,9 @@ func (t *Transport) clearSAPSessionCookies() {
 		return
 	}
 	hc.Jar = fresh
+	t.jarMu.Lock()
 	t.jar = fresh
+	t.jarMu.Unlock()
 }
 
 // CSRF token accessors with mutex protection
