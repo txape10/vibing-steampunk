@@ -234,9 +234,8 @@ flowchart LR
         STE[SetTextElements]
     end
 
-    subgraph Install["Install (3)"]
+    subgraph Install["Install (2)"]
         IV[InstallZADTVSP]
-        IA[InstallAbapGit]
         LDp[ListDependencies]
     end
 ```

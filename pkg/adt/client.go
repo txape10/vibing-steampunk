@@ -267,7 +267,7 @@ func (c *Client) Language() string {
 
 // AllowPackageTemporarily adds a package to the allowed list for the duration of
 // an install/bootstrap operation. Returns a cleanup function that removes it.
-// This is used by install tools (InstallZADTVSP, InstallAbapGit) which are
+// This is used by install tools (InstallZADTVSP) which are
 // self-contained bootstrap operations that should not be blocked by
 // SAP_ALLOWED_PACKAGES restrictions.
 func (c *Client) AllowPackageTemporarily(pkg string) func() {

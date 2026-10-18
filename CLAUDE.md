@@ -2368,6 +2368,26 @@ the code permanently — it is the fix, not a placeholder.
 - **Verified live**: a copy (status D, target S4Q) appears under "Transports of Copies" together with the older ones. **Not verified**: release of a copy (needs one the user releases anyway); the raw XML of a copy was not captured, the parser routes on `tm:type="T"`.
 - Tests: `transport_copies_test.go`, `transport_release_test.go`.
 
+### 2ay. Upstream #183 -- `lock_handle` optional on `UpdateSource`/`CreateTestInclude`/`UpdateClassInclude`; `LockObject`/`UnlockObject` out of focused mode (2026-10-19)
+- Commit `f4168a3`. A lock handle cannot cross two MCP tool calls (issue #169: each call is its own server-side session), so the handle-passing flow was a trap. Without `lock_handle` the three tools now lock, write and unlock in one session through the new `Client.WithObjectLock(ctx, opName, lockURL, transport, fn)` (`pkg/adt/lock_scope.go`). A handle the caller does pass is respected as given (decision: follow upstream); `DeleteObject` keeps ignoring it (2ae).
+- Order inside `WithObjectLock`, nothing stateless between LOCK and the write that consumes the handle: `gateAndMark` above the LOCK -> `planTransport` (a failed plan is returned, golden rule: SAP never autogenerates a request) -> `LockObject` with the planned corrNr -> deferred release on a detached context (`releaseLockAfterFailure` + `strandedLockAdvice`) -> `resolveWriteTransportFor` -> `fn` -> source cache invalidated -> `UnlockObject`. A failed unlock after a good write wraps the sentinel `ErrLockReleaseFailed`.
+- `LockObject`/`UnlockObject` left the focused whitelist (still expert). A reviewer HIGH (no `planTransport` first) was fixed before the commit.
+- Not fixed (LOW): the gate op of `CreateTestInclude` is `OpUpdate`, not `OpCreate`; the happy-path unlock uses the caller's context.
+- Tests: `pkg/adt/lock_scope_test.go`, `internal/mcp/lock_scope_test.go`. **Not verified live.**
+
+### 2az. Upstream #288 -- read-only invariant test, `DeployZip` gate/transport/lock scope (2026-10-19)
+- Commit `cf74c5e`. New `internal/mcp/readonly_invariant_test.go`: every registered tool must be classified (read or write), and every write tool must be refused under `SAP_READ_ONLY` with "blocked by safety configuration" before any request leaves. **Adding a tool without classifying it now fails the suite.** Building it exposed two real holes, closed here: `InstallZADTVSP` and `RecoverFailedCreate` (now gates `OpDelete`) had no gate.
+- `DeployZip` (`handlers_deploy.go`): the safety gate and the transport rules run before the ZIP is read (non-dry-run). **Behaviour change**: a non-`$` package now requires an explicit `transport` (it is refused for a local package); a dry run needs neither. Phase 2 uses `WithObjectLock`; upload warnings are collected (`uploadWarnings`).
+- Tests: `handlers_deploy_test.go` (embedded ZIPs are 0 bytes, so the checks sit before parsing to be testable). Mutation-checked.
+- **Not verified live** (DeployZip phases).
+
+### 2ba. Upstream #251 -- concurrent callers of one client no longer break each other's lock chains (2026-10-19)
+- Commit `296848a`. Two things end the stateful ADT context a lock handle is bound to, and both are the ordinary work of another caller sharing the client: a stateless request arriving in that context (the jar puts `sap-contextid` on every request), and a second concurrent request into a busy context (ICM answers 400, the session recovery then drops the cookies and orphans the context together with its enqueue).
+- `Transport.do` (`pkg/adt/http_do.go`): while `lockWindow.present()` or a stateful request is in flight, a stateless request is isolated -- it goes without `sap-contextid`, through a jar-less client, and its response cookies are not learned. Requests into the context (stateful or unmarked, e.g. the CSRF probe) go one at a time through `contextGate` (`context_gate.go`, a FIFO readers-writer gate: stateless requests that may end the context hold it shared, so a LOCK cannot open a window in the context they are ending). `jarMu` guards the jar against `clearSAPSessionCookies`. The session-error recovery uses a 30-minute `outstanding()` check, not the 12-hour record, so a lost handle cannot disable recovery for a day. The response-cache wrapper is unchanged (a cache hit never reaches `do`).
+- **Behaviour to remember**: a long stateful request (`DebuggerListen`, up to its timeout) holds the gate for as long and every other stateful or unmarked request on the same client queues behind it; before this the ICM answered those with 400.
+- Tests: `lock_context_test.go`, `lock_context_extra_test.go`; mutation-checked. Reviewer MEDIUMs (jar race, stale record, Listen serialization) fixed or documented in the `do` comment.
+- **Verified live (2026-10-19)** with a throwaway Go program (not committed) against the real system: LOCK on `ZTESTRCG1`, a concurrent `SearchObject` from another goroutine, then the write. Code before the commit: write 423 `ExceptionResourceInvalidLockHandle`. Code with the commit: write and unlock fine, activation fine. `EDITSOURCE` through the deployed MCP (change and revert) fine; `ENQUEUE_READ` shows no enqueue of the dev user afterwards. `ZTESTRCG1` ends identical to how it started.
+
 ## Known Open Issues (Not Fixed)
 
 ### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused (2026-09-22); MITIGATED in vsp by 2av (2026-10-16)
@@ -2606,7 +2626,7 @@ Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_A
   `--keepalive` defaults to 0.
 - **#169** MCP cross-tool-call window: a lock handle spans separate tool calls, and any read the agent does
   between LOCK and the write that consumes it is a stateless hop — no in-process fix closes this, it needs
-  an MCP-level design change (upstream is exploring this per PR #183, not ported here).
+  an MCP-level design change. **Addressed by 2ay (#183) and 2ba (#251)**: the write tools lock and write in one call, and concurrent callers of one client no longer break each other's lock chains.
 - **#55** RunReport in APC — architectural limit. **Resolved** by the pkg/saprfc Fase 2 migration
   (see 2an above) — `RUN_REPORT` no longer uses APC/WebSocket at all, so the limit no longer applies.
 - **#46** / **#45** Sync script flags — closed upstream (script never existed in public repo)

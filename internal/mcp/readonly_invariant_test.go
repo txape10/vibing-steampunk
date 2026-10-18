@@ -101,6 +101,9 @@ func invariantCall(t *testing.T, s *Server, name string, override map[string]any
 		t.Fatal(err)
 	}
 	args["file_path"] = file
+	// export tools write locally; keep the result out of the package directory
+	args["output_dir"] = t.TempDir()
+	args["outputPath"] = args["output_dir"]
 	for k, v := range invariantOverrides[name] {
 		args[k] = v
 	}
