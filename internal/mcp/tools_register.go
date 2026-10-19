@@ -209,10 +209,10 @@ func (s *Server) registerReadTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("RunQuery") {
 		s.mcpServer.AddTool(mcp.NewTool("RunQuery",
-			mcp.WithDescription("Execute a freestyle SQL query against the SAP database. IMPORTANT: Uses ABAP SQL syntax, NOT standard SQL. Use ASCENDING/DESCENDING instead of ASC/DESC. Use max_rows parameter instead of LIMIT. GROUP BY and WHERE work normally."),
+			mcp.WithDescription("Execute a freestyle SQL query against the SAP database. Uses ABAP SQL syntax, not standard SQL; common ANSI spellings are rewritten and reported in Notes (t.col to t~col, ASC/DESC after a sort column to ASCENDING/DESCENDING, a closing period or semicolon dropped). Use max_rows parameter instead of LIMIT. GROUP BY and WHERE work normally. A refused query comes back with SAP's message and a hint (the table's real columns, what an unknown name is)."),
 			mcp.WithString("sql_query",
 				mcp.Required(),
-				mcp.Description("ABAP SQL query. Example: SELECT carrid, COUNT(*) as cnt FROM sflight GROUP BY carrid ORDER BY cnt DESCENDING. Note: ASC/DESC keywords fail - use ASCENDING/DESCENDING"),
+				mcp.Description("ABAP SQL query. Example: SELECT carrid, COUNT(*) as cnt FROM sflight GROUP BY carrid ORDER BY cnt DESCENDING. ASC/DESC after a sort column are rewritten to ASCENDING/DESCENDING"),
 			),
 			mcp.WithNumber("max_rows",
 				mcp.Description("Maximum number of rows to retrieve (default 100). Use this instead of SQL LIMIT clause"),

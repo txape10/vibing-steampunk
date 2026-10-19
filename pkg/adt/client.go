@@ -1279,6 +1279,8 @@ func (c *Client) GetStructure(ctx context.Context, structName string) (string, e
 type TableContentsResult struct {
 	Columns []TableColumn
 	Rows    []map[string]interface{}
+	// Notes says what RunQuery rewrote before sending the statement.
+	Notes []string `json:",omitempty"`
 }
 
 // TableColumn represents a column in table contents.
@@ -1366,10 +1368,18 @@ func (c *Client) RunQuery(ctx context.Context, sqlQuery string, maxRows int) (*T
 	if err := c.checkSafety(OpFreeSQL, "RunQuery"); err != nil {
 		return nil, err
 	}
-	if sqlQuery == "" {
+	if strings.TrimSpace(sqlQuery) == "" {
 		return nil, fmt.Errorf("SQL query is required")
 	}
-	return c.runFreestyleQuery(ctx, sqlQuery, maxRows)
+	// ANSI spellings are rewritten before the line wrapping, which must see
+	// the final length (DESC becomes DESCENDING).
+	sent, notes := normalizeOpenSQL(sqlQuery)
+	res, err := c.runFreestyleQuery(ctx, sent, maxRows)
+	if err != nil {
+		return nil, c.explainQueryError(ctx, sent, notes, err)
+	}
+	res.Notes = notes
+	return res, nil
 }
 
 // parseTableContents parses the XML response for table contents.

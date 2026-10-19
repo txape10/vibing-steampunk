@@ -131,7 +131,13 @@ Free SQL:
   Long SQL: SAP's endpoint silently cuts every line at 255 characters, dropping the end of the query.
   Lines over 250 characters are therefore broken automatically at a safe point (before a keyword,
   at a blank, or after a comma; never inside a literal). If a line has no safe break point
-  (a literal or token over 250 characters) the call fails locally and nothing is sent to SAP.`)
+  (a literal or token over 250 characters) the call fails locally and nothing is sent to SAP.
+  The data preview takes ABAP SQL only. vsp rewrites the common ANSI spellings outside literals and
+  comments -- t.col to t~col (only for a table or alias of the statement), DESC/ASC after a sort
+  column to DESCENDING/ASCENDING, a closing period or semicolon -- and lists each rewrite in "Notes".
+  A refused query comes back with SAP's message and a hint: the columns the table does have, what a
+  name SAP cannot find is (structure, append, view, similar names), or what to change for a client
+  field in WHERE or an LRAW field. LIMIT, != and double-quoted identifiers are not translated.`)
 
 	case "test":
 		return mcp.NewToolResultText(`SAP(action="test") - Run tests
