@@ -295,15 +295,30 @@ func TestGetTraceAnalysis_ForbiddenIsNotIncomplete(t *testing.T) {
 	}
 }
 
-// The call tree has not been captured on this system, so it is reported and
-// not guessed at.
-func TestParseTraceAnalysis_CallTreeIsNotParsed(t *testing.T) {
-	a, err := parseTraceAnalysis([]byte(`<trc:statements xmlns:trc="x"><trc:statement index="1"/></trc:statements>`), "X", "statements")
+// Shape captured from a non-aggregated trace on S/4HANA 2023 (trimmed, names
+// synthetic). The component description carries a Latin-1 byte inside a
+// document declared UTF-8, as the real answer did.
+const callTreeSample = `<?xml version="1.0" encoding="utf-8"?><trc:statements m:count="3.0E+0" xmlns:trc="http://www.sap.com/adt/runtime/traces/abaptraces" xmlns:m="http://schema.microsoft.com/ado/2007/08/dataservices/metadata"><atom:link rel="parent" href="/sap/bc/adt/runtime/traces/abaptraces/0123456789ABCDEF0123456789ABCDEF" xmlns:atom="http://www.w3.org/2005/Atom"/>` +
+	`<trc:statement id="1" index="1" callLevel="0" text="Runtime analysis" variable="" package="S_ABAP_TRACE" component="BC-DWB-TOO-RTA" componentDescription="An` + "\xe1" + `lisis" hitlistAnchor="1" isProcedureLike="true"><trc:callingProgram adtcore:context="SAPLS_ABAP_TRACE_DATA" byteCodeOffset="20953" xmlns:adtcore="http://www.sap.com/adt/core"/><trc:grossTime time="43508" percentage="100.0"/><trc:traceEventNetTime time="16" percentage="0.04"/><trc:proceduralNetTime time="16" percentage="0.04"/></trc:statement>` +
+	`<trc:statement id="2" index="2" callLevel="1" text="Submit Report" variable="ZDEMO_REPORT" hitlistAnchor="2" isProcedureLike="true"><trc:callingProgram adtcore:context="SAPLS_ABAP_TRACE_DATA" byteCodeOffset="20960" xmlns:adtcore="http://www.sap.com/adt/core"/><trc:grossTime time="43492" percentage="99.96"/><trc:traceEventNetTime time="4038" percentage="9.28"/></trc:statement>` +
+	`<trc:statement id="740" index="3" callLevel="9" text="Call M." variable="CL_DEMO-&gt;CONSTRUCTOR" hitlistAnchor="66" isProcedureLike="true"><trc:callingProgram adtcore:context="CL_DEMO================CP" byteCodeOffset="458" xmlns:adtcore="http://www.sap.com/adt/core"/><trc:calledProgram adtcore:context="CL_DEMO================CP" xmlns:adtcore="http://www.sap.com/adt/core"/><trc:grossTime time="7" percentage="0.02"/><trc:traceEventNetTime time="4" percentage="0.01"/></trc:statement></trc:statements>`
+
+func TestParseTraceAnalysis_CallTree(t *testing.T) {
+	a, err := parseTraceAnalysis([]byte(callTreeSample), "X", "statements")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(a.Entries) != 0 || !strings.Contains(a.Note, "call tree") {
-		t.Errorf("entries %d note %q", len(a.Entries), a.Note)
+	if a.Note != "" || len(a.Entries) != 3 || a.TotalEntries != 3 {
+		t.Fatalf("note %q entries %d", a.Note, len(a.Entries))
+	}
+	first := a.Entries[0]
+	if first.Index != 1 || first.Event != "Runtime analysis" || first.Program != "SAPLS_ABAP_TRACE_DATA" ||
+		first.CallLevel != 0 || first.GrossTime != 43508 || first.NetTime != 16 {
+		t.Errorf("first entry %+v", first)
+	}
+	last := a.Entries[2]
+	if last.CallLevel != 9 || last.Variable != "CL_DEMO->CONSTRUCTOR" || last.CalledProgram != "CL_DEMO================CP" || last.NetPercentage != 0.01 {
+		t.Errorf("last entry %+v", last)
 	}
 }
 
@@ -338,5 +353,27 @@ func TestTraceExecution_UnreadableTraceIsUnsearched(t *testing.T) {
 	if len(res.Unsearched) != 1 || !strings.Contains(res.Unsearched[0].Object, "6B952F02C3D211F1B8A20242AC110011") ||
 		res.Trace != nil || len(res.ActualEdges) != 0 {
 		t.Errorf("unsearched %+v trace %+v edges %d", res.Unsearched, res.Trace, len(res.ActualEdges))
+	}
+}
+
+// A call tree keeps SAP's order unless a sort is asked for, and the default
+// cut shows its first entries, not its "top".
+func TestTraceSortKey_CallTreeKeepsSAPOrder(t *testing.T) {
+	if k, err := traceSortKey("", "statements"); err != nil || k != "none" {
+		t.Errorf("statements default: %q %v", k, err)
+	}
+	if k, err := traceSortKey("", "hitlist"); err != nil || k != "net" {
+		t.Errorf("hitlist default: %q %v", k, err)
+	}
+	a, err := parseTraceAnalysis([]byte(callTreeSample), "X", "statements")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Entries[0].Percentage != 100.0 || a.Entries[1].CallLevel != 1 || a.Entries[1].Variable != "ZDEMO_REPORT" {
+		t.Errorf("entries %+v", a.Entries[:2])
+	}
+	sortTraceEntries(a.Entries, "none")
+	if a.Entries[0].Index != 1 || a.Entries[2].Index != 3 {
+		t.Errorf("order changed: %+v", a.Entries)
 	}
 }

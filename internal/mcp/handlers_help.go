@@ -273,9 +273,10 @@ Profiler traces:
   SAP(action="analyze", params={"type": "get_trace", "trace_id": "...", "tool_type": "dbAccesses", "top": 20})
       list_traces shows each trace's state, aggregation, size and runtime (newest first);
       complete=false (e.g. "Size violation") means ADT cannot evaluate it. get_trace takes the
-      id, its ADT path or an adt:// link. tool_type: hitlist (default) or dbAccesses; statements
-      (call tree, non-aggregated traces only) is not parsed: use raw=true. Entries are sorted
-      by own time (sort_by: net|gross|calls|none) and cut to top (default 50, 0 for all).
+      id, its ADT path or an adt:// link. tool_type: hitlist (default), dbAccesses, or statements
+      (call tree in execution order with callLevel; non-aggregated traces only). Entries are
+      sorted by own time (sort_by: net|gross|calls|none; a call tree keeps SAP's order by
+      default) and cut to top (default 50, 0 for all; a cut call tree keeps its FIRST N events, and sort_by on it breaks the callLevel order; a missing callLevel means 0).
       raw=true returns ADT's XML, capped at 256 KB. For a long run, record with Hit List
       aggregation: no aggregation or By Call Stack can fill the trace file within seconds.
 

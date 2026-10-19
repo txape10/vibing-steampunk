@@ -602,13 +602,13 @@ func (s *Server) registerDiagnosticsTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("GetTrace") {
 		s.mcpServer.AddTool(mcp.NewTool("GetTrace",
-			mcp.WithDescription("Evaluate an ABAP runtime trace: hit list or database accesses, sorted by own time and cut to the top entries. A trace cut off at its size limit cannot be evaluated; ListTraces shows its state. The call tree ('statements') is not parsed yet: use raw=true."),
+			mcp.WithDescription("Evaluate an ABAP runtime trace: hit list, database accesses or call tree, sorted by own time (a call tree keeps SAP's order) and cut to the top entries. A trace cut off at its size limit cannot be evaluated; ListTraces shows its state."),
 			mcp.WithString("trace_id",
 				mcp.Required(),
 				mcp.Description("Trace ID from ListTraces, its ADT path, or an adt:// link"),
 			),
 			mcp.WithString("tool_type",
-				mcp.Description("Analysis type: 'hitlist' (default), 'dbAccesses', or 'statements' (call tree; non-aggregated traces only; returned raw-only)"),
+				mcp.Description("Analysis type: 'hitlist' (default), 'dbAccesses', or 'statements' (call tree; non-aggregated traces only)"),
 			),
 			mcp.WithString("sort_by",
 				mcp.Description("'net' (own time, default), 'gross', 'calls', or 'none' for SAP's order"),

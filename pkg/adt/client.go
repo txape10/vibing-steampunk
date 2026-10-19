@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Client is the main ADT API client.
@@ -2631,6 +2632,7 @@ type TraceEntry struct {
 	NetPercentage  float64 `json:"netPercentage,omitempty"`
 	RecursionDepth int     `json:"recursionDepth,omitempty"`
 	CallLevel      int     `json:"callLevel,omitempty"` // call tree only
+	Variable       string  `json:"variable,omitempty"`  // call tree: the called method, table, ...
 	Statement      string  `json:"statement,omitempty"` // dbAccesses: "select single", ...
 	TableName      string  `json:"tableName,omitempty"`
 	Operation      string  `json:"operation,omitempty"` // dbAccesses: OpenSQL, NativeSQL, ...
@@ -3076,7 +3078,17 @@ func parseTraceAnalysis(data []byte, traceID, toolType string) (*TraceAnalysis, 
 		XMLName     xml.Name
 		TotalDBTime int64          `xml:"totalDbTime,attr"`
 		Calls       []traceCallXML `xml:"entry"`
-		DBAccesses  []struct {
+		Statements  []struct {
+			Index     int             `xml:"index,attr"`
+			CallLevel int             `xml:"callLevel,attr"`
+			Text      string          `xml:"text,attr"`
+			Variable  string          `xml:"variable,attr"`
+			Calling   traceProgramXML `xml:"callingProgram"`
+			Called    traceProgramXML `xml:"calledProgram"`
+			Gross     traceTimeXML    `xml:"grossTime"`
+			Net       traceTimeXML    `xml:"traceEventNetTime"`
+		} `xml:"statement"`
+		DBAccesses []struct {
 			Index         int             `xml:"index,attr"`
 			TableName     string          `xml:"tableName,attr"`
 			Statement     string          `xml:"statement,attr"`
@@ -3090,6 +3102,11 @@ func parseTraceAnalysis(data []byte, traceID, toolType string) (*TraceAnalysis, 
 				Ratio    float64 `xml:"ratioOfTraceTotal,attr"`
 			} `xml:"accessTime"`
 		} `xml:"dbAccess"`
+	}
+	// The call tree is declared UTF-8 but carries other bytes in the component
+	// descriptions (seen on S/4HANA 2023); encoding/xml refuses such a document.
+	if !utf8.Valid(data) {
+		data = []byte(strings.ToValidUTF8(string(data), "�"))
 	}
 	if err := xml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parsing trace %s (%s): %w", traceID, toolType, err)
@@ -3121,7 +3138,21 @@ func parseTraceAnalysis(data []byte, traceID, toolType string) (*TraceAnalysis, 
 			})
 		}
 	case "statements":
-		analysis.Note = "the call tree (statements) has not been verified against a live system, so it is not parsed. Ask for raw output to see what ADT sent"
+		// A flat list in execution order; callLevel carries the depth.
+		for _, s := range doc.Statements {
+			analysis.Entries = append(analysis.Entries, TraceEntry{
+				Index:         s.Index,
+				Event:         strings.Join(strings.Fields(s.Text), " "),
+				Variable:      s.Variable,
+				Program:       s.Calling.Context,
+				CalledProgram: s.Called.Context,
+				CallLevel:     s.CallLevel,
+				GrossTime:     s.Gross.Time,
+				Percentage:    s.Gross.Percentage,
+				NetTime:       s.Net.Time,
+				NetPercentage: s.Net.Percentage,
+			})
+		}
 	default:
 		analysis.Note = fmt.Sprintf("unrecognised response root <%s>; nothing was parsed. Ask for raw output to see what ADT sent", doc.XMLName.Local)
 	}
