@@ -78,6 +78,7 @@ func TestInactivePartsOf(t *testing.T) {
 	list := []InactiveObjectRecord{
 		mk(groupURL, false),
 		mk(groupURL+"/includes/lzdemotop", false),
+		mk(groupURL+"/includes/lzdemotop", false), // listed twice, as SAP does
 		mk(groupURL+"/includes/lzdemof01", true),
 		mk(groupURL+"x/includes/other", false), // sibling with a common prefix
 		{Transport: &InactiveObject{URI: groupURL + "/includes/t"}},

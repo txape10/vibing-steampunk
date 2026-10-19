@@ -256,6 +256,7 @@ func (c *Client) explainSilentRefusal(ctx context.Context, objectURL string, ref
 // or class, say). Deleted entries are not pending work and are left out.
 func inactivePartsOf(objectURL string, list []InactiveObjectRecord) (self bool, parts []InactiveObject) {
 	base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(objectURL)), "/source/main")
+	seen := map[string]bool{}
 	for _, rec := range list {
 		if rec.Object == nil || rec.Object.Deleted {
 			continue
@@ -264,7 +265,9 @@ func inactivePartsOf(objectURL string, list []InactiveObjectRecord) (self bool, 
 		switch {
 		case uri == base:
 			self = true
-		case strings.HasPrefix(uri, base+"/"):
+		case strings.HasPrefix(uri, base+"/") && !seen[uri]:
+			// SAP lists an object once per request that holds it.
+			seen[uri] = true
 			parts = append(parts, *rec.Object)
 		}
 	}
