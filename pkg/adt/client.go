@@ -3,6 +3,7 @@ package adt
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -1991,38 +1992,49 @@ func CompareCallGraphs(staticEdges, actualEdges []CallGraphEdge) *CallGraphCompa
 	return comp
 }
 
-// ExtractCallEdgesFromTrace converts trace entries to call graph edges.
-// It analyzes Program and Event fields to identify caller-callee relationships.
+// ExtractCallEdgesFromTrace converts trace entries to call graph edges. A
+// hit-list entry names both its calling and its called program, so each
+// entry whose two differ is one edge. Edges are between programs, as they
+// were before: a call inside one class pool yields none.
 func ExtractCallEdgesFromTrace(entries []TraceEntry) []CallGraphEdge {
 	var edges []CallGraphEdge
 	seen := make(map[string]bool)
 
-	// Group entries by program to detect call relationships
-	var prevProgram string
 	for _, entry := range entries {
-		if entry.Program == "" {
+		caller, callerURI := traceProgramRef(entry.Program)
+		callee, calleeURI := traceProgramRef(entry.CalledProgram)
+		if caller == "" || callee == "" || caller == callee {
 			continue
 		}
-
-		// Event field contains call type info (PERFORM, CALL METHOD, etc.)
-		// When program changes, we have a call edge
-		if prevProgram != "" && prevProgram != entry.Program {
-			edgeKey := prevProgram + "->" + entry.Program
-			if !seen[edgeKey] {
-				seen[edgeKey] = true
-				edges = append(edges, CallGraphEdge{
-					CallerURI:  "/sap/bc/adt/programs/programs/" + strings.ToLower(prevProgram),
-					CallerName: prevProgram,
-					CalleeURI:  "/sap/bc/adt/programs/programs/" + strings.ToLower(entry.Program),
-					CalleeName: entry.Program,
-					Line:       entry.Line,
-				})
-			}
+		edgeKey := caller + "->" + callee
+		if seen[edgeKey] {
+			continue
 		}
-		prevProgram = entry.Program
+		seen[edgeKey] = true
+		edges = append(edges, CallGraphEdge{
+			CallerURI:  callerURI,
+			CallerName: caller,
+			CalleeURI:  calleeURI,
+			CalleeName: callee,
+			Line:       entry.Line,
+		})
 	}
 
 	return edges
+}
+
+// traceProgramRef turns a trace's main program (ZCL_X=====CP, ZREPORT) into
+// a name and an ADT URI.
+func traceProgramRef(mainProgram string) (string, string) {
+	name, kind, _ := strings.Cut(mainProgram, "=")
+	if name == "" {
+		return "", ""
+	}
+	// Any "NAME=====xxx" context (CP, CM001, CCIMP, CCAU...) belongs to a class.
+	if kind != "" || strings.Contains(mainProgram, "=") {
+		return name, "/sap/bc/adt/oo/classes/" + strings.ToLower(name)
+	}
+	return name, "/sap/bc/adt/programs/programs/" + strings.ToLower(name)
 }
 
 // TraceExecutionResult contains the result of a traced execution.
@@ -2045,6 +2057,10 @@ type TraceExecutionResult struct {
 	// Execution info
 	ExecutedTests []string `json:"executed_tests,omitempty"`
 	ExecutionTime int64    `json:"execution_time_us,omitempty"`
+
+	// What could not be read, and why: without it a failed trace read looks
+	// like code that made no calls.
+	Unsearched []Unsearched `json:"unsearched,omitempty"`
 }
 
 // TraceExecutionOptions configures traced execution.
@@ -2118,7 +2134,16 @@ func (c *Client) TraceExecution(ctx context.Context, opts *TraceExecutionOptions
 
 		// Get hitlist analysis
 		analysis, err := c.GetTrace(ctx, latestTrace.ID, "hitlist")
-		if err == nil {
+		switch {
+		case err != nil:
+			result.Unsearched = append(result.Unsearched, Unsearched{
+				Object: "trace " + latestTrace.ID, Reason: err.Error()})
+		case analysis.Note != "" && len(analysis.Entries) == 0:
+			// Nothing parsed is not nothing ran, so nothing is compared.
+			result.Trace = analysis
+			result.Unsearched = append(result.Unsearched, Unsearched{
+				Object: "trace " + latestTrace.ID, Reason: analysis.Note})
+		default:
 			result.Trace = analysis
 			result.ExecutionTime = analysis.TotalTime
 
@@ -2131,6 +2156,8 @@ func (c *Client) TraceExecution(ctx context.Context, opts *TraceExecutionOptions
 				result.Comparison = CompareCallGraphs(staticEdges, result.ActualEdges)
 			}
 		}
+	} else if err != nil {
+		result.Unsearched = append(result.Unsearched, Unsearched{Object: "trace list", Reason: err.Error()})
 	}
 
 	return result, nil
@@ -2537,45 +2564,78 @@ func parseDumpDetails(data []byte, dumpID string) (*DumpDetails, error) {
 }
 
 // --- ABAP Profiler / Runtime Traces (ATRA) Operations ---
+//
+// The hit-list, database-access and trace-list shapes below were read from a
+// 7.58 system (fixtures in testdata/abaptraces-*.v758.xml). The earlier
+// parser expected a flat <hitlist><entry program= event= netTime=...> that
+// ADT does not send for the trace list, and the list lost its start time,
+// state and aggregation: exactly the fields that tell a usable trace from
+// one cut off at its size limit. The call tree (statements) has not been
+// captured on this system, so it is reported in Note, not guessed at.
 
-// ABAPTrace represents an ABAP runtime trace file.
+// ABAPTrace is one trace file from /sap/bc/adt/runtime/traces/abaptraces.
 type ABAPTrace struct {
-	ID          string `json:"id"`
+	ID          string `json:"id"`  // the bare trace key, what GetTrace takes
+	URI         string `json:"uri"` // the ADT path of the trace
 	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
-	User        string `json:"user"`
-	StartTime   string `json:"startTime"`
-	EndTime     string `json:"endTime,omitempty"`
-	Duration    int64  `json:"duration,omitempty"` // microseconds
-	ProcessType string `json:"processType,omitempty"`
-	ObjectType  string `json:"objectType,omitempty"`
-	Status      string `json:"status,omitempty"`
-	URI         string `json:"uri"`
+	Author      string `json:"author,omitempty"`     // who requested the trace
+	User        string `json:"user,omitempty"`       // whose work was traced (SAPSYS for a batch job)
+	ObjectName  string `json:"objectName,omitempty"` // the traced program, transaction, URL...
+	StartTime   string `json:"startTime,omitempty"`
+	Expiration  string `json:"expiration,omitempty"`
+	Host        string `json:"host,omitempty"`
+	System      string `json:"system,omitempty"`
+	Client      string `json:"client,omitempty"`
+	State       string `json:"state,omitempty"`     // R finished, S size limit hit, ...
+	StateText   string `json:"stateText,omitempty"` // as SAP words it
+	Complete    bool   `json:"complete"`            // state R; anything else ADT may refuse to evaluate
+	Aggregation string `json:"aggregation"`         // none, byCallPosition (hit list), byCallStack
+	SizeKB      int64  `json:"sizeKB,omitempty"`
+	Runtime     int64  `json:"runtime,omitempty"` // microseconds, the whole traced run
+	RuntimeABAP int64  `json:"runtimeABAP,omitempty"`
+	RuntimeDB   int64  `json:"runtimeDB,omitempty"`
+	RuntimeSys  int64  `json:"runtimeSystem,omitempty"`
 }
 
-// TraceAnalysis contains trace analysis results.
+// TraceAnalysis is one evaluation of a trace: its hit list, call tree or
+// database accesses.
 type TraceAnalysis struct {
-	TraceID    string            `json:"traceId"`
-	ToolType   string            `json:"toolType"` // hitlist, statements, dbAccesses
-	TotalTime  int64             `json:"totalTime,omitempty"`
-	TotalCalls int               `json:"totalCalls,omitempty"`
-	Entries    []TraceEntry      `json:"entries,omitempty"`
-	Summary    map[string]string `json:"summary,omitempty"`
+	TraceID      string       `json:"traceId"`
+	ToolType     string       `json:"toolType"` // hitlist, statements, dbAccesses
+	Trace        *ABAPTrace   `json:"trace,omitempty"`
+	TotalTime    int64        `json:"totalTime,omitempty"` // microseconds, the traced run
+	TotalDBTime  int64        `json:"totalDbTime,omitempty"`
+	TotalCalls   int64        `json:"totalCalls,omitempty"`
+	TotalEntries int          `json:"totalEntries"`
+	SortedBy     string       `json:"sortedBy,omitempty"`
+	Truncated    bool         `json:"truncated,omitempty"` // Entries holds the top N of TotalEntries
+	Entries      []TraceEntry `json:"entries,omitempty"`
+	Note         string       `json:"note,omitempty"`
 }
 
-// TraceEntry represents a single entry in trace analysis.
+// TraceEntry is one line of a hit list, call tree or database access list.
+// Times are microseconds; percentages are of the whole traced run.
 type TraceEntry struct {
-	Program     string  `json:"program,omitempty"`
-	Event       string  `json:"event,omitempty"`
-	Line        int     `json:"line,omitempty"`
-	GrossTime   int64   `json:"grossTime,omitempty"` // microseconds
-	NetTime     int64   `json:"netTime,omitempty"`   // microseconds
-	Calls       int     `json:"calls,omitempty"`
-	Percentage  float64 `json:"percentage,omitempty"`
-	Statement   string  `json:"statement,omitempty"`
-	TableName   string  `json:"tableName,omitempty"`   // for dbAccesses
-	Operation   string  `json:"operation,omitempty"`   // SELECT, INSERT, etc.
-	RecordCount int     `json:"recordCount,omitempty"` // rows affected
+	Index          int     `json:"index,omitempty"`
+	Event          string  `json:"event,omitempty"` // "Call M. ZCL_X->RUN", "Append <...>", ...
+	Program        string  `json:"program,omitempty"`
+	CallingObject  string  `json:"callingObject,omitempty"`
+	CallingType    string  `json:"callingType,omitempty"`
+	CallingURI     string  `json:"callingUri,omitempty"`
+	Line           int     `json:"line,omitempty"`
+	CalledProgram  string  `json:"calledProgram,omitempty"`
+	Calls          int64   `json:"calls,omitempty"`
+	GrossTime      int64   `json:"grossTime,omitempty"`
+	Percentage     float64 `json:"percentage,omitempty"`
+	NetTime        int64   `json:"netTime,omitempty"` // own time
+	NetPercentage  float64 `json:"netPercentage,omitempty"`
+	RecursionDepth int     `json:"recursionDepth,omitempty"`
+	CallLevel      int     `json:"callLevel,omitempty"` // call tree only
+	Statement      string  `json:"statement,omitempty"` // dbAccesses: "select single", ...
+	TableName      string  `json:"tableName,omitempty"`
+	Operation      string  `json:"operation,omitempty"` // dbAccesses: OpenSQL, NativeSQL, ...
+	BufferedCount  int64   `json:"bufferedCount,omitempty"`
+	DBTime         int64   `json:"dbTime,omitempty"`
 }
 
 // TraceQueryOptions configures the trace list query.
@@ -2586,7 +2646,43 @@ type TraceQueryOptions struct {
 	MaxResults  int    // Maximum results (default 100)
 }
 
-// ListTraces retrieves a list of ABAP runtime traces.
+// TraceGetOptions configures one trace evaluation.
+type TraceGetOptions struct {
+	// ToolType is hitlist (the default), statements (the call tree; a
+	// non-aggregated trace only) or dbAccesses.
+	ToolType string
+	// SortBy is net (own time; the default, except for a call tree, which
+	// keeps SAP's order), gross, calls, or none for SAP's order.
+	SortBy string
+	// Top keeps the first N entries after sorting; 0 keeps all of them. A hit
+	// list of a long run has tens of thousands of positions.
+	Top int
+}
+
+const abapTracesPath = "/sap/bc/adt/runtime/traces/abaptraces"
+
+// NormalizeTraceID accepts a trace key, its ADT path or an adt:// link and
+// returns the bare key.
+func NormalizeTraceID(s string) (string, error) {
+	id := strings.TrimSpace(s)
+	if i := strings.Index(id, "abaptraces/"); i >= 0 {
+		id = id[i+len("abaptraces/"):]
+	}
+	if i := strings.IndexAny(id, "/#?"); i >= 0 {
+		id = id[:i]
+	}
+	if id == "" {
+		return "", fmt.Errorf("no trace id in %q", s)
+	}
+	for _, r := range id {
+		if !(r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
+			return "", fmt.Errorf("trace id %q: only letters and digits are expected", id)
+		}
+	}
+	return id, nil
+}
+
+// ListTraces retrieves a list of ABAP runtime traces, newest first.
 func (c *Client) ListTraces(ctx context.Context, opts *TraceQueryOptions) ([]ABAPTrace, error) {
 	if opts == nil {
 		opts = &TraceQueryOptions{MaxResults: 100}
@@ -2602,11 +2698,8 @@ func (c *Client) ListTraces(ctx context.Context, opts *TraceQueryOptions) ([]ABA
 	if opts.ObjectType != "" {
 		params.Set("objectType", opts.ObjectType)
 	}
-	if opts.MaxResults > 0 {
-		params.Set("$top", fmt.Sprintf("%d", opts.MaxResults))
-	}
 
-	endpoint := "/sap/bc/adt/runtime/traces/abaptraces"
+	endpoint := abapTracesPath
 	if len(params) > 0 {
 		endpoint = endpoint + "?" + params.Encode()
 	}
@@ -2619,172 +2712,427 @@ func (c *Client) ListTraces(ctx context.Context, opts *TraceQueryOptions) ([]ABA
 		return nil, fmt.Errorf("listing traces: %w", err)
 	}
 
-	return parseTracesFeed(resp.Body)
+	traces, err := parseTracesFeed(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	// The feed comes oldest first and the collection ignores $top, so the
+	// order and the cap are applied here: callers asking for one want the
+	// latest.
+	sort.SliceStable(traces, func(i, j int) bool { return traces[i].StartTime > traces[j].StartTime })
+	if opts.MaxResults > 0 && len(traces) > opts.MaxResults {
+		traces = traces[:opts.MaxResults]
+	}
+	return traces, nil
 }
 
-// traceAbapTracesPrefix is the base ADT collection path for ABAP profiler traces.
-const traceAbapTracesPrefix = "/sap/bc/adt/runtime/traces/abaptraces/"
-
-// normalizeTraceID accepts either a bare trace GUID or the full ADT URI
-// returned by ListTraces (ABAPTrace.ID) and returns the bare GUID, since
-// GetTrace builds the request endpoint from the base path itself.
-func normalizeTraceID(id string) string {
-	return strings.TrimPrefix(id, traceAbapTracesPrefix)
+// GetTraceInfo reads one trace's list entry: state, aggregation, runtime.
+func (c *Client) GetTraceInfo(ctx context.Context, traceID string) (*ABAPTrace, error) {
+	id, err := NormalizeTraceID(traceID)
+	if err != nil {
+		return nil, err
+	}
+	// The single-entry resource refused "application/atom+xml;type=entry" with
+	// "Accept header invalid" on S/4HANA 2023; the list feed's own type works,
+	// so the entry is looked up there when the direct read fails.
+	resp, err := c.transport.Request(ctx, abapTracesPath+"/"+id, &RequestOptions{
+		Method: http.MethodGet,
+		Accept: "application/atom+xml",
+	})
+	if err != nil {
+		all, listErr := c.ListTraces(ctx, &TraceQueryOptions{})
+		if listErr != nil {
+			return nil, fmt.Errorf("reading trace %s: %w", id, err)
+		}
+		for i := range all {
+			if strings.EqualFold(all[i].ID, id) {
+				return &all[i], nil
+			}
+		}
+		return nil, fmt.Errorf("reading trace %s: %w", id, err)
+	}
+	var e traceEntryXML
+	if err := xml.Unmarshal(resp.Body, &e); err != nil {
+		return nil, fmt.Errorf("parsing trace %s: %w", id, err)
+	}
+	t := e.toTrace()
+	if t.ID == "" && t.State == "" {
+		return nil, fmt.Errorf("trace %s: the answer is not a trace entry", id)
+	}
+	return &t, nil
 }
 
-// GetTrace retrieves analysis of a specific trace.
+// GetTrace retrieves the whole evaluation of a trace, in SAP's order.
 // toolType can be: "hitlist", "statements", "dbAccesses"
 func (c *Client) GetTrace(ctx context.Context, traceID string, toolType string) (*TraceAnalysis, error) {
-	if toolType == "" {
-		toolType = "hitlist"
+	return c.GetTraceAnalysis(ctx, traceID, TraceGetOptions{ToolType: toolType, SortBy: "none"})
+}
+
+// GetTraceAnalysis evaluates a trace, sorted and cut to opts.Top.
+func (c *Client) GetTraceAnalysis(ctx context.Context, traceID string, opts TraceGetOptions) (*TraceAnalysis, error) {
+	id, toolType, err := traceRequest(traceID, opts.ToolType)
+	if err != nil {
+		return nil, err
 	}
-	traceID = normalizeTraceID(traceID)
+	sortBy, err := traceSortKey(opts.SortBy, toolType)
+	if err != nil {
+		return nil, err
+	}
 
-	endpoint := fmt.Sprintf("%s%s/%s", traceAbapTracesPrefix, traceID, toolType)
+	// The list entry carries the run's total time and, when the evaluation
+	// fails, the reason: a trace cut off at its size limit is answered with a
+	// bare 416 "An exception was raised" (SY 530).
+	info, infoErr := c.GetTraceInfo(ctx, id)
 
-	resp, err := c.transport.Request(ctx, endpoint, &RequestOptions{
+	body, err := c.getTraceBody(ctx, id, toolType)
+	if err != nil {
+		return nil, explainTraceError(err, id, toolType, info)
+	}
+
+	analysis, err := parseTraceAnalysis(body, id, toolType)
+	if err != nil {
+		return nil, err
+	}
+	if infoErr == nil {
+		analysis.Trace = info
+		analysis.TotalTime = info.Runtime
+	} else {
+		msg := "the trace's list entry could not be read (" + infoErr.Error() + "): state, aggregation and total time are missing"
+		if analysis.Note == "" {
+			analysis.Note = msg
+		} else {
+			analysis.Note += "; " + msg
+		}
+	}
+	sortTraceEntries(analysis.Entries, sortBy)
+	if sortBy != "none" {
+		analysis.SortedBy = sortBy
+	}
+	if opts.Top > 0 && len(analysis.Entries) > opts.Top {
+		analysis.Entries = analysis.Entries[:opts.Top]
+		analysis.Truncated = true
+	}
+	return analysis, nil
+}
+
+// GetTraceRaw returns the evaluation exactly as ADT sent it, for when the
+// parser has not met the shape a release answers with.
+func (c *Client) GetTraceRaw(ctx context.Context, traceID string, toolType string) ([]byte, error) {
+	id, toolType, err := traceRequest(traceID, toolType)
+	if err != nil {
+		return nil, err
+	}
+	body, err := c.getTraceBody(ctx, id, toolType)
+	if err != nil {
+		info, _ := c.GetTraceInfo(ctx, id)
+		return nil, explainTraceError(err, id, toolType, info)
+	}
+	return body, nil
+}
+
+func (c *Client) getTraceBody(ctx context.Context, id, toolType string) ([]byte, error) {
+	resp, err := c.transport.Request(ctx, abapTracesPath+"/"+id+"/"+toolType, &RequestOptions{
 		Method: http.MethodGet,
 		Accept: "application/xml",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("getting trace %s (%s): %w", traceID, toolType, err)
+		return nil, err
 	}
-
-	return parseTraceAnalysis(resp.Body, traceID, toolType)
+	return resp.Body, nil
 }
 
-// traceEntryXML is used for parsing trace feed entries.
+// traceRequest validates the id and maps the tool type to its ADT path segment.
+func traceRequest(traceID, toolType string) (string, string, error) {
+	id, err := NormalizeTraceID(traceID)
+	if err != nil {
+		return "", "", err
+	}
+	switch strings.ToLower(toolType) {
+	case "", "hitlist":
+		return id, "hitlist", nil
+	case "statements", "calltree", "call_tree":
+		return id, "statements", nil
+	case "dbaccesses", "db_accesses", "db":
+		return id, "dbAccesses", nil
+	}
+	return "", "", fmt.Errorf("unknown trace tool type %q: use hitlist, statements (call tree) or dbAccesses", toolType)
+}
+
+func traceSortKey(sortBy, toolType string) (string, error) {
+	switch strings.ToLower(sortBy) {
+	case "":
+		if toolType == "statements" {
+			return "none", nil // a call tree reads in its own order
+		}
+		return "net", nil
+	case "net", "own", "own_time":
+		return "net", nil
+	case "gross", "total", "total_time":
+		return "gross", nil
+	case "calls", "executions", "hits":
+		return "calls", nil
+	case "none":
+		return "none", nil
+	}
+	return "", fmt.Errorf("unknown sort %q: use net (own time), gross, calls or none", sortBy)
+}
+
+func sortTraceEntries(entries []TraceEntry, by string) {
+	var key func(e TraceEntry) int64
+	switch by {
+	case "net":
+		// A database access has no own time apart from its access time.
+		key = func(e TraceEntry) int64 {
+			if e.Statement != "" || e.TableName != "" {
+				return e.GrossTime
+			}
+			return e.NetTime
+		}
+	case "gross":
+		key = func(e TraceEntry) int64 { return e.GrossTime }
+	case "calls":
+		key = func(e TraceEntry) int64 { return e.Calls }
+	default:
+		return
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return key(entries[i]) > key(entries[j]) })
+}
+
+// explainTraceError turns ADT's answers for a trace it will not evaluate into
+// the reason. info may be nil. Statuses outside 416 and 400 pass through:
+// a 401, 403, 404 or 5xx is not the recording's fault.
+func explainTraceError(err error, id, toolType string, info *ABAPTrace) error {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return fmt.Errorf("getting trace %s (%s): %w", id, toolType, err)
+	}
+	// Only the answers seen for a cut-off recording: a 5xx may be the server.
+	recordingRefused := apiErr.StatusCode == http.StatusRequestedRangeNotSatisfiable ||
+		apiErr.StatusCode == http.StatusBadRequest
+	if strings.Contains(apiErr.Message, "invalidRequestForAggregatedTraces") {
+		kind := "aggregated"
+		if info != nil {
+			kind = "aggregated " + info.Aggregation
+		}
+		return fmt.Errorf("trace %s is %s, and %s needs a trace recorded without aggregation; use hitlist: %w", id, kind, toolType, err)
+	}
+	if info != nil && !info.Complete && recordingRefused {
+		return fmt.Errorf("trace %s is incomplete (state %s %q): ADT cannot evaluate it, and Eclipse reports it as \"Trace has errors\". "+
+			"Record it again with Hit List aggregation, or a larger maximum file size: %w", id, info.State, info.StateText, err)
+	}
+	if apiErr.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		return fmt.Errorf("trace %s cannot be evaluated (416, often a trace cut off at its size limit): %w", id, err)
+	}
+	return fmt.Errorf("getting trace %s (%s): %w", id, toolType, err)
+}
+
+// traceEntryXML is one Atom entry of the trace list. Element names match by
+// local name, so the atom: and trc: prefixes need no namespace here.
 type traceEntryXML struct {
-	ID      string `xml:"id"`
-	Title   string `xml:"title"`
-	Summary string `xml:"summary"`
-	Updated string `xml:"updated"`
-	Link    struct {
-		Href string `xml:"href,attr"`
-	} `xml:"link"`
-	Author struct {
+	ID        string `xml:"id"`
+	Title     string `xml:"title"`
+	Published string `xml:"published"`
+	Author    struct {
 		Name string `xml:"name"`
 	} `xml:"author"`
-	Content struct {
-		Trace struct {
-			StartTime   string `xml:"startTime,attr"`
-			EndTime     string `xml:"endTime,attr"`
-			Duration    string `xml:"duration,attr"`
-			ProcessType string `xml:"processType,attr"`
-			ObjectType  string `xml:"objectType,attr"`
-			Status      string `xml:"status,attr"`
-		} `xml:"trace"`
-	} `xml:"content"`
+	Ext struct {
+		Host            string `xml:"host"`
+		Size            int64  `xml:"size"`
+		Runtime         int64  `xml:"runtime"`
+		RuntimeABAP     int64  `xml:"runtimeABAP"`
+		RuntimeSystem   int64  `xml:"runtimeSystem"`
+		RuntimeDatabase int64  `xml:"runtimeDatabase"`
+		Expiration      string `xml:"expiration"`
+		System          string `xml:"system"`
+		Client          string `xml:"client"`
+		User            string `xml:"user"`
+		IsAggregated    bool   `xml:"isAggregated"`
+		AggregationKind string `xml:"aggregationKind"`
+		ObjectName      string `xml:"objectName"`
+		State           struct {
+			Value string `xml:"value,attr"`
+			Text  string `xml:"text,attr"`
+		} `xml:"state"`
+	} `xml:"extendedData"`
+}
+
+func (e traceEntryXML) toTrace() ABAPTrace {
+	id, _ := NormalizeTraceID(e.ID)
+	agg := "none"
+	if e.Ext.IsAggregated {
+		agg = e.Ext.AggregationKind
+		if agg == "" {
+			agg = "aggregated"
+		}
+	}
+	return ABAPTrace{
+		ID:          id,
+		URI:         e.ID,
+		Title:       e.Title,
+		Author:      e.Author.Name,
+		User:        e.Ext.User,
+		ObjectName:  e.Ext.ObjectName,
+		StartTime:   e.Published,
+		Expiration:  e.Ext.Expiration,
+		Host:        e.Ext.Host,
+		System:      e.Ext.System,
+		Client:      e.Ext.Client,
+		State:       e.Ext.State.Value,
+		StateText:   e.Ext.State.Text,
+		Complete:    e.Ext.State.Value == "R",
+		Aggregation: agg,
+		SizeKB:      e.Ext.Size,
+		Runtime:     e.Ext.Runtime,
+		RuntimeABAP: e.Ext.RuntimeABAP,
+		RuntimeDB:   e.Ext.RuntimeDatabase,
+		RuntimeSys:  e.Ext.RuntimeSystem,
+	}
 }
 
 // parseTracesFeed parses the Atom feed of traces.
 func parseTracesFeed(data []byte) ([]ABAPTrace, error) {
-	type feedXML struct {
+	var feed struct {
 		XMLName xml.Name        `xml:"feed"`
 		Entries []traceEntryXML `xml:"entry"`
 	}
-
-	var feed feedXML
 	if err := xml.Unmarshal(data, &feed); err != nil {
 		return nil, fmt.Errorf("parsing traces feed: %w", err)
 	}
-
 	result := make([]ABAPTrace, 0, len(feed.Entries))
 	for _, entry := range feed.Entries {
-		var duration int64
-		if entry.Content.Trace.Duration != "" {
-			fmt.Sscanf(entry.Content.Trace.Duration, "%d", &duration)
-		}
-
-		trace := ABAPTrace{
-			ID:          entry.ID,
-			Title:       entry.Title,
-			Description: entry.Summary,
-			User:        entry.Author.Name,
-			StartTime:   entry.Content.Trace.StartTime,
-			EndTime:     entry.Content.Trace.EndTime,
-			Duration:    duration,
-			ProcessType: entry.Content.Trace.ProcessType,
-			ObjectType:  entry.Content.Trace.ObjectType,
-			Status:      entry.Content.Trace.Status,
-			URI:         entry.Link.Href,
-		}
-		result = append(result, trace)
+		result = append(result, entry.toTrace())
 	}
-
 	return result, nil
 }
 
-// traceTimeXML is a <grossTime>/<traceEventNetTime>/<proceduralNetTime> child element.
+// traceProgramXML is a <callingProgram>/<calledProgram> element. SAP puts
+// the attributes in the adtcore namespace; encoding/xml matches a tag
+// without a namespace by local name regardless of prefix.
+type traceProgramXML struct {
+	Context string `xml:"context,attr"` // the main program, ZCL_X=====CP
+	Name    string `xml:"name,attr"`    // the object, when ADT resolved one
+	Type    string `xml:"type,attr"`
+	URI     string `xml:"uri,attr"`
+}
+
 type traceTimeXML struct {
-	Time       string `xml:"time,attr"`
-	Percentage string `xml:"percentage,attr"`
+	Time       int64   `xml:"time,attr"`
+	Percentage float64 `xml:"percentage,attr"`
 }
 
-// traceProgramRefXML is a <callingProgram>/<calledProgram> child element.
-// SAP puts these attributes in the adtcore namespace, but encoding/xml
-// matches struct tags without a namespace by local name regardless of prefix.
-type traceProgramRefXML struct {
-	Context string `xml:"context,attr"`
+// traceCallXML is a hit-list entry: the calling and called program and the
+// times.
+type traceCallXML struct {
+	Index          int             `xml:"index,attr"`
+	HitCount       int64           `xml:"hitCount,attr"`
+	RecursionDepth int             `xml:"recursionDepth,attr"`
+	Description    string          `xml:"description,attr"`
+	Calling        traceProgramXML `xml:"callingProgram"`
+	Called         traceProgramXML `xml:"calledProgram"`
+	Gross          traceTimeXML    `xml:"grossTime"`
+	Net            traceTimeXML    `xml:"traceEventNetTime"`
 }
 
-// hitlistXML mirrors the real ADT response for GET .../abaptraces/{id}/hitlist,
-// verified against a live S/4HANA system on 2026-08-11 (trace
-// 022F8D0E956911F1807502000A14930A). Earlier code assumed a flat-attribute
-// shape (program/event/line/grossTime/netTime/calls) that does not exist in
-// the actual response, so every entry unmarshaled to zero values.
-type hitlistXML struct {
-	XMLName xml.Name `xml:"hitlist"`
-	Entries []struct {
-		HitCount          string             `xml:"hitCount,attr"`
-		Description       string             `xml:"description,attr"`
-		CallingProgram    traceProgramRefXML `xml:"callingProgram"`
-		GrossTime         traceTimeXML       `xml:"grossTime"`
-		TraceEventNetTime traceTimeXML       `xml:"traceEventNetTime"`
-	} `xml:"entry"`
+func (x traceCallXML) toEntry() TraceEntry {
+	return TraceEntry{
+		Index:          x.Index,
+		Event:          strings.Join(strings.Fields(x.Description), " "),
+		Program:        x.Calling.Context,
+		CallingObject:  x.Calling.Name,
+		CallingType:    x.Calling.Type,
+		CallingURI:     x.Calling.URI,
+		Line:           lineFromADTURI(x.Calling.URI),
+		CalledProgram:  x.Called.Context,
+		Calls:          x.HitCount,
+		GrossTime:      x.Gross.Time,
+		Percentage:     x.Gross.Percentage,
+		NetTime:        x.Net.Time,
+		NetPercentage:  x.Net.Percentage,
+		RecursionDepth: x.RecursionDepth,
+	}
 }
 
-// parseTraceAnalysis parses trace analysis XML response.
-// Only "hitlist" is implemented — the "statements" and "dbAccesses" tool
-// types have not been verified against a live system, so they intentionally
-// return an empty analysis rather than guess at their schema.
+// lineFromADTURI reads the line from a source URI's #start=LINE[,COL].
+func lineFromADTURI(uri string) int {
+	i := strings.Index(uri, "#start=")
+	if i < 0 {
+		return 0
+	}
+	s := uri[i+len("#start="):]
+	if j := strings.IndexAny(s, ",;&"); j >= 0 {
+		s = s[:j]
+	}
+	n, _ := strconv.Atoi(s)
+	return n
+}
+
+// parseTraceAnalysis parses an evaluation by its root element, not by what
+// was asked for, and says so when it meets a root it does not know: an empty
+// result must not pass for an empty trace.
 func parseTraceAnalysis(data []byte, traceID, toolType string) (*TraceAnalysis, error) {
-	analysis := &TraceAnalysis{
-		TraceID:  traceID,
-		ToolType: toolType,
-		Summary:  make(map[string]string),
+	analysis := &TraceAnalysis{TraceID: traceID, ToolType: toolType}
+
+	var doc struct {
+		XMLName     xml.Name
+		TotalDBTime int64          `xml:"totalDbTime,attr"`
+		Calls       []traceCallXML `xml:"entry"`
+		DBAccesses  []struct {
+			Index         int             `xml:"index,attr"`
+			TableName     string          `xml:"tableName,attr"`
+			Statement     string          `xml:"statement,attr"`
+			Type          string          `xml:"type,attr"`
+			TotalCount    int64           `xml:"totalCount,attr"`
+			BufferedCount int64           `xml:"bufferedCount,attr"`
+			Calling       traceProgramXML `xml:"callingProgram"`
+			AccessTime    struct {
+				Total    int64   `xml:"total,attr"`
+				Database int64   `xml:"database,attr"`
+				Ratio    float64 `xml:"ratioOfTraceTotal,attr"`
+			} `xml:"accessTime"`
+		} `xml:"dbAccess"`
+	}
+	if err := xml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("parsing trace %s (%s): %w", traceID, toolType, err)
 	}
 
-	if toolType != "hitlist" {
-		return analysis, nil
+	switch doc.XMLName.Local {
+	case "hitlist":
+		for _, x := range doc.Calls {
+			analysis.Entries = append(analysis.Entries, x.toEntry())
+		}
+	case "dbAccesses":
+		analysis.TotalDBTime = doc.TotalDBTime
+		for _, a := range doc.DBAccesses {
+			analysis.Entries = append(analysis.Entries, TraceEntry{
+				Index:         a.Index,
+				TableName:     a.TableName,
+				Statement:     a.Statement,
+				Operation:     a.Type,
+				Program:       a.Calling.Context,
+				CallingObject: a.Calling.Name,
+				CallingType:   a.Calling.Type,
+				CallingURI:    a.Calling.URI,
+				Line:          lineFromADTURI(a.Calling.URI),
+				Calls:         a.TotalCount,
+				BufferedCount: a.BufferedCount,
+				GrossTime:     a.AccessTime.Total,
+				DBTime:        a.AccessTime.Database,
+				Percentage:    a.AccessTime.Ratio,
+			})
+		}
+	case "statements":
+		analysis.Note = "the call tree (statements) has not been verified against a live system, so it is not parsed. Ask for raw output to see what ADT sent"
+	default:
+		analysis.Note = fmt.Sprintf("unrecognised response root <%s>; nothing was parsed. Ask for raw output to see what ADT sent", doc.XMLName.Local)
 	}
 
-	var hitlist hitlistXML
-	if err := xml.Unmarshal(data, &hitlist); err != nil || hitlist.XMLName.Local != "hitlist" {
-		return analysis, nil
+	for _, e := range analysis.Entries {
+		analysis.TotalCalls += e.Calls
 	}
-
-	for _, e := range hitlist.Entries {
-		var hitCount int
-		var grossTime, netTime int64
-		var percentage float64
-
-		fmt.Sscanf(e.HitCount, "%d", &hitCount)
-		fmt.Sscanf(e.GrossTime.Time, "%d", &grossTime)
-		fmt.Sscanf(e.TraceEventNetTime.Time, "%d", &netTime)
-		fmt.Sscanf(e.GrossTime.Percentage, "%f", &percentage)
-
-		analysis.Entries = append(analysis.Entries, TraceEntry{
-			Program:    e.CallingProgram.Context,
-			Event:      e.Description,
-			GrossTime:  grossTime,
-			NetTime:    netTime,
-			Calls:      hitCount,
-			Percentage: percentage,
-		})
-		analysis.TotalCalls += hitCount
+	analysis.TotalEntries = len(analysis.Entries)
+	if analysis.TotalEntries == 0 && analysis.Note == "" && strings.Count(string(data), "<") > 2 {
+		analysis.Note = "the response has content but no entries were recognised in it. Ask for raw output to see what ADT sent"
 	}
-
 	return analysis, nil
 }
 

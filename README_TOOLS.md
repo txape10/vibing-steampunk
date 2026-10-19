@@ -270,12 +270,14 @@ See [ExecuteABAP Implementation Report](reports/2025-12-05-004-execute-abap-impl
 | Tool | Description | Mode |
 |------|-------------|------|
 | `ListTraces` | List ABAP runtime traces (profiler results) | Focused |
-| `GetTrace` | Get trace analysis (hitlist, statements, dbAccesses) | Focused |
+| `GetTrace` | Get trace analysis (hitlist, dbAccesses; `sort_by`, `top`, `raw`) | Focused |
+
+`ListTraces` returns newest first with state, aggregation, size and runtimes.
 
 **Analysis Types:**
-- `hitlist` - Hot spots by execution time
-- `statements` - Statement-level trace
+- `hitlist` - Hot spots by execution time (sorted by `sort_by`, cut to `top`, default 50)
 - `dbAccesses` - Database access analysis
+- `statements` - Call tree: only for traces recorded without aggregation, and only via `raw=true` (not parsed)
 
 ---
 

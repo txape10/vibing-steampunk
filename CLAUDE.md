@@ -265,8 +265,8 @@ Two separate bugs, both in `parseActivationResult` (`pkg/adt/devtools.go`):
   `marcellourbani/abap-adt-api` (`build/api/traces.js`, the library this fork's own backup MCP server
   depends on) implements `tracesList`/`tracesHitList`/`tracesDbAccess`/`tracesStatements`, so its TS parser
   schema was cross-checked, then the exact shape was verified against a real S/4HANA response before writing
-  the fix — not inferred from the TS types alone. `statements`/`dbAccesses` tool types remain intentionally
-  unimplemented (`parseTraceAnalysis` returns empty entries, no schema guessed) — not live-verified.
+  the fix — not inferred from the TS types alone. `dbAccesses` was added later (2bd); `statements` remains
+  unparsed (a `Note`, no schema guessed) — not live-verified.
 - Files: `pkg/adt/client.go` (`normalizeTraceID`, `GetTrace`, `parseTraceAnalysis`, `hitlistXML` types).
 - Verified live against the real SAP system: read two real SAT traces (modes "OLD" vs "NEW" of the same
   report, ZSU0088) end-to-end through the MCP tool, both fully populated (4.891 and 4.756 entries), used to
@@ -2406,6 +2406,17 @@ the code permanently — it is the fix, not a placeholder.
 - Tests: `pkg/adt/query_sql_test.go` (table incl. comments, CRLF, multibyte, namespaces, idempotence, normalize-then-wrap length, wire tests with captured ES XML); mutation-checked. Code review: APPROVE, 0 CRITICAL/HIGH; the two MEDIUMs (ORDER BY scope in subqueries/UNION, HTTP status lost in the text) fixed. Not fixed (LOW): aliases without `AS` are not rewritten (ABAP SQL needs `AS` anyway); `missingSourceHint` cuts the prefix by bytes.
 - **Verified live (2026-10-19)** through the deployed binary, dev and read-only prod: E070/E07T join with `e.trkorr ... ORDER BY ... DESC, ... ASC;` runs on both and returns the three `Notes` (qualifiers, DESC/ASC, closing period); unknown column lists the real columns and the closest name (dev `T001`, prod `T000`); missing table in ES gives the DD02L hint; `MANDT` in WHERE and `EDID4-SDATA` (LRAW) get their hints; a 60-element `IN` list without blanks (over 250 characters) runs (wrapped by 2av). Not exercised live: the exact-250-rune last line margin.
 - Files: `pkg/adt/query_sql.go` (+`_test.go`), `pkg/adt/client.go`, `internal/mcp/tools_register.go`, `internal/mcp/handlers_help.go`.
+
+### 2bd. Upstream #376 (adapted) -- ATRA traces: typed list, sorted/cut hit list, dbAccesses, explained errors (2026-10-19)
+- Supersedes the "`statements`/`dbAccesses` intentionally unimplemented" note of 2o: `dbAccesses` is parsed now; `statements` (the call tree) is **not** (it needs a non-aggregated trace; none existed to capture) and answers a `Note` pointing at `raw=true`.
+- `ListTraces`: Atom feed with `trc:extendedData` -> `ABAPTrace` (bare `id`, `uri`, state R/S + text, `complete`, aggregation, size KB, runtimes). The feed comes oldest first and ignores `$top`, so vsp sorts newest first and caps client-side. `GetTrace`/`GetTraceAnalysis` parse by root element (`hitlist`, `dbAccesses`; unknown root -> `Note`), take `sort_by` (net|gross|calls|none), `top` (default 50) and report `totalEntries`/`truncated`/`sortedBy`; `raw=true` returns ADT's XML cut at 256 KB. `NormalizeTraceID` accepts id, ADT path or `adt://` link and whitelists letters/digits.
+- Errors: only 416/400 are blamed on an incomplete recording (and only when the list entry says so); the aggregated case (`invalidRequestForAggregatedTraces`) is checked first and tells to use hitlist; 401/403/404/5xx pass through untouched.
+- `GetTraceInfo` reads the trace's own list entry. **Found live**: the single-entry resource answers 400 "Accept header invalid" to `application/atom+xml;type=entry`; it now sends `application/atom+xml` and falls back to looking the entry up in the list. A failure is reported in `note` (never silent). Raw `dbAccesses` of an aggregated trace carries `totalDbTime="0"`; the DB time comes from the list entry.
+- `TraceExecution`: an unreadable trace, or a `Note` with no entries, goes to the new `Unsearched` (`pkg/adt/unsearched.go`) instead of comparing nothing; `ExtractCallEdgesFromTrace` uses calling/called programs (any `NAME=====xxx` context is a class).
+- Sanitized in the same commit: the old fixture with a real host/user was replaced by upstream's sanitized ones (`pkg/adt/testdata/abaptraces-*.v758.xml`, SID DEV, TESTUSER); `trace_test.go` keeps only the ST05 tests. `traces_test.go` (new) uses an httptest stub; mutation-checked (newest-first sort, 403 not blamed on the recording, Unsearched append).
+- Code review: APPROVE, 0 CRITICAL/HIGH. Fixed: MEDIUM-1 (`GetTraceInfo` returned an empty entry for a non-entry answer), MEDIUM-2 (class include contexts), LOW-1 (check order). Not fixed (LOW): UTF-8 cut of `raw` by bytes, namespaced object URIs not encoded, silent `NormalizeTraceID` error in `toTrace`. No unit test for the `GetTraceInfo` list fallback.
+- **Verified live (2026-10-19, S4D)**: `list_traces` (3 traces, newest first), `get_trace` hitlist with `sort_by`/`top`, `dbAccesses`, `raw=true`, `statements` on an aggregated trace -> explained error, and `trace`/`totalTime` filled after the Accept fix. **Not verified**: `statements` parsing (no non-aggregated trace), size-violation (416) trace, prod.
+- Files: `pkg/adt/client.go`, `pkg/adt/unsearched.go`, `pkg/adt/traces_test.go`, `pkg/adt/trace_test.go`, `pkg/adt/testdata/`, `internal/mcp/handlers_traces.go`, `handlers_analysis.go`, `tools_register.go`, `handlers_help.go`.
 
 ## Known Open Issues (Not Fixed)
 

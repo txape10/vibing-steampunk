@@ -584,7 +584,7 @@ func (s *Server) registerDiagnosticsTools(shouldRegister func(string) bool) {
 	// --- ABAP Profiler / Runtime Traces (ATRA) ---
 	if shouldRegister("ListTraces") {
 		s.mcpServer.AddTool(mcp.NewTool("ListTraces",
-			mcp.WithDescription("List ABAP runtime traces (profiler results) from the SAP system."),
+			mcp.WithDescription("List ABAP runtime traces (profiler results) with their state, aggregation, size and runtime, newest first. complete=false marks a trace ADT cannot evaluate, such as one cut off at its size limit."),
 			mcp.WithString("user",
 				mcp.Description("Filter by username"),
 			),
@@ -602,13 +602,22 @@ func (s *Server) registerDiagnosticsTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("GetTrace") {
 		s.mcpServer.AddTool(mcp.NewTool("GetTrace",
-			mcp.WithDescription("Get trace analysis (hitlist, statements, or database accesses) for a specific trace."),
+			mcp.WithDescription("Evaluate an ABAP runtime trace: hit list or database accesses, sorted by own time and cut to the top entries. A trace cut off at its size limit cannot be evaluated; ListTraces shows its state. The call tree ('statements') is not parsed yet: use raw=true."),
 			mcp.WithString("trace_id",
 				mcp.Required(),
-				mcp.Description("Trace ID from ListTraces result"),
+				mcp.Description("Trace ID from ListTraces, its ADT path, or an adt:// link"),
 			),
 			mcp.WithString("tool_type",
-				mcp.Description("Analysis type: 'hitlist' (default), 'statements', 'dbAccesses'"),
+				mcp.Description("Analysis type: 'hitlist' (default), 'dbAccesses', or 'statements' (call tree; non-aggregated traces only; returned raw-only)"),
+			),
+			mcp.WithString("sort_by",
+				mcp.Description("'net' (own time, default), 'gross', 'calls', or 'none' for SAP's order"),
+			),
+			mcp.WithNumber("top",
+				mcp.Description("Entries to return after sorting (default 50, 0 for all)"),
+			),
+			mcp.WithBoolean("raw",
+				mcp.Description("Return ADT's XML unparsed, capped at 256 KB"),
 			),
 		), s.handleGetTrace)
 	}
