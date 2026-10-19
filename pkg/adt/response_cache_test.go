@@ -149,6 +149,7 @@ func TestCacheable_NeverCacheablePrefixes(t *testing.T) {
 		"/sap/bc/adt/debugger/stack",
 		"/sap/bc/adt/st05/trace/state",
 		"/sap/bc/adt/runtime/traces/abaptraces/GUID-1",
+		"/sap/bc/adt/activation/inactiveobjects",
 	} {
 		if cacheable(path, get) {
 			t.Errorf("%s: got cacheable, want never cached", path)

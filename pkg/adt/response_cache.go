@@ -166,6 +166,9 @@ var neverCacheablePrefixes = []string{
 	"/sap/bc/adt/debugger/",
 	"/sap/bc/adt/st05/",
 	"/sap/bc/adt/runtime/traces/",
+	// activation/inactiveobjects decides whether an activation is "nothing to
+	// do" or "parts still pending"; a stale list would give the wrong verdict.
+	"/sap/bc/adt/activation/",
 }
 
 // cacheable says whether a request's answer may be kept: a plain GET on a

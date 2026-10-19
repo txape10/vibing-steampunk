@@ -1711,11 +1711,7 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 	// A refused activation is a 200 with the reason in the body; returning nil
 	// here promised a table that was never there.
 	if !activation.Success {
-		var problems []string
-		for _, m := range activation.Messages {
-			problems = append(problems, m.ShortText)
-		}
-		return fmt.Errorf("table %s was created but did not activate: %s", opts.Name, strings.Join(problems, "; "))
+		return fmt.Errorf("table %s was created but did not activate: %s", opts.Name, strings.Join(activationMessages(activation), "; "))
 	}
 
 	return nil

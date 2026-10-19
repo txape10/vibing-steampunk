@@ -146,6 +146,10 @@ type ActivationResult struct {
 	Success  bool                       `json:"success"`
 	Messages []ActivationResultMessage  `json:"messages"`
 	Inactive []InactiveObject           `json:"inactive,omitempty"`
+
+	// silentRefusal marks a checklist with activationExecuted="false", no
+	// messages and no inactive entries: SAP did nothing and said nothing.
+	silentRefusal bool
 }
 
 // ActivationResultMessage represents a message from activation.
@@ -197,7 +201,86 @@ func (c *Client) Activate(ctx context.Context, objectURL string, objectName stri
 		return nil, fmt.Errorf("activation failed: %w", err)
 	}
 
-	return parseActivationResult(resp.Body)
+	result, err := parseActivationResult(resp.Body)
+	if err != nil || !result.silentRefusal {
+		return result, err
+	}
+	return c.explainSilentRefusal(ctx, objectURL, result), nil
+}
+
+// explainSilentRefusal turns SAP's wordless "activationExecuted=false" into a
+// verdict. It only reads: it never activates anything beyond the object the
+// caller named, because parts of the object that are inactive may be pending
+// on purpose (they were not necessarily written by this session).
+//   - nothing inactive at or below the object -> success, "Nothing to activate"
+//   - inactive parts below it -> failure, the parts named, nothing activated
+//   - the list cannot be read -> failure, with that reason
+func (c *Client) explainSilentRefusal(ctx context.Context, objectURL string, refusal *ActivationResult) *ActivationResult {
+	list, err := c.GetInactiveObjects(ctx)
+	if err != nil {
+		refusal.Messages = append(refusal.Messages, ActivationResultMessage{
+			Type:      "W",
+			ShortText: "SAP activated nothing and gave no reason, and the list of inactive objects could not be read: " + err.Error(),
+		})
+		return refusal
+	}
+	self, parts := inactivePartsOf(objectURL, list)
+	switch {
+	case len(parts) > 0:
+		refusal.Inactive = parts
+		refusal.Messages = append(refusal.Messages, ActivationResultMessage{
+			Type: "W",
+			ShortText: "Parts of the object are inactive and were not activated with it: " + describeInactive(parts) +
+				" - activate them together explicitly (ACTIVATE_MULTI) if they are meant to go live",
+		})
+		return refusal
+	case self:
+		refusal.Messages = append(refusal.Messages, ActivationResultMessage{
+			Type:      "W",
+			ShortText: "The object is inactive but SAP refused to activate it without giving a reason",
+		})
+		return refusal
+	}
+	return &ActivationResult{
+		Success: true,
+		Messages: []ActivationResultMessage{{
+			Type:      "I",
+			ShortText: "Nothing to activate: the object has no inactive version",
+		}},
+		Inactive: []InactiveObject{},
+	}
+}
+
+// inactivePartsOf reports whether the object itself is in the inactive list
+// and returns the entries strictly below it (the includes of a function group
+// or class, say). Deleted entries are not pending work and are left out.
+func inactivePartsOf(objectURL string, list []InactiveObjectRecord) (self bool, parts []InactiveObject) {
+	base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(objectURL)), "/source/main")
+	for _, rec := range list {
+		if rec.Object == nil || rec.Object.Deleted {
+			continue
+		}
+		uri := strings.TrimSuffix(strings.ToLower(rec.Object.URI), "/source/main")
+		switch {
+		case uri == base:
+			self = true
+		case strings.HasPrefix(uri, base+"/"):
+			parts = append(parts, *rec.Object)
+		}
+	}
+	return self, parts
+}
+
+func describeInactive(parts []InactiveObject) string {
+	names := make([]string, 0, len(parts))
+	for _, p := range parts {
+		s := p.Name
+		if p.User != "" {
+			s += " (" + p.User + ")"
+		}
+		names = append(names, s)
+	}
+	return strings.Join(names, ", ")
 }
 
 func parseActivationResult(data []byte) (*ActivationResult, error) {
@@ -322,7 +405,7 @@ func parseActivationResult(data []byte) (*ActivationResult, error) {
 		ActivationExecuted bool `xml:"activationExecuted,attr"`
 	}
 	type chklDoc struct {
-		Properties chklProperties  `xml:"properties"`
+		Properties *chklProperties `xml:"properties"`
 		Msgs       []msg           `xml:"msg"`
 		Entries    []inactiveEntry `xml:"entry"`
 	}
@@ -355,8 +438,15 @@ func parseActivationResult(data []byte) (*ActivationResult, error) {
 		}
 	}
 	// activationExecuted=false is an explicit SAP signal that activation did not complete.
-	if !doc.Properties.ActivationExecuted && len(doc.Msgs) > 0 {
+	notExecuted := doc.Properties != nil && !doc.Properties.ActivationExecuted
+	if notExecuted && len(doc.Msgs) > 0 {
 		result.Success = false
+	}
+	// A checklist that says nothing ran, with no message and no entry, is a
+	// refusal without a reason, not a success.
+	if notExecuted && len(doc.Msgs) == 0 && len(doc.Entries) == 0 {
+		result.Success = false
+		result.silentRefusal = true
 	}
 	for _, entry := range doc.Entries {
 		if entry.Object != nil {
@@ -490,7 +580,14 @@ func (c *Client) ActivateMultiple(ctx context.Context, objects []ObjectRef) (*Ac
 	if err != nil {
 		return nil, fmt.Errorf("batch activation failed: %w", err)
 	}
-	return parseActivationResult(resp.Body)
+	result, err := parseActivationResult(resp.Body)
+	if err == nil && result.silentRefusal {
+		result.Messages = append(result.Messages, ActivationResultMessage{
+			Type:      "W",
+			ShortText: "SAP activated nothing and gave no reason",
+		})
+	}
+	return result, err
 }
 
 // ActivatePackageResult represents the result of batch activation.
@@ -618,10 +715,25 @@ func (c *Client) ActivatePackage(ctx context.Context, packageName string, maxObj
 		stillInactive[obj.URI] = true
 	}
 
+	// A refusal that names no object (SAP activated nothing and said nothing,
+	// or only named parts below the one asked for) must not read as success.
+	refusedAll := false
+	if !activation.Success && len(reasons) == 0 {
+		refusedAll = true
+		for _, ref := range refs {
+			if stillInactive[ref.URI] {
+				refusedAll = false
+			}
+		}
+	}
+
 	for _, ref := range refs {
 		meta := refMeta[ref.URI]
-		if stillInactive[ref.URI] {
+		if stillInactive[ref.URI] || refusedAll {
 			reason := reasons[ref.Name]
+			if reason == "" && refusedAll {
+				reason = strings.Join(activationMessages(activation), "; ")
+			}
 			if reason == "" {
 				reason = "still inactive after activation attempt"
 			}

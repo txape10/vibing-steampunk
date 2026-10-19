@@ -516,6 +516,9 @@ func activationMessages(res *ActivationResult) []string {
 			out = append(out, s)
 		}
 	}
+	if len(out) == 0 && len(res.Inactive) > 0 {
+		out = append(out, "still inactive: "+describeInactive(res.Inactive))
+	}
 	if len(out) == 0 {
 		out = append(out, "activation reported no success and no message")
 	}
