@@ -70,7 +70,15 @@ func (s *Server) handleGetDump(ctx context.Context, request mcp.CallToolRequest)
 		return newToolResultError("dump_id is required"), nil
 	}
 
-	dump, err := s.adtClient.GetDump(ctx, dumpID)
+	opts := adt.DumpReadOptions{}
+	if inc, ok := request.GetArguments()["include_html"].(bool); ok {
+		opts.IncludeHTML = inc
+	}
+	if max, ok := request.GetArguments()["max_variables"].(float64); ok && max > 0 {
+		opts.MaxVariables = int(max)
+	}
+
+	dump, err := s.adtClient.GetDumpWithOptions(ctx, dumpID, opts)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to get dump: %v", err)), nil
 	}

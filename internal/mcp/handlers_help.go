@@ -265,7 +265,8 @@ Execute ABAP:
 
 Runtime errors:
   SAP(action="analyze", params={"type": "list_dumps"})
-  SAP(action="analyze", params={"type": "get_dump", "dump_id": "..."})
+  SAP(action="analyze", params={"type": "get_dump", "dump_id": "..."})   — detail: message, termination point, SY fields, source, variables, stack
+  SAP(action="analyze", params={"type": "get_dump", "dump_id": "...", "max_variables": 30, "include_html": false})
 
 Profiler traces:
   SAP(action="analyze", params={"type": "list_traces"})

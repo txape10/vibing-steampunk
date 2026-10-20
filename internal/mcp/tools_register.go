@@ -573,10 +573,16 @@ func (s *Server) registerDiagnosticsTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("GetDump") {
 		s.mcpServer.AddTool(mcp.NewTool("GetDump",
-			mcp.WithDescription("Get full details of a specific runtime error (short dump) including stack trace."),
+			mcp.WithDescription("Explain a runtime error (short dump): detail holds the short text, error type and exception, the termination point (include, line, procedure), the system fields (SY-SUBRC, SY-MSGID...), the source around the failing line, the selected variables per stack frame and the call stack. Read in English whatever the session language is. note says when the detail is missing or not recognized."),
 			mcp.WithString("dump_id",
 				mcp.Required(),
 				mcp.Description("Dump ID from ListDumps result"),
+			),
+			mcp.WithNumber("max_variables",
+				mcp.Description("Keep only the first N selected variables (default: all). A dump can hold hundreds."),
+			),
+			mcp.WithBoolean("include_html",
+				mcp.Description("Also return the viewer HTML document (cut at 256 KB). Rarely useful: it is mostly CSS."),
 			),
 		), s.handleGetDump)
 	}

@@ -982,7 +982,7 @@ User: "Investigate the ZERODIVIDE crash in production"
 
 AI Workflow:
   1. GetDumps      → Find recent crashes by exception type
-  2. GetDump       → Analyze stack trace and variable values
+  2. GetDump       → Explained dump: message, termination point, SY fields, failing source, variables, call stack
   3. GetSource     → Read code at crash location
   4. GetCallGraph  → Trace call hierarchy
   5. GrepPackages  → Find similar patterns

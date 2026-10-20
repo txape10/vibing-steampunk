@@ -2352,29 +2352,17 @@ type RuntimeDump struct {
 	URI           string `json:"uri"`
 }
 
-// DumpDetails contains full details of a runtime error.
+// DumpDetails is one dump read in full. The identification fields come from
+// the formatted document (see DumpDetail); Detail holds everything else.
 type DumpDetails struct {
 	RuntimeDump
-	StackTrace   []StackFrame      `json:"stackTrace,omitempty"`
-	Variables    []DumpVariable    `json:"variables,omitempty"`
-	SourceCode   string            `json:"sourceCode,omitempty"`
-	ErrorDetails map[string]string `json:"errorDetails,omitempty"`
-	RawHTML      string            `json:"rawHtml,omitempty"`
-}
-
-// StackFrame represents a single frame in the stack trace.
-type StackFrame struct {
-	Program string `json:"program"`
-	Include string `json:"include,omitempty"`
-	Line    int    `json:"line"`
-	Event   string `json:"event,omitempty"`
-}
-
-// DumpVariable represents a variable captured in the dump.
-type DumpVariable struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-	Type  string `json:"type,omitempty"`
+	Detail *DumpDetail `json:"detail,omitempty"`
+	// Note says why Detail is missing or empty, so an empty answer is never
+	// mistaken for a dump with nothing in it.
+	Note string `json:"note,omitempty"`
+	// RawHTML is the viewer document, returned only when asked for (it is
+	// mostly CSS and runs to hundreds of kilobytes).
+	RawHTML string `json:"rawHtml,omitempty"`
 }
 
 // DumpQueryOptions configures the dump list query.
@@ -2441,37 +2429,86 @@ func (c *Client) GetDumps(ctx context.Context, opts *DumpQueryOptions) ([]Runtim
 	return parseDumpsFeed(resp.Body)
 }
 
-// GetDump retrieves full details of a specific runtime error.
-// dumpID can be either a full URI path (from GetDumps) or just the dump identifier.
+// DumpReadOptions tunes GetDumpWithOptions.
+type DumpReadOptions struct {
+	// IncludeHTML also returns the viewer HTML document (cut at 256 KB).
+	IncludeHTML bool
+	// MaxVariables keeps the first N entries of the Selected Variables chapter;
+	// 0 keeps them all.
+	MaxVariables int
+}
+
+// dumpHTMLCap bounds the raw HTML a caller can ask for, like the raw trace XML.
+const dumpHTMLCap = 256 * 1024
+
+// GetDump reads one dump in full: message, termination point, system fields,
+// source, variables and call stack. dumpID can be the id from GetDumps, its
+// ADT path or the bare key.
 func (c *Client) GetDump(ctx context.Context, dumpID string) (*DumpDetails, error) {
-	var endpoint string
-	// GetDumps returns IDs like /sap/bc/adt/vit/runtime/dumps/{id}
-	// But the detail endpoint is /sap/bc/adt/runtime/dump/{id} (singular, no vit)
-	if strings.Contains(dumpID, "/runtime/dumps/") {
-		// Extract ID from full path and use correct endpoint
-		parts := strings.Split(dumpID, "/runtime/dumps/")
-		if len(parts) == 2 {
-			endpoint = fmt.Sprintf("/sap/bc/adt/runtime/dump/%s", parts[1])
-		} else {
-			endpoint = fmt.Sprintf("/sap/bc/adt/runtime/dump/%s", dumpID)
-		}
-	} else if strings.HasPrefix(dumpID, "/sap/bc/adt/runtime/dump/") {
-		// Already correct path
-		endpoint = dumpID
-	} else {
-		// Just the ID - construct path
-		endpoint = fmt.Sprintf("/sap/bc/adt/runtime/dump/%s", dumpID)
-	}
+	return c.GetDumpWithOptions(ctx, dumpID, DumpReadOptions{})
+}
 
-	resp, err := c.transport.Request(ctx, endpoint, &RequestOptions{
-		Method: http.MethodGet,
-		Accept: "text/html",
-	})
-	if err != nil {
+// GetDumpWithOptions is GetDump with the options of DumpReadOptions.
+func (c *Client) GetDumpWithOptions(ctx context.Context, dumpID string, opts DumpReadOptions) (*DumpDetails, error) {
+	out := &DumpDetails{RuntimeDump: RuntimeDump{ID: dumpID}}
+	wantHTML := opts.IncludeHTML
+
+	detail, err := c.DumpDetail(ctx, dumpID)
+	switch {
+	case errors.Is(err, ErrDumpDetailUnavailable):
+		// A release with the feed and no formatted document: all that is left
+		// is the viewer page, for its title.
+		out.Note = "this release does not serve the formatted dump, so only the title could be read"
+		opts.IncludeHTML = true
+	case err != nil:
 		return nil, fmt.Errorf("getting dump %s: %w", dumpID, err)
+	default:
+		out.Detail = detail
+		out.Title = detail.ShortText
+		out.ExceptionType = detail.Exception
+		out.Program = detail.Program
+		out.Include = detail.Include
+		out.Line = detail.Line
+		if detail.SourceChanged {
+			out.Note = "the program source changed after the dump: the extract is the current code, its line numbers may not match what ran and the failing line may be missing"
+		}
+		if !detail.recognized() {
+			out.Note = "the formatted dump was read but none of its chapters was recognized; the layout may differ on this release"
+		}
+		if opts.MaxVariables > 0 && len(detail.Variables) > opts.MaxVariables {
+			out.Note = strings.TrimSpace(out.Note + fmt.Sprintf("; variables cut to the first %d of %d", opts.MaxVariables, len(detail.Variables)))
+			detail.Variables = detail.Variables[:opts.MaxVariables]
+		}
 	}
 
-	return parseDumpDetails(resp.Body, dumpID)
+	if opts.IncludeHTML {
+		resp, err := c.transport.Request(ctx, dumpDetailPath(dumpID), &RequestOptions{
+			Method: http.MethodGet,
+			Accept: "text/html",
+		})
+		if err != nil {
+			if out.Detail == nil {
+				return nil, fmt.Errorf("getting dump %s: %w", dumpID, err)
+			}
+			out.Note = strings.TrimSpace(out.Note + " the HTML document could not be read: " + err.Error())
+			return out, nil
+		}
+		html := strings.ToValidUTF8(string(resp.Body), "?")
+		if out.Title == "" {
+			if i := strings.Index(html, "<title>"); i >= 0 {
+				if j := strings.Index(html[i:], "</title>"); j > 0 {
+					out.Title = strings.TrimSpace(html[i+7 : i+j])
+				}
+			}
+		}
+		if wantHTML {
+			if len(html) > dumpHTMLCap {
+				html = strings.ToValidUTF8(html[:dumpHTMLCap], "")
+			}
+			out.RawHTML = html
+		}
+	}
+	return out, nil
 }
 
 // dumpEntryXML is used for parsing dump feed entries.
@@ -2540,32 +2577,6 @@ func parseDumpsFeed(data []byte) ([]RuntimeDump, error) {
 	}
 
 	return result, nil
-}
-
-// parseDumpDetails parses the HTML dump details response.
-func parseDumpDetails(data []byte, dumpID string) (*DumpDetails, error) {
-	html := string(data)
-
-	details := &DumpDetails{
-		RuntimeDump: RuntimeDump{
-			ID: dumpID,
-		},
-		RawHTML: html,
-	}
-
-	// Extract basic info from HTML (simplified parsing)
-	// The actual HTML structure varies, so we store the raw HTML
-	// and extract what we can
-
-	// Try to extract title
-	if idx := strings.Index(html, "<title>"); idx >= 0 {
-		endIdx := strings.Index(html[idx:], "</title>")
-		if endIdx > 0 {
-			details.Title = strings.TrimSpace(html[idx+7 : idx+endIdx])
-		}
-	}
-
-	return details, nil
 }
 
 // --- ABAP Profiler / Runtime Traces (ATRA) Operations ---

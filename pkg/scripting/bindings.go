@@ -997,18 +997,44 @@ func (e *LuaEngine) luaGetDump(L *lua.LState) int {
 	L.SetField(tbl, "line", lua.LNumber(dump.Line))
 	L.SetField(tbl, "time", lua.LString(dump.Timestamp))
 
-	// Stack trace
-	if len(dump.StackTrace) > 0 {
+	if d := dump.Detail; d != nil {
+		L.SetField(tbl, "shortText", lua.LString(d.ShortText))
+		L.SetField(tbl, "errorType", lua.LString(d.ErrorType))
+		L.SetField(tbl, "component", lua.LString(d.Component))
+		L.SetField(tbl, "procedure", lua.LString(d.Procedure))
+		L.SetField(tbl, "include", lua.LString(d.Include))
+
+		fields := L.NewTable()
+		for k, v := range d.SystemFields {
+			L.SetField(fields, k, lua.LString(v))
+		}
+		L.SetField(tbl, "systemFields", fields)
+
+		source := L.NewTable()
+		for i, line := range d.Source {
+			row := L.NewTable()
+			L.SetField(row, "line", lua.LNumber(line.Line))
+			L.SetField(row, "text", lua.LString(line.Text))
+			L.SetField(row, "failed", lua.LBool(line.Failed))
+			source.RawSetInt(i+1, row)
+		}
+		L.SetField(tbl, "source", source)
+
+		// Stack trace
 		stack := L.NewTable()
-		for i, frame := range dump.StackTrace {
+		for i, frame := range d.Stack {
 			row := L.NewTable()
 			L.SetField(row, "program", lua.LString(frame.Program))
 			L.SetField(row, "include", lua.LString(frame.Include))
 			L.SetField(row, "line", lua.LNumber(frame.Line))
-			L.SetField(row, "event", lua.LString(frame.Event))
+			L.SetField(row, "event", lua.LString(frame.Name))
+			L.SetField(row, "type", lua.LString(frame.Type))
 			stack.RawSetInt(i+1, row)
 		}
 		L.SetField(tbl, "stack", stack)
+	}
+	if dump.Note != "" {
+		L.SetField(tbl, "note", lua.LString(dump.Note))
 	}
 
 	L.Push(tbl)

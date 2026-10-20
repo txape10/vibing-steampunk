@@ -256,7 +256,7 @@ See [ExecuteABAP Implementation Report](reports/2025-12-05-004-execute-abap-impl
 | Tool | Description | Mode |
 |------|-------------|------|
 | `GetDumps` | List runtime errors with filters (user, exception type, program, date range) | Focused |
-| `GetDump` | Get full details of a specific dump including stack trace | Focused |
+| `GetDump` | Explain a dump: short text, termination point, system fields, failing source, variables per frame and call stack (read in English; `max_variables`, `include_html` optional) | Focused |
 
 **Use Cases:**
 - Monitor system health by checking recent dumps
