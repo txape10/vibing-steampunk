@@ -38,6 +38,8 @@ SAP(action="edit", target="ACTIVATE_MULTI", params={
 
 Activates all objects in one SAP request — SAP resolves mutual dependencies within the group, same as Eclipse ADT. Use this when activating a program and its includes together.
 
+When a plain `Activate` of a function group or class is refused with no message because parts of it are inactive, vsp only activates those parts together with the object if **this very process wrote them** and nobody changed them since (their inactive version still hashes to what was sent). Anything else is named in the answer and left alone; use `ACTIVATE_MULTI` for it. `SAP_ACTIVATE_OWN_PARTS=false` turns the automatic part off.
+
 ### Activation error reporting
 
 With the `b2f0564` fix, activation failures on S/4HANA on-prem are now properly reported:

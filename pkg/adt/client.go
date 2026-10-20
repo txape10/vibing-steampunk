@@ -31,6 +31,10 @@ type Client struct {
 	// Lock handles believed outstanding, so the keep-alive ping does not
 	// retire the session one of them is bound to. See lock_window.go.
 	locks lockWindow
+
+	// Sources this process wrote, so a refused activation can tell its own
+	// pending parts from someone else's. See written_parts.go.
+	written writtenParts
 }
 
 // NewClient creates a new ADT client with the given configuration.
@@ -2919,8 +2923,14 @@ func explainTraceError(err error, id, toolType string, info *ABAPTrace) error {
 		return fmt.Errorf("trace %s is %s, and %s needs a trace recorded without aggregation; use hitlist: %w", id, kind, toolType, err)
 	}
 	if info != nil && !info.Complete && recordingRefused {
-		return fmt.Errorf("trace %s is incomplete (state %s %q): ADT cannot evaluate it, and Eclipse reports it as \"Trace has errors\". "+
-			"Record it again with Hit List aggregation, or a larger maximum file size: %w", id, info.State, info.StateText, err)
+		advice := "Record it again with Hit List aggregation, or a larger maximum file size"
+		if toolType == "statements" {
+			// The call tree cannot come from an aggregated trace, so aggregating is no way out.
+			advice = "The call tree needs a trace recorded without aggregation: record it again without aggregation " +
+				"but with a larger maximum file size, or trace a shorter program"
+		}
+		return fmt.Errorf("trace %s is incomplete (state %s %q): ADT cannot evaluate it, and Eclipse reports it as \"Trace has errors\". %s: %w",
+			id, info.State, info.StateText, advice, err)
 	}
 	if apiErr.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 		return fmt.Errorf("trace %s cannot be evaluated (416, often a trace cut off at its size limit): %w", id, err)

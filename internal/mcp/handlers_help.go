@@ -278,7 +278,8 @@ Profiler traces:
       sorted by own time (sort_by: net|gross|calls|none; a call tree keeps SAP's order by
       default) and cut to top (default 50, 0 for all; a cut call tree keeps its FIRST N events, and sort_by on it breaks the callLevel order; a missing callLevel means 0).
       raw=true returns ADT's XML, capped at 256 KB. For a long run, record with Hit List
-      aggregation: no aggregation or By Call Stack can fill the trace file within seconds.
+      aggregation: no aggregation or By Call Stack can fill the trace file within seconds
+      (statements needs no aggregation, so use a shorter program or a larger maximum file size).
 
 SQL traces:
   SAP(action="analyze", params={"type": "sql_trace_state"})

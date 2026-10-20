@@ -205,7 +205,7 @@ func (c *Client) Activate(ctx context.Context, objectURL string, objectName stri
 	if err != nil || !result.silentRefusal {
 		return result, err
 	}
-	return c.explainSilentRefusal(ctx, objectURL, result), nil
+	return c.explainSilentRefusal(ctx, objectURL, objectName, result), nil
 }
 
 // explainSilentRefusal turns SAP's wordless "activationExecuted=false" into a
@@ -215,7 +215,7 @@ func (c *Client) Activate(ctx context.Context, objectURL string, objectName stri
 //   - nothing inactive at or below the object -> success, "Nothing to activate"
 //   - inactive parts below it -> failure, the parts named, nothing activated
 //   - the list cannot be read -> failure, with that reason
-func (c *Client) explainSilentRefusal(ctx context.Context, objectURL string, refusal *ActivationResult) *ActivationResult {
+func (c *Client) explainSilentRefusal(ctx context.Context, objectURL, objectName string, refusal *ActivationResult) *ActivationResult {
 	list, err := c.GetInactiveObjects(ctx)
 	if err != nil {
 		refusal.Messages = append(refusal.Messages, ActivationResultMessage{
@@ -227,6 +227,11 @@ func (c *Client) explainSilentRefusal(ctx context.Context, objectURL string, ref
 	self, parts := inactivePartsOf(objectURL, list)
 	switch {
 	case len(parts) > 0:
+		// Option D: parts this very process wrote (and nobody changed since)
+		// go live with their parent; anything else is only named.
+		if res := c.activateOwnParts(ctx, objectURL, objectName, selfEntryOf(objectURL, list), parts); res != nil {
+			return res
+		}
 		refusal.Inactive = parts
 		refusal.Messages = append(refusal.Messages, ActivationResultMessage{
 			Type: "W",
@@ -255,13 +260,13 @@ func (c *Client) explainSilentRefusal(ctx context.Context, objectURL string, ref
 // and returns the entries strictly below it (the includes of a function group
 // or class, say). Deleted entries are not pending work and are left out.
 func inactivePartsOf(objectURL string, list []InactiveObjectRecord) (self bool, parts []InactiveObject) {
-	base := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(objectURL)), "/source/main")
+	base := normalizeActivationURI(objectURL)
 	seen := map[string]bool{}
 	for _, rec := range list {
 		if rec.Object == nil || rec.Object.Deleted {
 			continue
 		}
-		uri := strings.TrimSuffix(strings.ToLower(rec.Object.URI), "/source/main")
+		uri := normalizeActivationURI(rec.Object.URI)
 		switch {
 		case uri == base:
 			self = true
@@ -1536,4 +1541,17 @@ func (c *Client) RunATCCheck(ctx context.Context, objectURL string, variant stri
 	}
 
 	return worklist, nil
+}
+
+// selfEntryOf returns the inactive-list entry of the object itself, or nil
+// when the object has no inactive version of its own.
+func selfEntryOf(objectURL string, list []InactiveObjectRecord) *InactiveObject {
+	base := normalizeActivationURI(objectURL)
+	for _, rec := range list {
+		if rec.Object != nil && !rec.Object.Deleted && normalizeActivationURI(rec.Object.URI) == base {
+			o := *rec.Object
+			return &o
+		}
+	}
+	return nil
 }

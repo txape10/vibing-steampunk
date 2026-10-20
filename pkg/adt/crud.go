@@ -235,6 +235,7 @@ func (c *Client) UpdateSource(ctx context.Context, objectSourceURL string, sourc
 	if err != nil {
 		return fmt.Errorf("updating source: %w", err)
 	}
+	c.noteSourceWritten(objectSourceURL, source)
 
 	return nil
 }
@@ -1307,6 +1308,7 @@ func (c *Client) UpdateClassInclude(ctx context.Context, className string, inclu
 	if err != nil {
 		return fmt.Errorf("updating class include: %w", err)
 	}
+	c.noteSourceWritten(sourceURL, source)
 
 	return nil
 }

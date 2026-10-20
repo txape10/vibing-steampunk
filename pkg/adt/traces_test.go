@@ -249,9 +249,27 @@ func TestGetTraceAnalysis_SizeViolationSaysSo(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error for a trace cut off at its size limit")
 	}
-	for _, want := range []string{"incomplete", "Size violation", "416"} {
+	for _, want := range []string{"incomplete", "Size violation", "416", "Hit List aggregation"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not say %q: %v", want, err)
+		}
+	}
+}
+
+func TestGetTraceAnalysis_SizeViolationCallTreeAdvice(t *testing.T) {
+	c := traceServer(t)
+	for _, tool := range []string{"statements", "callTree"} {
+		_, err := c.GetTraceAnalysis(context.Background(), "6B952F02C3D211F1B8A20242AC110011", TraceGetOptions{ToolType: tool})
+		if err == nil {
+			t.Fatalf("%s: want an error for a trace cut off at its size limit", tool)
+		}
+		for _, want := range []string{"incomplete", "Size violation", "416", "without aggregation", "larger maximum file size"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: error does not say %q: %v", tool, want, err)
+			}
+		}
+		if strings.Contains(err.Error(), "Hit List aggregation") {
+			t.Errorf("%s: the call tree must not be told to aggregate: %v", tool, err)
 		}
 	}
 }
