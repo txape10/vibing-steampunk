@@ -125,9 +125,8 @@ func init() {
 	rootCmd.Flags().String("saml-password", "", "SAML/IAS password")
 	rootCmd.Flags().String("credential-cmd", "", "External command returning JSON {\"username\":...,\"password\":...} (space-separated argv, no shell quoting — use a wrapper script for paths with spaces)")
 
-
 	// Long calls
-	rootCmd.Flags().Int("call-timeout", 0, "Default budget in seconds of one long MCP call (ExecuteABAP, ABAP Unit, DeployFromFile, DeployZip) that names no params.timeout; at most 3600. 0 = none: each request to SAP is limited to 60s. A negative value is a startup error")
+	rootCmd.Flags().Int("call-timeout", 0, "Default budget in seconds of one long MCP call (ExecuteABAP, ABAP Unit including coverage, ATC, DeployFromFile, DeployZip) that names no params.timeout; at most 3600. 0 = none: each request to SAP is limited to 60s. A negative value is a startup error")
 
 	// Session keep-alive
 	rootCmd.Flags().Duration("keepalive", 0, "Session keep-alive interval (e.g., 60s, 5m). Prevents session timeout during idle periods. 0 = disabled (default; see #168)")
@@ -324,16 +323,27 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// Create and start MCP server
 	srv := mcp.NewServer(cfg)
 
-	switch cfg.Transport {
-	case "http":
-		addr := cfg.HTTPAddr
-		if cfg.Verbose {
-			fmt.Fprintf(os.Stderr, "[VERBOSE] Transport: Streamable HTTP on %s\n", addr)
+	return serveMCP(cmd, func() error {
+		switch cfg.Transport {
+		case "http":
+			addr := cfg.HTTPAddr
+			if cfg.Verbose {
+				fmt.Fprintf(os.Stderr, "[VERBOSE] Transport: Streamable HTTP on %s\n", addr)
+			}
+			return srv.ServeHTTP(addr)
+		default:
+			return srv.ServeStdio()
 		}
-		return srv.ServeHTTP(addr)
-	default:
-		return srv.ServeStdio()
-	}
+	})
+}
+
+// serveMCP runs the server once the command line is known to be good. From
+// here on an error is the server's, not the caller's spelling of a flag, so
+// cobra must not answer it with the usage text: an MCP client reads stderr as
+// the server's log, and a shutdown used to fill it with every flag vsp has.
+func serveMCP(cmd *cobra.Command, serve func() error) error {
+	cmd.SilenceUsage = true
+	return serve()
 }
 
 func resolveConfig(cmd *cobra.Command) {

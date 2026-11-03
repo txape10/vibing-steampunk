@@ -887,6 +887,9 @@ func (s *Server) registerDevTools(shouldRegister func(string) bool) {
 			mcp.WithNumber("max_results",
 				mcp.Description("Maximum number of findings to return (default: 100)"),
 			),
+			mcp.WithNumber("timeout",
+				mcp.Description(callTimeoutDescription),
+			),
 		), s.handleRunATCCheck)
 	}
 
@@ -2596,6 +2599,9 @@ func (s *Server) registerTestingQualityTools(shouldRegister func(string) bool) {
 			),
 			mcp.WithBoolean("include_long",
 				mcp.Description("Include tests with duration 'long' (default: false)"),
+			),
+			mcp.WithNumber("timeout",
+				mcp.Description(callTimeoutDescription),
 			),
 		), s.handleGetCodeCoverage)
 	}
