@@ -404,9 +404,17 @@ var searchCmd = &cobra.Command{
 	Short: "Search for ABAP objects",
 	Long: `Search for ABAP objects by name pattern.
 
+With --exact the query is a name, not a pattern: only objects whose name
+equals it (case-insensitive) are listed, still filtered by --type and --max.
+The name is sent without a wildcard. On a release that reads it as a prefix,
+at most 1000 matches are read: a full window is reported, as inconclusive
+when it held no equal name or as possibly incomplete when it did - add --type.
+
 Examples:
   vsp -s a4h search "ZCL_*"
-  vsp search "Z*ORDER*" --type CLAS --max 50`,
+  vsp search "Z*ORDER*" --type CLAS --max 50
+  vsp search ZCL_ORDER --exact
+  vsp search ZCL_ORDER --exact --type CLAS`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSearch,
 }
@@ -414,6 +422,7 @@ Examples:
 func init() {
 	searchCmd.Flags().StringVarP(&objectType, "type", "t", "", "Filter by object type (CLAS, PROG, INTF, etc.)")
 	searchCmd.Flags().IntVarP(&maxResults, "max", "m", 100, "Maximum results")
+	searchCmd.Flags().Bool("exact", false, "Only objects whose name equals the query (case-insensitive, no wildcards); a full 1000-match window is reported as inconclusive or incomplete, so add --type")
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -434,9 +443,37 @@ func runSearch(cmd *cobra.Command, args []string) error {
 			query, objectType, maxResults)
 	}
 
-	results, err := client.SearchObjectByType(ctx, query, objectType, maxResults)
+	exact, _ := cmd.Flags().GetBool("exact")
+	filtered, err := searchObjects(ctx, client, query, objectType, maxResults, exact)
 	if err != nil {
-		return fmt.Errorf("search failed: %w", err)
+		return err
+	}
+
+	// Output results
+	fmt.Printf("Found %d objects:\n", len(filtered))
+	for _, r := range filtered {
+		fmt.Printf("  %-10s %-40s %s\n", r.Type, r.Name, r.PackageName)
+	}
+
+	return nil
+}
+
+// searchObjects runs the search command's query: by pattern, or with exact
+// by name.
+func searchObjects(ctx context.Context, client *adt.Client, query, objectType string, maxResults int, exact bool) ([]adt.SearchResult, error) {
+	var results []adt.SearchResult
+	var err error
+	if exact {
+		var incomplete string
+		results, incomplete, err = client.SearchObjectExact(ctx, query, objectType, maxResults)
+		if err == nil && incomplete != "" {
+			fmt.Fprintf(os.Stderr, "Note: %s\n", incomplete)
+		}
+	} else {
+		results, err = client.SearchObjectByType(ctx, query, objectType, maxResults)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
 	}
 
 	// Filter by type if specified
@@ -450,13 +487,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Output results
-	fmt.Printf("Found %d objects:\n", len(filtered))
-	for _, r := range filtered {
-		fmt.Printf("  %-10s %-40s %s\n", r.Type, r.Name, r.PackageName)
-	}
-
-	return nil
+	return filtered, nil
 }
 
 // --- source command ---

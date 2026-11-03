@@ -117,7 +117,11 @@ High-level create (with source):
 		return mcp.NewToolResultText(`SAP(action="search") - Search for objects
 
   SAP(action="search", target="ZCL_*")
-  SAP(action="search", target="ZCL_*", params={"maxResults": 50})`)
+  SAP(action="search", target="ZCL_*", params={"maxResults": 50})
+  SAP(action="search", target="ZCL_ORDER", params={"exact": true, "type": "CLAS"})
+
+exact: only objects whose name equals the query (case-insensitive, no wildcard).
+A full 1000-match search window is reported as inconclusive or incomplete: add type.`)
 
 	case "query":
 		return mcp.NewToolResultText(`SAP(action="query") - Database queries

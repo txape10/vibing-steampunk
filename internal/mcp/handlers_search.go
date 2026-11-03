@@ -43,6 +43,9 @@ func (s *Server) routeSearchAction(ctx context.Context, action, objectType, obje
 	if v := getStringParam(params, "objectType"); v != "" {
 		args["objectType"] = v
 	}
+	if v, ok := getBoolParam(params, "exact"); ok {
+		args["exact"] = v
+	}
 	return s.callHandler(ctx, s.handleSearchObject, args)
 }
 
@@ -60,6 +63,25 @@ func (s *Server) handleSearchObject(ctx context.Context, request mcp.CallToolReq
 	}
 
 	objectType, _ := request.GetArguments()["objectType"].(string)
+
+	// Exact: only the objects whose name is the query, whatever their type.
+	// Marked incomplete when the search window came back full.
+	if exact, _ := request.GetArguments()["exact"].(bool); exact {
+		results, incomplete, err := s.adtClient.SearchObjectExact(ctx, query, objectType, maxResults)
+		if err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to search: %v", err)), nil
+		}
+		if incomplete == "" {
+			output, _ := json.MarshalIndent(results, "", "  ")
+			return mcp.NewToolResultText(string(output)), nil
+		}
+		output, _ := json.MarshalIndent(map[string]any{
+			"results":    results,
+			"incomplete": incomplete,
+		}, "", "  ")
+		return mcp.NewToolResultText(string(output)), nil
+	}
+
 	results, err := s.adtClient.SearchObjectByType(ctx, query, objectType, maxResults)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to search: %v", err)), nil
