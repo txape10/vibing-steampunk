@@ -200,7 +200,7 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 	}
 
 	// 8. Unlock
-	err = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
+	err = c.unlockAfterWrite(ctx, objectURL, lockResult.LockHandle)
 	unlocked = true
 	if err != nil {
 		return &DeployResult{
@@ -435,7 +435,7 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 	}
 
 	// 7. Unlock
-	err = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
+	err = c.unlockAfterWrite(ctx, objectURL, lockResult.LockHandle)
 	unlocked = true
 	if err != nil {
 		return &DeployResult{

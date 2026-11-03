@@ -67,6 +67,10 @@ func (t *Transport) isolatingNow() bool {
 // returns, not when the body is closed, so a caller that forgets to close a
 // body cannot hold it forever.
 //
+// A stateless request under a call deadline (WithCallDeadline) always goes
+// isolated: it may run for minutes, so it neither holds the gate nor retires a
+// finished chain's context, and the cookies of its response are not learned.
+//
 // Requests into the context wait their turn only as long as their own context
 // lasts: a long stateful request (DebuggerListen, up to its timeout) holds the
 // gate for as long, and every other stateful or unmarked request on this client
@@ -75,10 +79,16 @@ func (t *Transport) isolatingNow() bool {
 func (t *Transport) do(req *http.Request) (*http.Response, error) {
 	marker := req.Header.Get("X-sap-adt-sessiontype")
 	if marker == "stateless" {
+		// A request with a call deadline may run for minutes. Holding the
+		// gate shared that long would keep every LOCK from opening a window,
+		// so it goes isolated: without the context id, never touching the gate.
+		if callDeadlineGoverns(req.Context()) {
+			return t.doIsolated(req)
+		}
 		if t.contextGate.tryShared() {
 			if !t.isolating() {
 				defer t.contextGate.releaseShared()
-				return t.httpClient.Do(req)
+				return t.send(req)
 			}
 			t.contextGate.releaseShared()
 		}
@@ -93,7 +103,7 @@ func (t *Transport) do(req *http.Request) (*http.Response, error) {
 		return nil, &url.Error{Op: urlErrorOp(req.Method), URL: req.URL.String(), Err: err}
 	}
 	defer t.contextGate.unlock()
-	return t.httpClient.Do(req)
+	return t.send(req)
 }
 
 // doIsolated sends a stateless request without the stateful context's id and
@@ -108,7 +118,7 @@ func (t *Transport) doIsolated(req *http.Request) (*http.Response, error) {
 	jar := t.jar
 	t.jarMu.RUnlock()
 	if !ok || jar == nil {
-		return t.httpClient.Do(req)
+		return t.send(req)
 	}
 	for _, c := range jar.Cookies(req.URL) {
 		if c.Name != "sap-contextid" {
@@ -118,6 +128,9 @@ func (t *Transport) doIsolated(req *http.Request) (*http.Response, error) {
 	// A client of its own, built field by field: copying *hc would read its
 	// Jar while clearSAPSessionCookies may be replacing it.
 	isolated := &http.Client{Transport: hc.Transport, CheckRedirect: hc.CheckRedirect, Timeout: hc.Timeout}
+	if callDeadlineGoverns(req.Context()) {
+		isolated.Timeout = 0
+	}
 	return isolated.Do(req)
 }
 

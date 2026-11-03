@@ -63,7 +63,7 @@ func (c *Client) WithObjectLock(ctx context.Context, opName, lockURL, transport 
 	}
 	c.sourceCache.InvalidateByURL(lockURL)
 
-	if err := c.UnlockObject(ctx, lockURL, lock.LockHandle); err != nil {
+	if err := c.unlockAfterWrite(ctx, lockURL, lock.LockHandle); err != nil {
 		// The handle is spent or the unlock failed; either way the deferred
 		// release must not send a second UNLOCK for a handle already tried.
 		unlocked = true

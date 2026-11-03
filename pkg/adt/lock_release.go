@@ -19,6 +19,14 @@ func failureCleanupContext(ctx context.Context) (context.Context, context.Cancel
 	return context.WithTimeout(context.WithoutCancel(ctx), unlockAfterFailureTimeout)
 }
 
+// CleanupContext is failureCleanupContext for callers outside this package: a
+// context for a compensating request that still goes out when ctx has been
+// cancelled or has run out, bounded by a deadline of its own. It keeps ctx's
+// values, including mutation-policy marks.
+func CleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return failureCleanupContext(ctx)
+}
+
 // releaseLockAfterFailure releases a lock taken for a mutation that has since
 // failed.
 //
@@ -88,6 +96,21 @@ func joinLockReleaseErr(err error, advice string) error {
 		return fmt.Errorf("%s", advice)
 	}
 	return fmt.Errorf("%w — %s", err, advice)
+}
+
+// unlockAfterWrite releases the lock of a write that went through. When the
+// call's own context has run out by now (a long call that spent its budget on
+// the write), the plain UNLOCK would die before a byte is sent and leave the
+// object locked, so it is retried on a detached context.
+func (c *Client) unlockAfterWrite(ctx context.Context, objectURL, lockHandle string) error {
+	err := c.UnlockObject(ctx, objectURL, lockHandle)
+	if err == nil || ctx.Err() == nil {
+		return err
+	}
+	if retryErr := c.releaseLockAfterFailure(ctx, objectURL, lockHandle); retryErr == nil {
+		return nil
+	}
+	return err
 }
 
 // strandedLockAdvice explains an unlock that failed, in the terms a user

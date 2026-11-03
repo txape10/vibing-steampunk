@@ -424,7 +424,7 @@ func (c *Client) EditSourceWithOptions(ctx context.Context, objectURL, oldString
 	}
 
 	// 7. Unlock
-	err = c.UnlockObject(ctx, lockURL, lockResult.LockHandle)
+	err = c.unlockAfterWrite(ctx, lockURL, lockResult.LockHandle)
 	unlocked = true
 	if err != nil {
 		result.Message = fmt.Sprintf("Source updated but unlock failed: %v", err)
