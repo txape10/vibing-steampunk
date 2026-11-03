@@ -623,6 +623,7 @@ SAP_PASSWORD=secret
 | `--allow-transportable-edits` | `SAP_ALLOW_TRANSPORTABLE_EDITS` | Enable editing transportable objects |
 | `--allowed-transports` | `SAP_ALLOWED_TRANSPORTS` | Whitelist transports (wildcards: `A4HK*`) |
 | `--allowed-packages` | `SAP_ALLOWED_PACKAGES` | Whitelist packages (wildcards: `Z*,$TMP`) |
+| `--call-timeout` | `SAP_CALL_TIMEOUT` | Budget in seconds (or a Go duration, max 1h) for long calls: ExecuteABAP, RunUnitTests, DeployFromFile/ImportFromFile, DeployZip, ATC, coverage. Default 0 = none; a call can override it with `timeout` |
 | — | `VSP_CACHE` | Keep GET (and stable-table data preview) answers; see "Response cache" |
 | — | `VSP_CACHE_TTL` | How long a cached answer is trusted (default: `10m`) |
 | — | `VSP_CACHE_PATH` | Persist the cache on SQLite instead of in memory |

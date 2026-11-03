@@ -29,7 +29,7 @@ These tools replace 11 granular read/write operations with intelligent parameter
 
 | Tool | Description | Mode |
 |------|-------------|------|
-| `SearchObject` | Quick search for ABAP objects by name pattern | Focused |
+| `SearchObject` | Quick search for ABAP objects by name pattern (`exact=true` keeps only the object with that exact name) | Focused |
 | `GrepObjects` | Regex search across multiple objects (array of URLs) | Focused |
 | `GrepPackages` | Regex search across packages with recursive subpackage support | Focused |
 | `GrepObject` | Regex search in single object | Expert |
@@ -57,7 +57,7 @@ These tools replace 11 granular read/write operations with intelligent parameter
 | `GetTable` | Get table structure definition | Focused |
 | `GetTableContents` | Get table data (supports SQL filtering; `all_rows` lifts the row cap to 90,000) | Focused |
 | `GetStructure` | Get structure definition | Expert |
-| `GetPackage` | Get package contents | Focused |
+| `GetPackage` | Get package contents (`read DEVC` with `inventory=true` lists TADIR/TDEVC/abapGit content) | Focused |
 | `GetTransaction` | Get transaction details | Expert |
 | `GetTypeInfo` | Get data type information | Expert |
 | `GetCDSDependencies` | Get CDS view dependency tree | Focused |
@@ -95,7 +95,7 @@ These tools replace 11 granular read/write operations with intelligent parameter
 | `SyntaxCheck` | Check source code for syntax errors | Focused |
 | `Activate` | Activate an ABAP object | Expert |
 | `ActivatePackage` | Batch activate all inactive objects in package | Focused |
-| `RunUnitTests` | Execute ABAP Unit tests | Focused |
+| `RunUnitTests` | Execute ABAP Unit tests (accepts `timeout`, seconds, max 3600) | Focused |
 | `RunATCCheck` | Run ATC code quality checks | Focused |
 | `CompareSource` | Unified diff between any two ABAP objects | Focused |
 | `CloneObject` | Copy PROG/CLAS/INTF to new name | Focused |
