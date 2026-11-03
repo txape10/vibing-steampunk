@@ -19,7 +19,7 @@ import (
 //
 // Data preview queries are POSTs and are kept only when every table they
 // read is one that changes with development, not with business — DD03L,
-// TADIR, CROSS, T100. A query on the logs, the spool or the jobs is never
+// CROSS, T100. A query on the logs, the spool or the jobs is never
 // kept: those change under the reader, and a stale row there is a wrong
 // answer rather than a slow one.
 
@@ -202,11 +202,13 @@ func cacheable(path string, opts *RequestOptions) bool {
 // client empties the cache anyway.
 var stableTables = map[string]bool{
 	"DD02L": true, "DD02T": true, "DD03L": true, "DD04L": true, "DD04T": true, "DD40L": true, "DD01L": true, "DD07L": true, "DD07T": true,
-	"TADIR": true, "TDEVC": true, "TDEVCT": true, "TRDIR": true, "TRDIRT": true, "D010INC": true, "D010TAB": true,
+	"TDEVCT": true, "TRDIR": true, "TRDIRT": true, "D010INC": true, "D010TAB": true,
 	"CROSS": true, "WBCROSSGT": true, "WBCROSSGTX": true, "WBCROSSI": true,
 	"TFDIR": true, "TFTIT": true, "ENLFDIR": true, "SEOCLASS": true, "SEOCLASSDF": true, "SEOCLASSTX": true, "SEOMETAREL": true, "SEOCOMPO": true, "SEOCOMPODF": true,
 	"T100": true, "T100T": true, "DOKIL": true, "DOKTL": true, "DOKHL": true,
 	"TSTC": true, "TSTCT": true, "CUS_IMGACH": true, "CUS_IMGACT": true, "TNODEIMG": true, "TNODEIMGR": true, "TNODEIMGT": true,
+	// TADIR and TDEVC are not here either: the package inventory and the object
+	// listings read them, and an object created by someone else must show at once.
 	// E070/E071/E07T are not here: a request changes state (released, objects
 	// added) while the cache is warm, and a stale listing would hide it.
 }

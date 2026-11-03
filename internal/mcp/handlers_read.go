@@ -33,7 +33,11 @@ func (s *Server) routeReadAction(ctx context.Context, action, objectType, object
 		case "TABL":
 			return s.callHandler(ctx, s.handleGetTable, map[string]any{"table_name": objectName})
 		case "DEVC":
-			return s.callHandler(ctx, s.handleGetPackage, map[string]any{"package_name": objectName})
+			args := map[string]any{"package_name": objectName}
+			if v, ok := getBoolParam(params, "inventory"); ok {
+				args["inventory"] = v
+			}
+			return s.callHandler(ctx, s.handleGetPackage, args)
 		case "MSAG":
 			return s.callHandler(ctx, s.handleGetMessages, map[string]any{"message_class": objectName})
 		case "TRAN":
@@ -382,6 +386,16 @@ func (s *Server) handleGetPackage(ctx context.Context, request mcp.CallToolReque
 	packageName, ok := request.GetArguments()["package_name"].(string)
 	if !ok || packageName == "" {
 		return newToolResultError("package_name is required"), nil
+	}
+
+	// The inventory: TADIR objects with author and date, subpackages, and
+	// the abapGit repository registered for the package, in one call.
+	if inventory, _ := request.GetArguments()["inventory"].(bool); inventory {
+		inv, err := s.adtClient.PackageInventory(ctx, packageName)
+		if err != nil {
+			return newToolResultError(fmt.Sprintf("Failed to read package inventory: %v", err)), nil
+		}
+		return newToolResultJSON(inv), nil
 	}
 
 	pkg, err := s.adtClient.GetPackage(ctx, packageName)

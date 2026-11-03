@@ -37,6 +37,7 @@ Read metadata:
   SAP(action="read", target="TABL ZTABLE")          - Table definition
   SAP(action="read", target="TABL_CONTENTS ZTABLE") - Table data
   SAP(action="read", target="DEVC $TMP")             - Package info
+  SAP(action="read", target="DEVC $TMP", params={"inventory": true}) - TADIR objects (author, date), subpackages, abapGit repo
   SAP(action="read", target="MSAG ZMSG_CLASS")       - Message class
   SAP(action="read", target="PROG ZREPORT", params={"type": "description"}) - SE80 short description
   SAP(action="read", target="CLAS ZCL_X", params={"type": "param_texts", "method": "M", "language": "EN"}) - SE24 parameter short texts (method/language optional); target "INTF ZIF_X" for an interface
