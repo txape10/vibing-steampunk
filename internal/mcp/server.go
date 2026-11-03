@@ -112,6 +112,11 @@ type Config struct {
 	// Returns fresh cookies. Passed through to adt.Config.
 	ReauthFunc func(ctx context.Context) (map[string]string, error)
 
+	// CallTimeout is the default budget of one long call (ExecuteABAP, ABAP
+	// Unit, a deploy) when the call names none in params.timeout. Zero leaves
+	// each request to SAP bounded by the client's per-request timeout only.
+	CallTimeout time.Duration
+
 	// Session keep-alive interval (0 = disabled)
 	// Sends periodic pings to prevent session timeout during idle periods.
 	// Useful for cookie/browser-auth where sessions expire server-side.

@@ -28,6 +28,9 @@ func (s *Server) routeDevToolsAction(ctx context.Context, action, objectType, ob
 			if v, ok := getBoolParam(params, "include_long"); ok {
 				args["include_long"] = v
 			}
+			if v, ok := params["timeout"]; ok {
+				args["timeout"] = v
+			}
 			return s.callHandler(ctx, s.handleRunUnitTests, args)
 		}
 	}
@@ -164,6 +167,10 @@ func (s *Server) handleActivatePackage(ctx context.Context, request mcp.CallTool
 }
 
 func (s *Server) handleRunUnitTests(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return s.longCall(ctx, request, "RunUnitTests", s.runUnitTests)
+}
+
+func (s *Server) runUnitTests(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	objectURL, ok := request.GetArguments()["object_url"].(string)
 	if !ok || objectURL == "" {
 		return newToolResultError("object_url is required"), nil

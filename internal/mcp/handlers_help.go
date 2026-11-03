@@ -267,6 +267,8 @@ Transport analysis:
 
 Execute ABAP:
   SAP(action="analyze", params={"type": "execute_abap", "code": "WRITE 'Hello'."})
+  Long calls (execute_abap, RunUnitTests, DeployFromFile, DeployZip) accept params.timeout (seconds, max 3600):
+  the whole call may take that long instead of 60s per request. Default: server --call-timeout / SAP_CALL_TIMEOUT.
 
 Runtime errors:
   SAP(action="analyze", params={"type": "list_dumps"})

@@ -76,7 +76,7 @@ func invariantArgs() map[string]any {
 		"fields": `[{"name":"F1","type":"CHAR","length":1,"key":true}]`, "text": "demo", "parameter": "IV_A", "method": "M", "app_name": "ZDEMO", "path": "x",
 		"binding_name": "ZDEMO", "version": "0001", "language": "EN", "type": "PROG", "title": "demo",
 		"include_type": "testclasses", "message_class": "ZDEMO", "messages": "[]", "short": "a", "short_text": "a",
-		"selection_texts": "{}", "text_symbols": "{}", "settings": "{}", "dry_run": false,
+		"selection_texts": "{}", "text_symbols": "{}", "settings": "{}", "dry_run": false, "timeout": 5.0,
 		"program_name": "ZDEMO_INV", "class_source": "CLASS zcl_demo_inv DEFINITION. ENDCLASS.", "type_name": "CHAR10",
 		"data_type": "CHAR", "primary_table": "T000", "row_type_name": "BAPIRET2", "code": "WRITE 1.",
 		"service_name": "ZDEMO_SRV", "oldName": "ZDEMO_INV", "newName": "ZDEMO_NEW", "indentation": true, "style": "keywordUpper", "test_source": "x", "packageName": "$TMP",

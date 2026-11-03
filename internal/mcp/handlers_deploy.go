@@ -39,6 +39,10 @@ var objectTypeMapping = map[string]struct {
 //	Phase 2: Upload source code (Lock → UpdateSource → Unlock, NO syntax check)
 //	Phase 3: Mass activate all objects
 func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return s.longCall(ctx, request, "DeployZip", s.deployZip)
+}
+
+func (s *Server) deployZip(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// Parse parameters
 	source, _ := request.GetArguments()["source"].(string)
 	if source == "" {

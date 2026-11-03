@@ -126,6 +126,9 @@ func init() {
 	rootCmd.Flags().String("credential-cmd", "", "External command returning JSON {\"username\":...,\"password\":...} (space-separated argv, no shell quoting — use a wrapper script for paths with spaces)")
 
 
+	// Long calls
+	rootCmd.Flags().Int("call-timeout", 0, "Default budget in seconds of one long MCP call (ExecuteABAP, ABAP Unit, DeployFromFile, DeployZip) that names no params.timeout; at most 3600. 0 = none: each request to SAP is limited to 60s. A negative value is a startup error")
+
 	// Session keep-alive
 	rootCmd.Flags().Duration("keepalive", 0, "Session keep-alive interval (e.g., 60s, 5m). Prevents session timeout during idle periods. 0 = disabled (default; see #168)")
 
@@ -222,6 +225,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err := validateConfig(); err != nil {
 		return err
 	}
+
+	// Long-call budget of the MCP server: flag > SAP_CALL_TIMEOUT env
+	callTimeout, err := resolveCallTimeout(cmd)
+	if err != nil {
+		return err
+	}
+	cfg.CallTimeout = callTimeout
 
 	// Browser-based SSO authentication (must run before processCookieAuth)
 	if err := processBrowserAuth(cmd); err != nil {
