@@ -673,17 +673,17 @@ func runGraph(cmd *cobra.Command, args []string) error {
 
 	// For transactions: resolve TCODE → program name first
 	if objType == "TRAN" || objType == "TCODE" {
-		result, err := client.RunQuery(ctx,
-			fmt.Sprintf("SELECT PGMNA FROM TSTC WHERE TCODE = '%s'", name), 1)
-		if err == nil && result != nil && len(result.Rows) > 0 {
-			pgm := fmt.Sprintf("%v", result.Rows[0]["PGMNA"])
-			fmt.Fprintf(os.Stderr, "Transaction %s → Program %s\n\n", name, pgm)
-			name = strings.TrimSpace(pgm)
-			objType = "PROG"
-			objURI = "/sap/bc/adt/programs/programs/" + url.PathEscape(strings.ToLower(name))
-		} else {
-			return fmt.Errorf("transaction %s not found in TSTC", name)
+		tran, err := client.GetTransaction(ctx, name)
+		if err != nil {
+			return fmt.Errorf("resolving transaction %s: %w", name, err)
 		}
+		if tran.Program == "" {
+			return fmt.Errorf("transaction %s starts no program (kind %q)", name, tran.Kind)
+		}
+		fmt.Fprintf(os.Stderr, "Transaction %s → Program %s\n\n", name, tran.Program)
+		name = strings.TrimSpace(tran.Program)
+		objType = "PROG"
+		objURI = "/sap/bc/adt/programs/programs/" + url.PathEscape(strings.ToLower(name))
 	}
 
 	// Try ADT call graph first, fallback to WBCROSSGT

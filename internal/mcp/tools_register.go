@@ -297,7 +297,7 @@ func (s *Server) registerReadTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("GetTransaction") {
 		s.mcpServer.AddTool(mcp.NewTool("GetTransaction",
-			mcp.WithDescription("Retrieve ABAP transaction details"),
+			mcp.WithDescription("Retrieve ABAP transaction details: description, package, and what it starts (program, screen, parameter, called transaction, OO class/method). Read from VIT (header) and TSTC/TSTCP (data preview)"),
 			mcp.WithString("transaction_name",
 				mcp.Required(),
 				mcp.Description("Name of the ABAP transaction"),
