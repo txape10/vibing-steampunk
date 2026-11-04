@@ -24,6 +24,7 @@ type enhoStub struct {
 	sourceStatus int
 	xhbActive    string
 	xhbStatus    int
+	hookStatus   int
 	sqlBodies    []string
 	paths        []string
 	badiImplRows [][]string
@@ -56,6 +57,10 @@ func (s *enhoStub) handler(w http.ResponseWriter, r *http.Request) {
 		s.sqlBodies = append(s.sqlBodies, body)
 		switch strings.ToUpper(stubFromTable.FindStringSubmatch(body)[1]) {
 		case "ENHINCINX":
+			if s.hookStatus != 0 {
+				w.WriteHeader(s.hookStatus)
+				return
+			}
 			_, _ = io.WriteString(w, dpXML([]string{"ENHNAME", "PROGRAMNAME", "ID", "FULL_NAME"},
 				[][]string{{"ZDEMO_ENH", "SAPLDEMO", "2 ", `\PR:SAPLDEMO\FO:B\SE:END\EI`}, {"ZDEMO_ENH", "SAPLDEMO", "1 ", `\PR:SAPLDEMO\FO:A\SE:END\EI`}}))
 		case "BADI_IMPL":
@@ -99,6 +104,17 @@ func TestGetEnhancement_SourcePlugin(t *testing.T) {
 	}
 	if !strings.HasPrefix(text, "* ENHANCEMENT 1 hooked at ") || !strings.Contains(text, "ENDENHANCEMENT.") {
 		t.Fatalf("source text should lead with the hook points: %q", text)
+	}
+}
+
+func TestGetEnhancementText_HookFailureLeavesANote(t *testing.T) {
+	stub := &enhoStub{search: enhoSearchXHH, hookStatus: http.StatusForbidden}
+	text, err := stub.client(t).getEnhancementText(context.Background(), "ZDEMO_ENH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(text, "* NOTE: ") || !strings.Contains(text, "ENDENHANCEMENT.") {
+		t.Fatalf("a missing hook list must be visible in the text: %q", text)
 	}
 }
 

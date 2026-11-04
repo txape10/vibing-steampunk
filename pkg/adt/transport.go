@@ -68,6 +68,10 @@ type TransportInfo struct {
 	Transports   []TransportRequest `json:"transports,omitempty"`
 	LockedByUser string             `json:"lockedByUser,omitempty"`
 	LockedInTask string             `json:"lockedInTask,omitempty"`
+	// Candidates are the open requests the object could go into, as the
+	// transport check lists them (REQUESTS); Messages are its MESSAGES.
+	Candidates []TransportCandidate `json:"candidates,omitempty"`
+	Messages   []string             `json:"messages,omitempty"`
 }
 
 const (
@@ -261,14 +265,21 @@ func parseTransportInfo(data []byte) (*TransportInfo, error) {
 		return nil, fmt.Errorf("parsing transport info: %w", err)
 	}
 
-	return &TransportInfo{
+	info := &TransportInfo{
 		PGMID:      resp.Values.Data.PGMID,
 		Object:     resp.Values.Data.Object,
 		ObjectName: resp.Values.Data.ObjectName,
 		Operation:  resp.Values.Data.Operation,
 		DevClass:   resp.Values.Data.DevClass,
 		Recording:  resp.Values.Data.Recording,
-	}, nil
+	}
+	// REQUESTS, LOCKS and MESSAGES: the same document the transport choice reads.
+	if tc, err := parseTransportCheck(data); err == nil {
+		info.Candidates = tc.Candidates
+		info.LockedInTask = tc.LockedIn
+		info.Messages = tc.Messages
+	}
+	return info, nil
 }
 
 // CreateTransport creates a new transport request.

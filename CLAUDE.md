@@ -2476,6 +2476,12 @@ the code permanently — it is the fix, not a placeholder.
 - Review: APPROVE, 0 CRITICAL/HIGH; 3 MEDIUM (silent failed active read, non-deterministic cap, untested caps) fixed. Tests mutation-checked on the name whitelist.
 - **Verified live (2026-11-04)**: dev: `ZENH_DELVRY` (XHH, 2 hooks at SAPLV56K), `ZENH_ME_PROCESS_PO_CUST2` (XHB, class ZCL_IM_ME_PROCESS_PO_CUST2, 4 siblings), `badi_implementations ME_PROCESS_PO_CUST` (5, all active), non-existent name -> "not found", quote payload refused locally. Prod (read-only): same BAdI (4) and `ZENH_DELVRY`. Not exercised: an inactive implementation, the 25/100 caps (unit tests only).
 
+### 2bl. Optional follow-ups to 2bk -- `get_transport_info` exposes REQUESTS/LOCKS/MESSAGES; ENHO hook-read failure leaves a note (2026-11-04)
+- `parseTransportInfo` (`pkg/adt/transport.go`) used to discard what `/cts/transportchecks` answers beyond the header. It now reuses `parseTransportCheck` (the parser behind the transport auto-choice, 2z) and fills `TransportInfo.Candidates`, `LockedInTask`, `Messages`; fail-open (a parse error keeps the plain header). `handleGetTransportInfo` prints "Locked in request/task", "Open requests the object could go into" and SAP's messages. This probably explains the oddity noted in 2ar ("`get_transport_info` did not list the test request").
+- `GetEnhancementText` (XHH): a failed `ENHINCINX` read now prepends `* NOTE: ...` instead of silently showing no hook points.
+- Tests: `TestParseTransportInfo_RequestsLocksMessages`, `TestGetEnhancementText_HookFailureLeavesANote`. Code review: APPROVE.
+- **Verified live (2026-11-04)**: dev, `get_transport_info` on `ZCL_VSP_RFC_SERVICE` (package `ZABAP01`, not `ZADT_VSP`) lists `S4DK928661 ZRCHAPADO ZADT_VSP` as candidate; `read ENHO ZENH_DELVRY` unchanged (no NOTE). `get_transport_info` is refused on the read-only production connection (type X, by design), so prod was not exercised. Not exercised: the LockedInTask line and SAP messages (unit tests only).
+
 ## Known Open Issues (Not Fixed)
 
 ### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused (2026-09-22); MITIGATED in vsp by 2av (2026-10-16)

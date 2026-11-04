@@ -130,6 +130,33 @@ func TestParseUserTransportsEmpty(t *testing.T) {
 	}
 }
 
+func TestParseTransportInfo_RequestsLocksMessages(t *testing.T) {
+	xmlData := `<?xml version="1.0" encoding="utf-8"?>
+<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">
+  <asx:values>
+    <DATA>
+      <OBJECT>CLAS</OBJECT><OBJECTNAME>ZCL_DEMO</OBJECTNAME><DEVCLASS>ZDEMO</DEVCLASS><RECORDING>X</RECORDING>
+      <REQUESTS><CTS_REQUEST><REQ_HEADER><TRKORR>TR-EXAMPLE-1</TRKORR><TRFUNCTION>K</TRFUNCTION><TRSTATUS>D</TRSTATUS><AS4USER>TESTUSER</AS4USER><AS4TEXT>Demo</AS4TEXT></REQ_HEADER></CTS_REQUEST></REQUESTS>
+      <LOCKS><CTS_OBJECT_LOCK><REQ_HEADER><TRKORR>TR-EXAMPLE-1</TRKORR></REQ_HEADER></CTS_OBJECT_LOCK></LOCKS>
+      <MESSAGES><CTS_MESSAGE><SEVERITY>I</SEVERITY><TEXT> already locked </TEXT></CTS_MESSAGE></MESSAGES>
+    </DATA>
+  </asx:values>
+</asx:abap>`
+	info, err := parseTransportInfo([]byte(xmlData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Candidates) != 1 || info.Candidates[0].Number != "TR-EXAMPLE-1" || info.Candidates[0].Owner != "TESTUSER" {
+		t.Fatalf("REQUESTS must be exposed: %+v", info.Candidates)
+	}
+	if info.LockedInTask != "TR-EXAMPLE-1" {
+		t.Fatalf("LOCKS must be exposed: %q", info.LockedInTask)
+	}
+	if len(info.Messages) != 1 || info.Messages[0] != "already locked" {
+		t.Fatalf("MESSAGES must be exposed: %v", info.Messages)
+	}
+}
+
 func TestParseTransportInfo(t *testing.T) {
 	xmlData := `<?xml version="1.0" encoding="utf-8"?>
 <asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">

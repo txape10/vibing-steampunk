@@ -112,6 +112,9 @@ func (c *Client) getEnhancementText(ctx context.Context, name string) (string, e
 		return string(data), nil
 	}
 	var b strings.Builder
+	if enh.Note != "" {
+		fmt.Fprintf(&b, "* NOTE: %s\n", enh.Note)
+	}
 	for _, h := range enh.Hooks {
 		fmt.Fprintf(&b, "* ENHANCEMENT %d hooked at %s in %s\n", h.ID, h.Position, h.Program)
 	}

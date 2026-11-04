@@ -140,6 +140,20 @@ func (s *Server) handleGetTransportInfo(ctx context.Context, request mcp.CallToo
 			fmt.Fprintf(&sb, " in task %s", info.LockedInTask)
 		}
 		sb.WriteString("\n")
+	} else if info.LockedInTask != "" {
+		fmt.Fprintf(&sb, "\nLocked in request/task: %s\n", info.LockedInTask)
+	}
+	if len(info.Candidates) > 0 {
+		sb.WriteString("\nOpen requests the object could go into:\n")
+		for _, c := range info.Candidates {
+			fmt.Fprintf(&sb, "  %s  %s  %s\n", c.Number, c.Owner, c.Description)
+		}
+	}
+	for _, m := range info.Messages {
+		fmt.Fprintf(&sb, "\nMessage: %s", m)
+	}
+	if len(info.Messages) > 0 {
+		sb.WriteString("\n")
 	}
 
 	return mcp.NewToolResultText(sb.String()), nil
