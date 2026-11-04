@@ -9,6 +9,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
+	"github.com/oisee/vibing-steampunk/pkg/saprfc"
 )
 
 // Background jobs (SM37) over free SQL: TBTCO for the job, TBTCP for its steps.
@@ -25,6 +26,8 @@ func (s *Server) routeJobsAction(ctx context.Context, action, objectType, object
 		return s.callHandler(ctx, s.handleSpoolList, params)
 	case "spool_read":
 		return s.callHandler(ctx, s.handleSpoolRead, params)
+	case "job_log":
+		return s.callHandler(ctx, s.handleJobLog, params)
 	}
 	return nil, false, nil
 }
@@ -96,7 +99,7 @@ func jobDateParam(args map[string]any, keys ...string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid date %q: use YYYY-MM-DD", v)
 }
 
-const noteSpoolInFiles = "This spool request's content is kept in a file on the application server, not in TST03; only XBP over RFC can read it."
+const noteSpoolInFiles = "This spool request's content is kept in a file on the application server, not in TST03; read it with via=\"rfc\" (XBP)."
 
 type spoolListResult struct {
 	Requests []adt.SpoolRequest `json:"requests"`
@@ -162,9 +165,25 @@ func (s *Server) handleSpoolRead(ctx context.Context, request mcp.CallToolReques
 	if number <= 0 {
 		return newToolResultError("spool_read needs number: the spool request number"), nil
 	}
+	via := strings.ToLower(firstStringParam(args, "via"))
+	switch via {
+	case "", "auto", "sql", "rfc":
+	default:
+		return newToolResultError(fmt.Sprintf("via %q is not valid: use auto, sql or rfc", via)), nil
+	}
+	if via == "rfc" {
+		return s.spoolReadRFC(ctx, number)
+	}
 	content, err := s.adtClient.Spool(ctx, number)
 	if err != nil {
-		if content != nil && content.Request.Storage != "" && content.Request.Storage != "D" {
+		inFile := content != nil && content.Request.Storage != "" && content.Request.Storage != "D"
+		if inFile && via != "sql" {
+			if refused := s.refuseUnderSafety(adt.OpWorkflow, "SpoolReadRFC"); refused != nil {
+				return newToolResultError(fmt.Sprintf("Spool request %d is kept in a file, which only XBP over RFC can read, and RFC is blocked by the safety configuration.", number)), nil
+			}
+			return s.spoolReadRFC(ctx, number)
+		}
+		if inFile {
 			return newToolResultError(fmt.Sprintf("Failed to read spool request %d: %v. %s", number, err, noteSpoolInFiles)), nil
 		}
 		return newToolResultError(fmt.Sprintf("Failed to read spool request %d: %v", number, err)), nil
@@ -178,4 +197,62 @@ func (s *Server) handleSpoolRead(ctx context.Context, request mcp.CallToolReques
 		res.Notes = append(res.Notes, fmt.Sprintf("Document type %q is not an ABAP list; its %d bytes are not shown.", content.Request.DocType, len(content.Raw)))
 	}
 	return newToolResultJSON(res), nil
+}
+
+type spoolReadRFCResult struct {
+	Number int      `json:"number"`
+	Via    string   `json:"via"`
+	Lines  []string `json:"lines"`
+}
+
+// spoolReadRFC reads a spool request through XBP. The RFC user's own spool
+// authorization applies, and a read-only connection refuses it.
+func (s *Server) spoolReadRFC(ctx context.Context, number int) (*mcp.CallToolResult, error) {
+	if refused := s.refuseUnderSafety(adt.OpWorkflow, "SpoolReadRFC"); refused != nil {
+		return refused, nil
+	}
+	c, err := s.ensureRFCClient(ctx)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to read spool request %d over RFC: %v", number, err)), nil
+	}
+	lines, err := saprfc.ReadSpoolRequest(ctx, c, number)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to read spool request %d over RFC: %v", number, err)), nil
+	}
+	return newToolResultJSON(spoolReadRFCResult{Number: number, Via: "rfc", Lines: lines}), nil
+}
+
+type jobLogResult struct {
+	Job     string               `json:"job"`
+	Count   string               `json:"count"`
+	Entries []saprfc.JobLogEntry `json:"entries"`
+	Notes   []string             `json:"notes,omitempty"`
+}
+
+func (s *Server) handleJobLog(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+	name := strings.ToUpper(firstStringParam(args, "job", "job_name", "name"))
+	count := firstStringParam(args, "count", "job_count", "jobcount")
+	if name == "" || count == "" {
+		return newToolResultError("job_log needs job (the name) and count (the job count from job_list)"), nil
+	}
+	if !adt.ValidJobName(name) {
+		return newToolResultError(fmt.Sprintf("invalid job name %q: expected up to 32 letters, digits, or _ - /", name)), nil
+	}
+	if !adt.ValidJobCount(count) {
+		return newToolResultError(fmt.Sprintf("invalid job count %q: expected up to 8 digits", count)), nil
+	}
+	if refused := s.refuseUnderSafety(adt.OpWorkflow, "JobLog"); refused != nil {
+		return refused, nil
+	}
+	c, err := s.ensureRFCClient(ctx)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to read the job log over RFC: %v", err)), nil
+	}
+	entries, err := saprfc.ReadJobLog(ctx, c, name, count)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to read the job log of %s/%s: %v", name, count, err)), nil
+	}
+	return newToolResultJSON(jobLogResult{Job: name, Count: count, Entries: entries,
+		Notes: []string{"Read over RFC through XBP; only jobs that have started have a log."}}), nil
 }
