@@ -275,6 +275,14 @@ Runtime errors:
   SAP(action="analyze", params={"type": "get_dump", "dump_id": "..."})   — detail: message, termination point, SY fields, source, variables, stack
   SAP(action="analyze", params={"type": "get_dump", "dump_id": "...", "max_variables": 30, "include_html": false})
 
+
+Background jobs (SM37, free SQL on TBTCO/TBTCP, logon client only):
+  SAP(action="analyze", params={"type": "job_list"})   — no filter: the last 7 days, 50 jobs
+  SAP(action="analyze", params={"type": "job_list", "since": "2026-09-01", "status": "A", "max_results": 100})
+  SAP(action="analyze", params={"type": "job_list", "name": "ZDEMO*", "user": "TESTUSER"})
+  SAP(action="analyze", params={"type": "job_list", "program": "ZDEMO_NIGHTLY_RUN"})
+      each job with its steps: program, variant, user, the spool number each step wrote; max_results at most 200
+
 Profiler traces:
   SAP(action="analyze", params={"type": "list_traces"})
   SAP(action="analyze", params={"type": "get_trace", "trace_id": "..."})
