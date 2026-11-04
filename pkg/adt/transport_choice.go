@@ -56,11 +56,19 @@ type TransportChoice struct {
 	// needed — in words for the result.
 	Reason  string `json:"reason,omitempty"`
 	Created bool   `json:"created,omitempty"`
-	// Err is a creation that failed after the caller enabled it.
+	// Required marks a check that found the object needs a request but no
+	// open one fits and none may be created here.
+	Required bool `json:"-"`
+	// Err is a refusal: a creation that failed after the caller enabled it,
+	// or an object that needs a request which could not be chosen. The write
+	// must not start, since SAP would generate a request of its own.
 	Err error `json:"-"`
 }
 
-var errTransportCreate = errors.New("creating a transport request failed")
+var (
+	errTransportCreate   = errors.New("creating a transport request failed")
+	errTransportRequired = errors.New("a transport request is required and none could be chosen")
+)
 
 // CheckTransport runs the transport check for an object about to be
 // written. devClass may be empty for an existing object.
@@ -209,7 +217,7 @@ func (c *Client) chooseTransport(ctx context.Context, objectURL, devClass, lockC
 		description = fmt.Sprintf("%s %s", pkg, check.ObjectName)
 	}
 	if !c.config.Safety.IsTransportWriteAllowed() {
-		return &TransportChoice{Reason: fmt.Sprintf("no open request of yours holds %s; SAP will generate one — name transport, or run with --enable-transports to have one created here", pkg)}, nil
+		return &TransportChoice{Required: true, Reason: fmt.Sprintf("no open request of yours holds %s; name transport, or run with --enable-transports to have one created here", pkg)}, nil
 	}
 	number, err := c.CreateTransport(ctx, objectURL, description, pkg)
 	if err != nil {
@@ -255,10 +263,11 @@ func (c *Client) transportHoldsPackage(ctx context.Context, number, pkg string) 
 // planTransport is the half of the choice that runs before the lock: the
 // check and, when transports are enabled and nothing fits, the creation.
 // It runs before the lock because it is a stateless request, and a
-// stateless hop between LOCK and PUT retires the lock handle (#91). A
-// check that fails is not a reason to refuse the write — the choice is
-// then left to SAP as it was — but a creation that fails is, since the
-// caller enabled it. nil when a request was named, or the choice is off.
+// stateless hop between LOCK and PUT retires the lock handle (#91). The
+// write is refused (Err) when SAP would otherwise generate a request of its
+// own: a creation that failed, no open request that fits with creation not
+// enabled, or a check that failed for an object not known to be local.
+// nil when a request was named, or the choice is off (explicit opt-out).
 func (c *Client) planTransport(ctx context.Context, supplied, objectURL, devClass string) *TransportChoice {
 	if supplied != "" || c.config.Safety.TransportChoice == "off" {
 		return nil
@@ -268,9 +277,25 @@ func (c *Client) planTransport(ctx context.Context, supplied, objectURL, devClas
 		if errors.Is(err, errTransportCreate) {
 			return &TransportChoice{Err: err}
 		}
-		return &TransportChoice{Reason: "transport not chosen here (" + err.Error() + "); left to SAP"}
+		if c.objectIsLocal(ctx, objectURL, devClass) {
+			return &TransportChoice{Reason: "transport check failed (" + err.Error() + ") on a local object; no request needed"}
+		}
+		return &TransportChoice{Err: fmt.Errorf("%w: the transport check failed (%v); name transport=<request> to write anyway", errTransportRequired, err)}
+	}
+	if choice.Required {
+		choice.Err = fmt.Errorf("%w: %s", errTransportRequired, choice.Reason)
 	}
 	return choice
+}
+
+// objectIsLocal reports whether the object lives in a local package ($...),
+// where no request is needed. Used only when the transport check failed.
+func (c *Client) objectIsLocal(ctx context.Context, objectURL, devClass string) bool {
+	if devClass != "" {
+		return strings.HasPrefix(devClass, "$")
+	}
+	pkg, err := c.getObjectPackage(ctx, objectURL)
+	return err == nil && strings.HasPrefix(pkg, "$")
 }
 
 // resolveWriteTransportFor is resolveWriteTransport with the plan behind
@@ -304,11 +329,19 @@ func (c *Client) resolveWriteTransportFor(plan *TransportChoice, supplied, lockC
 // lockCorrNr is the request that goes on the LOCK: the one the caller named,
 // else the one the plan chose or created. The write that follows takes the
 // plan's request through resolveWriteTransportFor, so a LOCK sent without it
-// would bind the lock to one request and the PUT to another. nil-safe: no
-// plan, or a plan whose creation failed, leaves the LOCK without a corrNr.
-func (p *TransportChoice) lockCorrNr(supplied string) string {
-	if supplied != "" || p == nil || p.Err != nil {
-		return supplied
+// would bind the lock to one request and the PUT to another. A plan that
+// refused (Err) returns that error, and the caller must not send the LOCK:
+// without a corrNr SAP could generate a request of its own. nil plan (a
+// request was named, or the choice is off) is not a refusal.
+func (p *TransportChoice) lockCorrNr(supplied string) (string, error) {
+	if supplied != "" {
+		return supplied, nil
 	}
-	return p.Transport
+	if p == nil {
+		return "", nil
+	}
+	if p.Err != nil {
+		return "", p.Err
+	}
+	return p.Transport, nil
 }

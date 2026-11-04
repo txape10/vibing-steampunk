@@ -2052,7 +2052,7 @@ the code permanently — it is the fix, not a placeholder.
   so), and that the response-cache `T100` "stable table" rule never served a stale verification query (queries
   after a write were varied/spaced; use a differently-worded SQL to be safe — with `VSP_CACHE` off this does not
   arise).
-- **Open decision, not made**: when `planTransport` fails to create a request (`plan.Err != nil`),
+- **Open decision — closed by 2bm (2026-11-04)**: when `planTransport` fails to create a request (`plan.Err != nil`),
   `lockCorrNr` sends the LOCK with no `corrNr`, so SAP may autogenerate one — the golden-rule scenario the
   rest of the transport-choice design exists to avoid. Pre-existing in kind (it was already the case for the
   write) but now also on the LOCK. A guard before the LOCK in the affected sites would close it; left for the
@@ -2481,6 +2481,18 @@ the code permanently — it is the fix, not a placeholder.
 - `GetEnhancementText` (XHH): a failed `ENHINCINX` read now prepends `* NOTE: ...` instead of silently showing no hook points.
 - Tests: `TestParseTransportInfo_RequestsLocksMessages`, `TestGetEnhancementText_HookFailureLeavesANote`. Code review: APPROVE.
 - **Verified live (2026-11-04)**: dev, `get_transport_info` on `ZCL_VSP_RFC_SERVICE` (package `ZABAP01`, not `ZADT_VSP`) lists `S4DK928661 ZRCHAPADO ZADT_VSP` as candidate; `read ENHO ZENH_DELVRY` unchanged (no NOTE). `get_transport_info` is refused on the read-only production connection (type X, by design), so prod was not exercised. Not exercised: the LockedInTask line and SAP messages (unit tests only).
+
+### 2bm. Strict transport choice -- no LOCK without a request when one is needed (golden rule) (2026-11-04)
+- Closes the open decision of 2ao and reverses the fail-open of 2z. Before: a LOCK could go out with no `corrNr` when (a) creating a request failed, (b) the check found a request was needed, none of the user's fit and `--enable-transports` was off, or (c) the transport check itself failed -- SAP then generated "Generated Request for Change Recording" on its own.
+- `planTransport` now returns `TransportChoice.Err` in those three cases (`errTransportRequired`, message tells to pass `transport=<request>`; `TransportChoice.Required` marks case b). A failed check on an object known to be local (`$` package passed, or resolved through `getObjectPackage` -- `objectIsLocal`, stateless, before the LOCK) is still not a refusal. `lockCorrNr(supplied)` now returns `(string, error)`: the plan's error is returned and every LOCK site (description, i18n x2, lock_scope, textpool, workflows x3, workflows_deploy, workflows_edit, workflows_source x5) returns before sending the LOCK. The creators (`CreateObject`, the DDIC/MSAG ones) already returned `plan.Err`.
+- Review follow-up: `DeleteObjectWithAutoLock` and `RenameObject` (lock of the old object) also plan before the LOCK now and pass the corrNr; their transport is resolved through `resolveWriteTransportFor`. Tests `TestDeleteObjectWithAutoLock_PlanRefuses_NoLockSent` / `_NamedTransport_LockCarriesIt`.
+- **Fail-closed note**: a failing `/cts/transportchecks` (404 on a release without the resource, 5xx, authorization) on an object not resolvable as local now refuses the write; `transport=<request>` or `SAP_TRANSPORT_CHOICE=off` are the ways out.
+- **Known gaps (review, not fixed)**: the test-include branch of `writeSourceUpdate` returns `Success=true` with a warning appended when the plan refuses (main source already written); LOCKs on just-created objects (`workflows.go` creation paths, `workflows_deploy.go:155`, `workflows_fileio.go:134`) still carry no corrNr -- the request was already chosen at creation and SAP returns it; no per-workflow "no LOCK" refusal test for `WriteInclude`/`WriteClass`/`UpdateFromFile`/`EditSource`/`SetDescription`/`WriteTextPool`/DTEL labels/MSAG (covered by the shared `lockCorrNr` table and the WriteProgram/WithObjectLock/Delete tests).
+- **Still allowed, by design**: `SAP_TRANSPORT_CHOICE=off` (explicit opt-out, plan is nil) sends the LOCK without `corrNr`; an explicit `transport` is never second-guessed.
+- **Behaviour change**: with `SAP_ENABLE_TRANSPORTS` off, writing a transportable object without naming a `transport` is now refused when no open request fits (before: SAP generated one).
+- Tests: `pkg/adt/transport_refusal_test.go` (plan refusals, local controls, WriteProgram and WithObjectLock send no LOCK), `lock_corrnr_test.go` (`lockCorrNr` table), `transport_choice_test.go`. Fixtures: stubs that left `cts/transportchecks` empty used to pass only through the fail-open; `withDefaultTransportCheck` (httptest) and defaults in the two mock transports now answer "local object".
+- **Phase 0, live (2026-11-04)**: `get_transport_info` (same endpoint) answers correctly for a `$TMP` program (Recording empty), a message class, a DTEL and a class in transportable packages (candidates listed), so the check works for the types vsp writes.
+- **Verified live (2026-11-04, deployed binary)**: `$TMP` control — `EDITSOURCE` on `ZTESTRCG1` (change and revert) activates, no enqueue left. Named-transport path — `EDITSOURCE` with `transport: S4DK928661` on `ZCL_VSP_RFC_SERVICE` (change and revert) works, no new request created today (E070/E07T), no enqueue left. **Refusal NOT verified live**: it needs zero candidate requests, and the dev user has ~65 open ones (`ZUTIL_ACTIVIDAD` in `ZSU01` lists them all, so the plan would pick one rather than refuse); covered by unit tests only.
 
 ## Known Open Issues (Not Fixed)
 

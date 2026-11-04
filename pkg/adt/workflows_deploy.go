@@ -342,7 +342,11 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 
 	// 5. Lock object — from here on, ALL requests must be stateful to
 	// maintain session affinity for the lock handle (issue #88).
-	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
+	lockCorr, planErr := trPlan.lockCorrNr(transport)
+	if planErr != nil {
+		return &DeployResult{FilePath: filePath, ObjectURL: objectURL, ObjectName: info.ObjectName, ObjectType: string(info.ObjectType), Success: false, Errors: []string{planErr.Error()}, Message: fmt.Sprintf("Failed to plan the transport: %v", planErr)}, nil
+	}
+	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 	if err != nil {
 		return &DeployResult{
 			FilePath:   filePath,

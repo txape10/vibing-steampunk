@@ -250,7 +250,7 @@ func TestChooseTransport_NoCandidates_CreatesRequest(t *testing.T) {
 	}
 }
 
-func TestChooseTransport_NoCandidates_TransportsDisabled_LeavesItToSAP(t *testing.T) {
+func TestChooseTransport_NoCandidates_TransportsDisabled_IsRequired(t *testing.T) {
 	rec := &adtRecorder{}
 	checkXML := transportCheckXML(true, "ZDEMO_PKG", "ZDEMO")
 	client := newStubbedClient(t, rec, func(w http.ResponseWriter, r *http.Request) {
@@ -270,8 +270,8 @@ func TestChooseTransport_NoCandidates_TransportsDisabled_LeavesItToSAP(t *testin
 	if choice.Transport != "" || choice.Created {
 		t.Errorf("choice = %+v, want nothing chosen with transports disabled", choice)
 	}
-	if !strings.Contains(choice.Reason, "SAP will generate one") {
-		t.Errorf("Reason = %q, want it to say the choice is left to SAP", choice.Reason)
+	if !choice.Required {
+		t.Errorf("choice = %+v, want Required: the object needs a request and none can be chosen", choice)
 	}
 
 	calls := rec.snapshot()

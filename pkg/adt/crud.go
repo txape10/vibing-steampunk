@@ -1064,7 +1064,15 @@ func (c *Client) DeleteObjectWithAutoLock(ctx context.Context, objectURL string,
 	// the networked package lookup (issue #91). The DELETE below is inline, so
 	// nothing between the lock and the request re-resolves the package.
 
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY")
+	// Same rule as every other write: a request is chosen (or the call is
+	// refused) before the LOCK, so SAP never generates one on its own.
+	trPlan := c.planTransport(ctx, transport, objectURL, "")
+	lockCorr, planErr := trPlan.lockCorrNr(transport)
+	if planErr != nil {
+		return planErr
+	}
+
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 	if err != nil {
 		// A stranded enqueue from an earlier failed attempt shows as a lock
 		// conflict here — say so, rather than falling through to a DELETE-mode
@@ -1074,7 +1082,7 @@ func (c *Client) DeleteObjectWithAutoLock(ctx context.Context, objectURL string,
 		}
 		modifyErr := err
 		var deleteModeErr error
-		lock, deleteModeErr = c.LockObject(ctx, objectURL, "DELETE")
+		lock, deleteModeErr = c.LockObject(ctx, objectURL, "DELETE", lockCorr)
 		if deleteModeErr != nil {
 			if errors.Is(deleteModeErr, errLockNoHandle) {
 				// The DELETE-mode LOCK took an enqueue we cannot release.
@@ -1088,7 +1096,7 @@ func (c *Client) DeleteObjectWithAutoLock(ctx context.Context, objectURL string,
 	// lock is usable from here. The stale MODIFY error (if the fallback ran) is
 	// never read again — resolveWriteTransport reassigns err next.
 
-	effectiveTransport, err := c.resolveWriteTransport(transport, lock.CorrNr, "DeleteObjectWithAutoLock")
+	effectiveTransport, _, err := c.resolveWriteTransportFor(trPlan, transport, lock.CorrNr, "DeleteObjectWithAutoLock")
 	if err != nil {
 		if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
 			return fmt.Errorf("%w — %s", err, strandedLockAdvice(objectURL, unlockErr))

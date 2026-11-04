@@ -224,7 +224,15 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		return result, nil
 	}
 
-	oldLockResult, err := c.LockObject(ctx, oldURL, "MODIFY")
+	oldPlan := c.planTransport(ctx, transport, oldURL, "")
+	oldLockCorr, planErr := oldPlan.lockCorrNr(transport)
+	if planErr != nil {
+		result.Message = fmt.Sprintf("New object %s created successfully, but the old object %s cannot be deleted: %v. Please delete manually.", newName, oldName, planErr)
+		result.Success = true
+		return result, nil
+	}
+
+	oldLockResult, err := c.LockObject(ctx, oldURL, "MODIFY", oldLockCorr)
 	if err != nil {
 		result.Message = fmt.Sprintf("New object %s created successfully, but failed to lock old object %s for deletion: %v. Please delete manually.", newName, oldName, err)
 		result.Success = true
@@ -247,7 +255,7 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 
 	// The old object may sit in its own open request; adopt that (re-validated
 	// against policy) rather than passing the caller's transport blindly.
-	oldTransport, err := c.resolveWriteTransport(transport, oldLockResult.CorrNr, "RenameObject")
+	oldTransport, _, err := c.resolveWriteTransportFor(oldPlan, transport, oldLockResult.CorrNr, "RenameObject")
 	if err != nil {
 		result.Message = fmt.Sprintf("New object %s created successfully, but the transportable-edit check for deleting %s failed: %v. Please delete manually.", newName, oldName, err)
 		result.Success = true

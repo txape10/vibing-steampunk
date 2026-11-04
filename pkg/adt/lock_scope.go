@@ -39,7 +39,11 @@ func (c *Client) WithObjectLock(ctx context.Context, opName, lockURL, transport 
 	if trPlan != nil && trPlan.Err != nil {
 		return trPlan.Err
 	}
-	lock, err := c.LockObject(ctx, lockURL, "MODIFY", trPlan.lockCorrNr(transport))
+	lockCorr, planErr := trPlan.lockCorrNr(transport)
+	if planErr != nil {
+		return planErr
+	}
+	lock, err := c.LockObject(ctx, lockURL, "MODIFY", lockCorr)
 	if err != nil {
 		return fmt.Errorf("locking %s: %w", lockURL, err)
 	}

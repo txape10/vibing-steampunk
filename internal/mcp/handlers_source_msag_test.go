@@ -57,6 +57,9 @@ func newMSAGTestServer(t *testing.T) (*Server, *msagRecorder) {
 	rec := &msagRecorder{}
 	srv := httptest.NewServer(rec.handler(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case strings.Contains(r.URL.Path, "cts/transportchecks"):
+			// A local object: no request needed. An unanswered check is a refusal.
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="utf-8"?><asx:abap version="1.0" xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA><DEVCLASS>$TMP</DEVCLASS><RECORDING></RECORDING><REQUESTS/><LOCKS/></DATA></asx:values></asx:abap>`)
 		case r.Method == http.MethodPost && r.URL.Query().Get("_action") == "LOCK":
 			w.Header().Set("Content-Type", "application/vnd.sap.as+xml")
 			_, _ = io.WriteString(w, msagTestLockXML)

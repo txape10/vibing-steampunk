@@ -1,6 +1,7 @@
 package adt
 
 import (
+	"strings"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,10 @@ func lockWindowServer(t *testing.T, seen *[]string, mu *sync.Mutex) *httptest.Se
 		*seen = append(*seen, r.URL.Path+"?"+r.URL.Query().Get("_action"))
 		mu.Unlock()
 		w.Header().Set("x-csrf-token", "TOKEN")
+		if strings.Contains(r.URL.Path, "cts/transportchecks") {
+			_, _ = w.Write([]byte(localObjectCheckXML))
+			return
+		}
 		if r.URL.Query().Get("_action") == "LOCK" {
 			w.Header().Set("Content-Type", "application/xml")
 			_, _ = w.Write([]byte(`<?xml version="1.0"?><asx:abap xmlns:asx="http://www.sap.com/abapxml">

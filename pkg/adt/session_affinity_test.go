@@ -139,10 +139,40 @@ func searchXMLFor(uri, name, pkg string) string {
 </adtcore:objectReferences>`, uri, name, pkg)
 }
 
+// localObjectCheckXML is the transport check's answer for an object in a
+// local package: no request needed.
+const localObjectCheckXML = `<?xml version="1.0" encoding="utf-8"?><asx:abap version="1.0" xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA>` +
+	`<DEVCLASS>$TMP</DEVCLASS><RECORDING></RECORDING><REQUESTS/><LOCKS/></DATA></asx:values></asx:abap>`
+
+// withDefaultTransportCheck answers /cts/transportchecks as a local object
+// ("no request needed") when the test's own route left it empty. A write that
+// cannot tell whether a request is needed is now refused before the LOCK, so
+// a stub that says nothing would turn every unrelated test into a refusal.
+// A route that does answer the check is passed through untouched.
+func withDefaultTransportCheck(route http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "cts/transportchecks") {
+			route(w, r)
+			return
+		}
+		rr := httptest.NewRecorder()
+		route(rr, r)
+		if rr.Body.Len() == 0 && rr.Code < 300 {
+			_, _ = io.WriteString(w, localObjectCheckXML)
+			return
+		}
+		for k, v := range rr.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rr.Code)
+		_, _ = w.Write(rr.Body.Bytes())
+	}
+}
+
 // newStubbedClient wires a client to a recording httptest server.
 func newStubbedClient(t *testing.T, rec *adtRecorder, route http.HandlerFunc, opts ...Option) *Client {
 	t.Helper()
-	srv := httptest.NewServer(rec.handler(route))
+	srv := httptest.NewServer(rec.handler(withDefaultTransportCheck(route)))
 	t.Cleanup(srv.Close)
 
 	cfg := NewConfig(srv.URL, "TESTUSER", "secret", opts...)

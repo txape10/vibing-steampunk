@@ -99,17 +99,21 @@ func TestTransportChoice_LockCorrNr(t *testing.T) {
 		plan     *TransportChoice
 		supplied string
 		want     string
+		wantErr  bool
 	}{
-		{"supplied wins over the plan", &TransportChoice{Transport: "TR-PLANNED"}, "TR-NAMED", "TR-NAMED"},
-		{"no plan, nothing supplied", nil, "", ""},
-		{"no plan, supplied", nil, "TR-NAMED", "TR-NAMED"},
-		{"plan chose a request", &TransportChoice{Transport: "TR-PLANNED"}, "", "TR-PLANNED"},
-		{"plan chose nothing", &TransportChoice{Reason: "left to SAP"}, "", ""},
-		{"plan failed to create one", &TransportChoice{Transport: "TR-PLANNED", Err: errTransportCreate}, "", ""},
+		{"supplied wins over the plan", &TransportChoice{Transport: "TR-PLANNED"}, "TR-NAMED", "TR-NAMED", false},
+		{"no plan, nothing supplied", nil, "", "", false},
+		{"no plan, supplied", nil, "TR-NAMED", "TR-NAMED", false},
+		{"plan chose a request", &TransportChoice{Transport: "TR-PLANNED"}, "", "TR-PLANNED", false},
+		{"plan chose nothing", &TransportChoice{Reason: "left to SAP"}, "", "", false},
+		{"plan failed to create one", &TransportChoice{Transport: "TR-PLANNED", Err: errTransportCreate}, "", "", true},
+		{"plan refused: request required", &TransportChoice{Err: errTransportRequired}, "", "", true},
+		{"supplied wins over a refusing plan", &TransportChoice{Err: errTransportRequired}, "TR-NAMED", "TR-NAMED", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.plan.lockCorrNr(tc.supplied); got != tc.want {
-				t.Errorf("lockCorrNr = %q, want %q", got, tc.want)
+			got, err := tc.plan.lockCorrNr(tc.supplied)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Errorf("lockCorrNr = %q, %v; want %q, error=%v", got, err, tc.want, tc.wantErr)
 			}
 		})
 	}

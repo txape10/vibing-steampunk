@@ -1115,7 +1115,12 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
 
 			// Lock for test update
-			lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
+			lockCorr, planErr := trPlan.lockCorrNr(opts.Transport)
+			if planErr != nil {
+				result.Message += fmt.Sprintf(" (Warning: transport refused for test update: %v)", planErr)
+				return result, nil
+			}
+			lock, err := c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 			if err != nil {
 				result.Message += fmt.Sprintf(" (Warning: Failed to lock for test update: %v)", err)
 				return result, nil
@@ -1217,7 +1222,12 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
 
 		// Lock
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
+		lockCorr, planErr := trPlan.lockCorrNr(opts.Transport)
+		if planErr != nil {
+			result.Message = fmt.Sprintf("Failed to plan the transport: %v", planErr)
+			return result, nil
+		}
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 			return result, nil
@@ -1328,7 +1338,12 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
 
 		// Lock
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
+		lockCorr, planErr := trPlan.lockCorrNr(opts.Transport)
+		if planErr != nil {
+			result.Message = fmt.Sprintf("Failed to plan the transport: %v", planErr)
+			return result, nil
+		}
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 			return result, nil
@@ -1412,7 +1427,14 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		// sit between LOCK and PUT (issue #91).
 		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
 
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
+		lockCorr, planErr := trPlan.lockCorrNr(opts.Transport)
+
+		if planErr != nil {
+			result.Message = fmt.Sprintf("Failed to plan the transport: %v", planErr)
+			return result, nil
+		}
+
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock function module: %v", err)
 			return result, nil
@@ -1573,7 +1595,12 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
 
 	// Lock
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
+	lockCorr, planErr := trPlan.lockCorrNr(transport)
+	if planErr != nil {
+		result.Message = fmt.Sprintf("Failed to plan the transport: %v", planErr)
+		return result, nil
+	}
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock class: %v", err)
 		return result, nil

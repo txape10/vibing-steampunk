@@ -31,6 +31,12 @@ func (m *mockTransportClient) Do(req *http.Request) (*http.Response, error) {
 		}
 	}
 
+	// An unscripted transport check answers "local object, no request
+	// needed": a write that cannot tell is refused before the LOCK.
+	if strings.Contains(path, "cts/transportchecks") {
+		return newTestResponse(localObjectCheckXML), nil
+	}
+
 	return &http.Response{
 		StatusCode: http.StatusNotFound,
 		Body:       io.NopCloser(strings.NewReader("Not found")),

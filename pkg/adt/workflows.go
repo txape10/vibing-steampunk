@@ -73,7 +73,12 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
 
 	// Step 2: Lock the object
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
+	lockCorr, planErr := trPlan.lockCorrNr(transport)
+	if planErr != nil {
+		result.Message = fmt.Sprintf("Failed to plan the transport: %v", planErr)
+		return result, nil
+	}
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil
@@ -197,7 +202,14 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 	// syntax check does — stateless, must not sit between LOCK and PUT.
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
 
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
+	lockCorr, planErr := trPlan.lockCorrNr(transport)
+
+	if planErr != nil {
+		result.Message = fmt.Sprintf("Failed to plan the transport: %v", planErr)
+		return result, nil
+	}
+
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil
@@ -308,7 +320,12 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
 
 	// Step 2: Lock
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
+	lockCorr, planErr := trPlan.lockCorrNr(transport)
+	if planErr != nil {
+		result.Message = fmt.Sprintf("Failed to plan the transport: %v", planErr)
+		return result, nil
+	}
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil

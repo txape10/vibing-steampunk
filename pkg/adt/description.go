@@ -312,7 +312,11 @@ func (c *Client) SetDescription(ctx context.Context, objectType, name, parent, d
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
 
 	var lock *LockResult
-	lock, err = c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
+	lockCorr, planErr := trPlan.lockCorrNr(transport)
+	if planErr != nil {
+		return result, planErr
+	}
+	lock, err = c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 	if err != nil {
 		return result, fmt.Errorf("failed to lock %s: %w", name, err)
 	}

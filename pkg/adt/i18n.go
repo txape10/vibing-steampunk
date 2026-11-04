@@ -573,7 +573,11 @@ func (c *Client) WriteMessageClassTextsAutoLock(ctx context.Context, name, lang 
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
 
 	var lockResult *LockResult
-	lockResult, err = c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
+	lockCorr, planErr := trPlan.lockCorrNr(transport)
+	if planErr != nil {
+		return planErr
+	}
+	lockResult, err = c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 	if err != nil {
 		return fmt.Errorf("failed to lock message class: %w", err)
 	}
@@ -671,7 +675,11 @@ func (c *Client) WriteDataElementLabels(ctx context.Context, name, lang string, 
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
 
 	var lockResult *LockResult
-	lockResult, err = c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
+	lockCorr, planErr := trPlan.lockCorrNr(transport)
+	if planErr != nil {
+		return planErr
+	}
+	lockResult, err = c.LockObject(ctx, objectURL, "MODIFY", lockCorr)
 	if err != nil {
 		return fmt.Errorf("failed to lock data element %s: %w", name, err)
 	}
