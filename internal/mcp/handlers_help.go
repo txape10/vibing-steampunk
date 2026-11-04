@@ -282,6 +282,11 @@ Background jobs (SM37, free SQL on TBTCO/TBTCP, logon client only):
   SAP(action="analyze", params={"type": "job_list", "name": "ZDEMO*", "user": "TESTUSER"})
   SAP(action="analyze", params={"type": "job_list", "program": "ZDEMO_NIGHTLY_RUN"})
       each job with its steps: program, variant, user, the spool number each step wrote; max_results at most 200
+  SAP(action="analyze", params={"type": "spool_list"})   — no filter: the last 7 days, 50 requests
+  SAP(action="analyze", params={"type": "spool_list", "job": "ZDEMO_NIGHTLY", "user": "TESTUSER", "program": "ZDEMO_RUN", "title": "Report*"})
+  SAP(action="analyze", params={"type": "spool_read", "number": 27302})   — ABAP list decoded to text (TST01/TST03, max 20 MB)
+      spool_read goes by table, NOT through the spool authorization checks (S_SPO_ACT, owner): anyone with free SQL on these tables reads any spool of the logon client.
+      A spool kept in files on the application server (TST01 storage F) has no content in TST03.
 
 Profiler traces:
   SAP(action="analyze", params={"type": "list_traces"})
