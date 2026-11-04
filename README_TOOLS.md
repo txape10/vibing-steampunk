@@ -58,7 +58,8 @@ These tools replace 11 granular read/write operations with intelligent parameter
 | `GetTableContents` | Get table data (supports SQL filtering; `all_rows` lifts the row cap to 90,000) | Focused |
 | `GetStructure` | Get structure definition | Expert |
 | `GetPackage` | Get package contents (`read DEVC` with `inventory=true` lists TADIR/TDEVC/abapGit content) | Focused |
-| `GetTransaction` | Get transaction details | Expert |
+| `GetTransaction` | Get transaction details (VIT header + TSTC/TSTCP, classified by kind) | Expert |
+| `analyze` `job_list` / `spool_list` / `spool_read` / `job_log` | SM37/SP01 over free SQL; `via="rfc"` and `job_log` use XBP (refused under read-only) | Hyperfocused |
 | `GetTypeInfo` | Get data type information | Expert |
 | `GetCDSDependencies` | Get CDS view dependency tree | Focused |
 | `RunQuery` | Execute freestyle SQL query (`all_rows` lifts the row cap to 90,000) | Focused |

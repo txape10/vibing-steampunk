@@ -2458,6 +2458,16 @@ the code permanently — it is the fix, not a placeholder.
 - Tests: `pkg/adt/transaction_test.go` (stub server, injection refusals, SQL carries the validated code, BlockFreeSQL); mutation-checked. Code review APPROVE; the MEDIUM (CLI swallowed the real error) fixed.
 - **Verified live (2026-11-03)**: SE38 (report), ZSU0001 (dialog, program ZRSU_ENTRADA_MERCANCIAS), SM31, SE93, SU3 on dev; SE38 on read-only prod; non-existent code -> "does not exist"; injection payload refused locally. **Not exercised**: a TSTCP parameter transaction, an OO transaction, an area menu (unit tests only).
 
+### 2bj. Upstream #197 (adapted, complete) -- SM37/SP01 over free SQL and XBP: `job_list`, `spool_list`, `spool_read`, `job_log` (2026-11-04)
+- Commits `3796641`, `0330f1d`, `7d13f26`, `62478f7`, `b780b7e`, `3dc4f70` (local, not pushed). Surface: `SAP(action="analyze", params={"type": ...})` only (no standalone tools), plus `vsp jobs list`.
+- `job_list` (`pkg/adt/jobs.go`): TBTCO + TBTCP (client in `AUTHCKMAN` on TBTCO). `spool_list`/`spool_read` (`pkg/adt/spool.go`): TSP01/TST01/TST03. Defaults: last 7 days, 50 rows, max 200. `pkg/temse` decodes the ABAP list format. Job name/count validators live in `pkg/adt/jobnames.go` (`pkg/adt` must not import `pkg/saprfc`).
+- `job_log` and `spool_read` with `via="rfc"` use XBP (`BAPI_XBP_JOB_JOBLOG_READ`, `BAPI_XBP_GET_SPOOL_AS_DAT`) in a pinned XMI session (`pkg/saprfc/joblog.go`). `via=auto` tries SQL and falls back to RFC only when the spool is stored in files (Storage != "D"). Both RFC paths are refused under `SAP_READ_ONLY` before any connection.
+- **Deviations from upstream, found live**: `RQ2NAME` carries program + user suffix, so the program filter is a LIKE prefix (upstream's equality never matched); `TSP01-RQCLIENT` is a plain field (rows for 000 and 100 coexist), so the client is filtered explicitly; TST03 is paged by key (`drowno BETWEEN last+1 AND max`) since `UP TO` is not accepted; numeric cells arrive padded; no `<`/`>` in WHERE (BETWEEN). TBTCO/TBTCP/TSP01/TST01/TST03 stay out of the response cache `stableTables`. TemSe object cap 20 MB.
+- **Security note**: `spool_read` by SQL reads TST03 directly, so it bypasses `S_SPO_ACT`/owner authorization (user decision: not restricted, documented in the help text). The RFC path applies the RFC user's spool authorization.
+- **Not ported**: CLI `vsp jobs log` and `vsp spool export` (no RFC client plumbing in `cmd/vsp`).
+- **Verified live (2026-11-03/04)**: dev, all four types; PRD read-only: `job_list`, `spool_list`, `spool_read` by SQL (spool 26278 decoded; 26277/26276 are OTF Smart Forms, reported as "not an ABAP list"), `job_log` correctly blocked. `ENQUEUE_READ` empty after RFC calls.
+- Code review: APPROVE, 0 CRITICAL/HIGH. Not applied (LOW): LOGOFF with the request context, duplicated Pin/logon block, no size cap on RFC outputs.
+
 ## Known Open Issues (Not Fixed)
 
 ### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused (2026-09-22); MITIGATED in vsp by 2av (2026-10-16)

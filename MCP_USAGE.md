@@ -227,6 +227,7 @@ read-back is an uncertain outcome, so inspect SAP rather than retry blindly.
 | Find in namespace | `GrepPackages` | `packages=[Z*], include_subpackages=true` |
 | Find object by name | `SearchObject` | `query=Z*TEST*` |
 | Find object by exact name | `SearchObject` | `query=ZCL_X, exact=true` (a full 1000-object window is reported as `incomplete`) |
+| Background jobs and spool | `analyze` | `type=job_list`, `spool_list`, `spool_read` (`via=sql|rfc|auto`), `job_log` (RFC) |
 | List a package's contents | `GetPackage` / `read DEVC` | `inventory=true` (TADIR, TDEVC, abapGit; read-only) |
 
 Long calls (`ExecuteABAP`, `RunUnitTests`, `DeployFromFile`/`ImportFromFile`, `DeployZip`, `RunATCCheck`, coverage) accept `timeout` (seconds, max 3600); the default is `--call-timeout` / `SAP_CALL_TIMEOUT` (0 = none, 60 s per request). When it runs out the result says so and that SAP may still be working (SM50/SM66). Note: an MCP client may cut a call earlier than vsp does (about 60 s was seen).
