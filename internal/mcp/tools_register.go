@@ -702,7 +702,7 @@ func (s *Server) registerDebuggerTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("MoveObject") {
 		s.mcpServer.AddTool(mcp.NewTool("MoveObject",
-			mcp.WithDescription("Move an ABAP object to a different package. Uses ZADT_VSP WebSocket to call TR_TADIR_INTERFACE. Requires ZADT_VSP deployed."),
+			mcp.WithDescription("Move an ABAP object to a different package. Uses ZADT_VSP WebSocket to call TR_TADIR_INTERFACE. Requires ZADT_VSP deployed. Both the source and the destination package are checked against the allowed packages."),
 			mcp.WithString("object_type",
 				mcp.Required(),
 				mcp.Description("Object type: CLAS, PROG, INTF, FUGR, TABL, etc."),
@@ -2399,7 +2399,7 @@ func (s *Server) registerReportTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("SetTextElements") {
 		s.mcpServer.AddTool(mcp.NewTool("SetTextElements",
-			mcp.WithDescription("Set program text elements (selection texts, text symbols, and heading texts). Use for adding descriptions to selection screen parameters, text symbols, and list/column headings."),
+			mcp.WithDescription("DEPRECATED: prefer TextsSet / SAP(action=\"i18n\", params={\"op\":\"texts_set\"}), which goes through ADT REST, chooses and validates the transport request and activates. This tool writes the text pool directly and records nothing in a transport request; it checks the program's package against the allowed packages and refuses programs it cannot find as a PROG. Sets selection texts and text symbols (heading_texts is accepted but not applied server-side)."),
 			mcp.WithString("program",
 				mcp.Description("Program name"),
 				mcp.Required(),

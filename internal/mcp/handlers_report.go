@@ -396,10 +396,6 @@ func (s *Server) handleSetTextElements(ctx context.Context, request mcp.CallTool
 		return refused, nil
 	}
 
-	if errResult := s.ensureWSConnected(ctx, "SetTextElements"); errResult != nil {
-		return errResult, nil
-	}
-
 	program, _ := request.GetArguments()["program"].(string)
 	if program == "" {
 		return newToolResultError("program parameter is required"), nil
@@ -447,6 +443,17 @@ func (s *Server) handleSetTextElements(ctx context.Context, request mcp.CallTool
 		return newToolResultError("At least one of selection_texts, text_symbols, or heading_texts is required"), nil
 	}
 
+	// The WebSocket writes the text pool straight into the program, so the
+	// package whitelist has to be applied here. Pool owners that are not a PROG
+	// (SAPL* function pools, class pools) are not found and so are refused.
+	if err := s.adtClient.CheckObjectPackageByName(ctx, "PROG", program, "SetTextElements"); err != nil {
+		return newToolResultError(err.Error()), nil
+	}
+
+	if errResult := s.ensureWSConnected(ctx, "SetTextElements"); errResult != nil {
+		return errResult, nil
+	}
+
 	result, err := s.amdpWSClient.SetTextElements(ctx, params)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("SetTextElements failed: %v", err)), nil
@@ -458,6 +465,7 @@ func (s *Server) handleSetTextElements(ctx context.Context, request mcp.CallTool
 	fmt.Fprintf(&sb, "Selection Texts Set: %d\n", result.SelectionTextsSet)
 	fmt.Fprintf(&sb, "Text Symbols Set: %d\n", result.TextSymbolsSet)
 	fmt.Fprintf(&sb, "Heading Texts Set: %d\n", result.HeadingTextsSet)
+	sb.WriteString("\nNote: SetTextElements is deprecated and records nothing in a transport request; prefer SAP(action=\"i18n\", params={\"op\":\"texts_set\"}).\n")
 
 	return mcp.NewToolResultText(sb.String()), nil
 }

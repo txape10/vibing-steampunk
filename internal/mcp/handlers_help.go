@@ -199,7 +199,7 @@ Report execution (RUN_REPORT, RUN_REPORT_ASYNC and SET_TEXT_ELEMENTS are refused
   SAP(action="debug", target="RUN_REPORT", params={"report": "RSUSR002"})  runs as a background job over RFC (selection-screen reports work; see CLAUDE.md 2an)
   SAP(action="debug", target="GET_VARIANTS", params={"report": "RSUSR002"})
   SAP(action="debug", target="GET_TEXT_ELEMENTS", params={"program": "ZREPORT"})
-  SAP(action="debug", target="SET_TEXT_ELEMENTS", params={"program": "ZREPORT", "selection_texts": "{\"P_USER\": \"Username\"}"})  (heading_texts param is accepted but non-functional server-side)
+  SAP(action="debug", target="SET_TEXT_ELEMENTS", params={"program": "ZREPORT", "selection_texts": "{\"P_USER\": \"Username\"}"})  (heading_texts param is accepted but non-functional server-side; DEPRECATED: records nothing in a transport request, prefer action="i18n" op "texts_set"; the program's package is checked against the allowed packages)
 
 AMDP debugging:
   SAP(action="debug", target="AMDP_START", params={"cascade_mode": "FULL"})

@@ -2107,7 +2107,7 @@ the code permanently — it is the fix, not a placeholder.
   WHERE), and the `.vsp-recordings/index.json` artifact upstream committed by accident.
 - **Deliberately left allowed**: breakpoints (`SET_BREAKPOINT`/`DELETE_BREAKPOINT`) and AMDP start over MCP — what
   debugging a read-only system needs; the debug UI already blocks `/api/bp` on its own.
-- **Known gaps (follow-ups, not done)**: `SET_TEXT_ELEMENTS` has no package check at all (only SAP authorization
+- **Known gaps (follow-ups; the first two closed by 2bn)**: `SET_TEXT_ELEMENTS` has no package check at all (only SAP authorization
   stops it under `SAP_ALLOWED_PACKAGES=Z*,$TMP`); `MOVE` checks only where the object goes, not where it comes from;
   `CALL_RFC` is refused wholesale under `--read-only`, including `RFC_READ_TABLE`-style reads.
 - **Tests** (each refusal test has a control proving the same call goes through without the gate; mutation-checked
@@ -2493,6 +2493,13 @@ the code permanently — it is the fix, not a placeholder.
 - Tests: `pkg/adt/transport_refusal_test.go` (plan refusals, local controls, WriteProgram and WithObjectLock send no LOCK), `lock_corrnr_test.go` (`lockCorrNr` table), `transport_choice_test.go`. Fixtures: stubs that left `cts/transportchecks` empty used to pass only through the fail-open; `withDefaultTransportCheck` (httptest) and defaults in the two mock transports now answer "local object".
 - **Phase 0, live (2026-11-04)**: `get_transport_info` (same endpoint) answers correctly for a `$TMP` program (Recording empty), a message class, a DTEL and a class in transportable packages (candidates listed), so the check works for the types vsp writes.
 - **Verified live (2026-11-04, deployed binary)**: `$TMP` control — `EDITSOURCE` on `ZTESTRCG1` (change and revert) activates, no enqueue left. Named-transport path — `EDITSOURCE` with `transport: S4DK928661` on `ZCL_VSP_RFC_SERVICE` (change and revert) works, no new request created today (E070/E07T), no enqueue left. **Refusal NOT verified live**: it needs zero candidate requests, and the dev user has ~65 open ones (`ZUTIL_ACTIVIDAD` in `ZSU01` lists them all, so the plan would pick one rather than refuse); covered by unit tests only.
+
+### 2bn. Package whitelist on `SET_TEXT_ELEMENTS` and on the SOURCE package of `MOVE` (2026-11-04)
+- Closes the two "Known gaps" of 2ap. With `SAP_ALLOWED_PACKAGES` set, both WebSocket writes now check the package the object lives in. New `Client.CheckObjectPackageByName(ctx, type, name, op)` (`pkg/adt/package_by_name.go`): no-op without a whitelist; otherwise one stateless `SearchObjectExact`, matches by TADIR type root (`CanonicalObjectType` first, so `FUNC` finds `FUGR/FF`; `INCL` is a `PROG`) and fails closed on a search error, no match, a full search window (`incomplete`), an empty package, or any matching hit in a package that is not allowed. It runs before the WebSocket and before any lock (neither handler opens an ADT lock; issue #91).
+- `handleSetTextElements`: order is `refuseUnderSafety` -> arguments -> package check (`PROG`) -> WebSocket. Function/class pools are refused (fail-closed). The tool is now marked DEPRECATED in favour of `SAP(action="i18n", params={"op":"texts_set"})` (it records nothing in a transport request); the output says so. `handleMoveObject` additionally checks the source package (destination check from 2ap kept); no transport requirement.
+- Tests: `pkg/adt/package_by_name_test.go`, `internal/mcp/handlers_package_gate_test.go` (refusal tests with controls; mutation-checked, 4 fail without the gate). Code review: APPROVE, 0 CRITICAL/HIGH; MEDIUM (type aliases such as FUNC) fixed.
+- Known limits: `DEVC` as the object to move may come back with an empty `packageName` and be refused (not checked live); TOCTOU between the search and the write; `TestMoveObject_DestinationPackageHonoursAllowedPackages` (2ap) now has a vacuous control (empty-body stub gives a "not found" refusal).
+- **Verified live (2026-11-04, S4D, deployed binary)**: `SET_TEXT_ELEMENTS` on `PROG RSUSR002` -> "source package of PROG RSUSR002: operations on package 'SUSR_IS' are blocked by safety configuration (allowed: [Z* $TMP])"; same call on `ZTESTRCG1` (rewriting the existing selection text) succeeds and prints the deprecation note; `MOVE` of `RSUSR002` to `$TMP` -> refused on the source package; `ENQUEUE_READ` for the dev user empty afterwards. Not exercised: a real `MOVE` of a Z/`$TMP` object (a real write; unit tests only).
 
 ## Known Open Issues (Not Fixed)
 
