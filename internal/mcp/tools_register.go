@@ -702,7 +702,7 @@ func (s *Server) registerDebuggerTools(shouldRegister func(string) bool) {
 
 	if shouldRegister("MoveObject") {
 		s.mcpServer.AddTool(mcp.NewTool("MoveObject",
-			mcp.WithDescription("Move an ABAP object to a different package. Uses ZADT_VSP WebSocket to call TR_TADIR_INTERFACE. Requires ZADT_VSP deployed. Both the source and the destination package are checked against the allowed packages."),
+			mcp.WithDescription("Move an ABAP object to another package. Between LOCAL ($) packages it only changes TADIR (no transport). To move a LOCAL PROG/CLAS/INTF into a TRANSPORTABLE package, pass transport=<workbench request with a modifiable task of yours>: the object is moved and recorded in that request (never one SAP generates). Moving out of a transportable package is refused (use SE80/SE03). Uses the ZADT_VSP WebSocket; requires ZADT_VSP deployed. Source and destination package are checked against the allowed packages."),
 			mcp.WithString("object_type",
 				mcp.Required(),
 				mcp.Description("Object type: CLAS, PROG, INTF, FUGR, TABL, etc."),
@@ -713,7 +713,10 @@ func (s *Server) registerDebuggerTools(shouldRegister func(string) bool) {
 			),
 			mcp.WithString("new_package",
 				mcp.Required(),
-				mcp.Description("Target package (e.g., '$ZRAY', 'ZPACKAGE')"),
+				mcp.Description("Target package: a local one (e.g., '$ZRAY') or, with transport, a transportable one (e.g., 'ZABAP01')"),
+			),
+			mcp.WithString("transport",
+				mcp.Description("Workbench request (e.g., 'S4DK000001') to record a local PROG/CLAS/INTF moved into a transportable package. Required for that move, refused for a move between local packages"),
 			),
 		), s.handleMoveObject)
 	}

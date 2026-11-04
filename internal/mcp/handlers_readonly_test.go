@@ -242,22 +242,14 @@ func TestMoveObject_DestinationPackageHonoursAllowedPackages(t *testing.T) {
 
 	server, rc, _ := newReadOnlyTestServer(t, allow)
 	before := rc.count()
-	out := callSAP(t, server, args("SAP_STANDARD_PKG"))
+	out := callSAP(t, server, args("$SAPLOCAL"))
 	assertBlocked(t, out)
 	if n := rc.count() - before; n != 0 {
 		t.Errorf("a move into a package outside the whitelist sent %d request(s)", n)
 	}
-
-	// Control: a package inside the whitelist is let through to the connection
-	server, rc, _ = newReadOnlyTestServer(t, allow)
-	before = rc.count()
-	out = callSAP(t, server, args("ZOTHER"))
-	if strings.Contains(out, "blocked by safety configuration") {
-		t.Fatalf("a move into an allowed package must not be refused: %s", out)
-	}
-	if rc.count() == before {
-		t.Error("a move into an allowed package should reach the ADT host")
-	}
+	// The control (an allowed destination reaches the connection) lives in
+	// handlers_package_gate_test.go, where the stub tells a search from the
+	// WebSocket attempt.
 }
 
 // edit LOCK goes through pkg/adt's LockObject; the MCP route is covered too.

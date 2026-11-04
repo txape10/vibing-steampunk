@@ -71,7 +71,7 @@ func setTextArgs() map[string]any {
 
 func moveArgs() map[string]any {
 	return map[string]any{"action": "debug", "target": "MOVE",
-		"params": map[string]any{"object_type": "PROG", "object_name": "ZDEMO", "new_package": "ZOTHER"}}
+		"params": map[string]any{"object_type": "PROG", "object_name": "ZDEMO", "new_package": "$TMP"}}
 }
 
 func TestSetTextElements_PackageOutsideWhitelistRefused(t *testing.T) {
@@ -114,7 +114,7 @@ func TestSetTextElements_NoWhitelistNoLookup(t *testing.T) {
 }
 
 func TestMoveObject_SourcePackageHonoursAllowedPackages(t *testing.T) {
-	server, rc := newSearchTestServer(t, []searchHit{{"PROG/P", "ZDEMO", "SAP_STD"}})
+	server, rc := newSearchTestServer(t, []searchHit{{"PROG/P", "ZDEMO", "$SAPLOCAL"}})
 	out := callSAP(t, server, moveArgs())
 	assertBlocked(t, out)
 	if _, other := rc.searches(); other != 0 {
@@ -122,7 +122,7 @@ func TestMoveObject_SourcePackageHonoursAllowedPackages(t *testing.T) {
 	}
 
 	// Control: the destination is allowed too; only the source differs.
-	server, rc = newSearchTestServer(t, []searchHit{{"PROG/P", "ZDEMO", "ZPKG"}})
+	server, rc = newSearchTestServer(t, []searchHit{{"PROG/P", "ZDEMO", "$TMP"}})
 	out = callSAP(t, server, moveArgs())
 	if strings.Contains(out, "blocked by safety configuration") {
 		t.Fatalf("a move out of an allowed package must not be refused: %s", out)
@@ -134,12 +134,138 @@ func TestMoveObject_SourcePackageHonoursAllowedPackages(t *testing.T) {
 
 func TestMoveObject_SourceTypeMismatchFailsClosed(t *testing.T) {
 	// Only a class of that name exists; the program asked for is not found.
-	server, rc := newSearchTestServer(t, []searchHit{{"CLAS/OC", "ZDEMO", "ZPKG"}})
+	server, rc := newSearchTestServer(t, []searchHit{{"CLAS/OC", "ZDEMO", "$TMP"}})
 	out := callSAP(t, server, moveArgs())
 	if !strings.Contains(out, "refused") {
 		t.Errorf("expected a refusal when the type does not match, got: %s", out)
 	}
 	if _, other := rc.searches(); other != 0 {
 		t.Errorf("a refusal sent %d request(s) after the search", other)
+	}
+}
+
+// moveWithTransport builds a MOVE call; an empty transport leaves it out.
+func moveWithTransport(objType, name, pkg, transport string) map[string]any {
+	params := map[string]any{"object_type": objType, "object_name": name, "new_package": pkg}
+	if transport != "" {
+		params["transport"] = transport
+	}
+	return map[string]any{"action": "debug", "target": "MOVE", "params": params}
+}
+
+// allowTransports lets the test server's policy accept a named request (the
+// default policy refuses transportable edits).
+func allowTransports(server *Server) {
+	server.adtClient.Safety().AllowTransportableEdits = true
+}
+
+func TestMoveObject_RefusalsSendNothingAfterTheSearch(t *testing.T) {
+	cases := []struct {
+		name       string
+		hits       []searchHit
+		args       map[string]any
+		want       string
+		afterQuery bool // whether the refusal comes after the package search
+	}{
+		{"transportable destination without transport", []searchHit{{"PROG/P", "ZDEMO", "$TMP"}},
+			moveWithTransport("PROG", "ZDEMO", "ZABAP01", ""), "give transport=", false},
+		{"local destination with transport", []searchHit{{"PROG/P", "ZDEMO", "$TMP"}},
+			moveWithTransport("PROG", "ZDEMO", "$TMP", "S4DK000001"), "local package", false},
+		{"transport is not a request number", []searchHit{{"PROG/P", "ZDEMO", "$TMP"}},
+			moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK12"), "not a transport request number", false},
+		{"injection in transport", []searchHit{{"PROG/P", "ZDEMO", "$TMP"}},
+			moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK000001' OR 1=1"), "not a transport request number", false},
+		{"unsupported type with transport", []searchHit{{"FUGR/F", "ZDEMO", "$TMP"}},
+			moveWithTransport("FUNC", "ZDEMO", "ZABAP01", "S4DK000001"), "only supports PROG, CLAS and INTF", false},
+		{"transportable source to another transportable package", []searchHit{{"PROG/P", "ZDEMO", "ZOTHER"}},
+			moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK000001"), "out of local", true},
+		{"transportable source to a local package", []searchHit{{"PROG/P", "ZDEMO", "ZABAP01"}},
+			moveWithTransport("PROG", "ZDEMO", "$TMP", ""), "out of local", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, rc := newSearchTestServer(t, tc.hits)
+			allowTransports(server)
+			out := callSAP(t, server, tc.args)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("expected %q in the refusal, got: %s", tc.want, out)
+			}
+			s, other := rc.searches()
+			if other != 0 {
+				t.Errorf("a refusal sent %d request(s) after the search", other)
+			}
+			if !tc.afterQuery && s != 0 {
+				t.Errorf("this refusal must come before any search, but %d search(es) were sent", s)
+			}
+		})
+	}
+}
+
+// The controls of the refusals above: the same calls, valid, reach the connection.
+func TestMoveObject_ValidMovesReachTheConnection(t *testing.T) {
+	cases := []struct {
+		name string
+		hits []searchHit
+		args map[string]any
+	}{
+		{"local to local", []searchHit{{"PROG/P", "ZDEMO", "$TMP"}}, moveWithTransport("PROG", "ZDEMO", "$TMP", "")},
+		{"local into transportable with a request", []searchHit{{"PROG/P", "ZDEMO", "$TMP"}},
+			moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK000001")},
+		{"lower-case request and class subtype", []searchHit{{"CLAS/OC", "ZCL_DEMO", "$TMP"}},
+			moveWithTransport("clas/oc", "ZCL_DEMO", "ZABAP01", "s4dk000001")},
+		{"already in the target: completes the recording", []searchHit{{"PROG/P", "ZDEMO", "ZABAP01"}},
+			moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK000001")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, rc := newSearchTestServer(t, tc.hits)
+			allowTransports(server)
+			out := callSAP(t, server, tc.args)
+			for _, refusal := range []string{"blocked by safety configuration", "out of local", "not a transport request number", "give transport="} {
+				if strings.Contains(out, refusal) {
+					t.Fatalf("a valid move must not be refused (%q): %s", refusal, out)
+				}
+			}
+			if _, other := rc.searches(); other == 0 {
+				t.Error("a valid move should reach the WebSocket connection")
+			}
+		})
+	}
+}
+
+func TestMoveObject_TransportPolicyApplies(t *testing.T) {
+	hits := []searchHit{{"PROG/P", "ZDEMO", "$TMP"}}
+	args := moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK000001")
+
+	// --allow-transportable-edits off: refused before anything is sent.
+	server, rc := newSearchTestServer(t, hits)
+	server.adtClient.Safety().AllowTransportableEdits = false
+	out := callSAP(t, server, args)
+	if !strings.Contains(strings.ToLower(out), "transport") {
+		t.Errorf("expected a transport policy refusal, got: %s", out)
+	}
+	if s, other := rc.searches(); s != 0 || other != 0 {
+		t.Errorf("a policy refusal sent %d search(es) and %d other request(s)", s, other)
+	}
+
+	// --allowed-transports without this request: refused too.
+	server, rc = newSearchTestServer(t, hits)
+	allowTransports(server)
+	server.adtClient.Safety().AllowedTransports = []string{"S4DK999999"}
+	out = callSAP(t, server, args)
+	if !strings.Contains(out, "S4DK000001") {
+		t.Errorf("expected the refusal to name the request, got: %s", out)
+	}
+	if s, other := rc.searches(); s != 0 || other != 0 {
+		t.Errorf("a whitelist refusal sent %d search(es) and %d other request(s)", s, other)
+	}
+}
+
+func TestMoveNotRecordedMessage_NamesTheRisk(t *testing.T) {
+	msg := moveNotRecordedMessage("PROG", "ZX", "ZABAP01", "S4DK000001")
+	for _, want := range []string{"WITHOUT being in any request", "ZABAP01", "S4DK000001", "ZX"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q lacks %q", msg, want)
+		}
 	}
 }

@@ -248,6 +248,26 @@ type MoveObjectResult struct {
 	ObjName    string `json:"obj_name"`
 	NewPackage string `json:"new_package"`
 	Message    string `json:"message"`
+	// Set only by a move that names a transport request.
+	Code       string `json:"code,omitempty"`
+	Transport  string `json:"transport,omitempty"`
+	Recording  string `json:"recording,omitempty"` // recorded | already_recorded
+	OldPackage string `json:"old_package,omitempty"`
+}
+
+// moveObjectParams builds the WebSocket parameters of a move. The transport is
+// sent only when given: its presence is what selects the move-and-record path
+// in ZADT_CL_TADIR_MOVE.
+func moveObjectParams(objectType, objectName, newPackage, transport string) map[string]any {
+	params := map[string]any{
+		"object":      objectType,
+		"obj_name":    objectName,
+		"new_package": newPackage,
+	}
+	if transport != "" {
+		params["transport"] = transport
+	}
+	return params
 }
 
 // MoveObject moves an ABAP object to a different package via WebSocket.
@@ -255,18 +275,17 @@ type MoveObjectResult struct {
 // objectType: CLAS, PROG, INTF, FUGR, etc.
 // objectName: Name of the object (e.g., ZCL_TEST)
 // newPackage: Target package (e.g., $ZRAY)
-func (c *DebugWebSocketClient) MoveObject(ctx context.Context, objectType, objectName, newPackage string) (*MoveObjectResult, error) {
+// transport: empty for a move between local packages (TADIR only); a workbench
+// request to move a local PROG/CLAS/INTF into a transportable package and
+// record it in that request.
+func (c *DebugWebSocketClient) MoveObject(ctx context.Context, objectType, objectName, newPackage, transport string) (*MoveObjectResult, error) {
 	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
 	id := c.GenerateID("move")
 
-	paramsObj := map[string]any{
-		"object":      objectType,
-		"obj_name":    objectName,
-		"new_package": newPackage,
-	}
+	paramsObj := moveObjectParams(objectType, objectName, newPackage, transport)
 
 	rawMsg := map[string]any{
 		"id":      id,

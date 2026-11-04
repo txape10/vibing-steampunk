@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -966,6 +967,9 @@ func (s *Server) handleDeleteObject(ctx context.Context, request mcp.CallToolReq
 	return mcp.NewToolResultText(msg), nil
 }
 
+// moveTransportPattern is the shape of a workbench request number (<SID>K<6 digits>).
+var moveTransportPattern = regexp.MustCompile(`^[A-Z0-9]{3}K[0-9]{6}$`)
+
 func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	objectType, ok := request.GetArguments()["object_type"].(string)
 	if !ok || objectType == "" {
@@ -985,16 +989,58 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 	if refused := s.refuseUnderSafety(adt.OpUpdate, "MoveObject"); refused != nil {
 		return refused, nil
 	}
+	// A move that names a transport request takes a local PROG/CLAS/INTF into a
+	// transportable package and records it in that request. Without one the move
+	// only changes TADIR (TR_TADIR_INTERFACE records nothing in any request), so
+	// it is limited to local ($) packages.
+	transport := ""
+	if v, given := request.GetArguments()["transport"]; given {
+		raw, _ := v.(string)
+		transport = adt.NormalizeTransport(raw)
+		if transport == "" {
+			return newToolResultError("transport must be a request number such as S4DK000001"), nil
+		}
+		if !moveTransportPattern.MatchString(transport) {
+			return newToolResultError(fmt.Sprintf("%q is not a transport request number", transport)), nil
+		}
+		// The ABAP side takes the TADIR object type: CLAS/OC is a CLAS.
+		objectType = strings.ToUpper(strings.SplitN(strings.TrimSpace(objectType), "/", 2)[0])
+		switch objectType {
+		case "PROG", "CLAS", "INTF":
+		default:
+			return newToolResultError(fmt.Sprintf("MoveObject with a transport only supports PROG, CLAS and INTF, not %s", objectType)), nil
+		}
+		if strings.HasPrefix(newPackage, "$") {
+			return newToolResultError(fmt.Sprintf("%s is a local package: no transport request is used there; leave transport out", newPackage)), nil
+		}
+		if err := s.adtClient.Safety().CheckTransportableEdit(transport, "MoveObject"); err != nil {
+			return newToolResultError(err.Error()), nil
+		}
+	} else if !strings.HasPrefix(newPackage, "$") {
+		return newToolResultError(fmt.Sprintf("%s is transportable: moving a local object into it must be recorded in a request, so give transport=<workbench request>; without one MoveObject only moves between local ($) packages", newPackage)), nil
+	}
 	// The destination package is where the object ends up, so it has to be one
 	// the configuration lets this server write to.
 	if err := s.adtClient.Safety().CheckPackage(newPackage); err != nil {
 		return newToolResultError(err.Error()), nil
 	}
 
-	// ...and the package it leaves has to be one too: moving an object out of a
-	// package this server may not touch is as much a write to it.
-	if err := s.adtClient.CheckObjectPackageByName(ctx, objectType, objectName, "MoveObject"); err != nil {
+	// A stateless lookup, before the WebSocket and outside any lock window.
+	sourcePkg, err := s.adtClient.ObjectPackageByName(ctx, objectType, objectName, "MoveObject")
+	if err != nil {
 		return newToolResultError(err.Error()), nil
+	}
+	// An object already in the target package is allowed only with a transport: it
+	// completes the recording a half-done move left pending.
+	alreadyThere := transport != "" && strings.EqualFold(sourcePkg, newPackage)
+	if !strings.HasPrefix(sourcePkg, "$") && !alreadyThere {
+		return newToolResultError(fmt.Sprintf("MoveObject only moves objects out of local ($) packages; %s %s lives in the transportable package %s (use SE80/SE03)", objectType, objectName, sourcePkg)), nil
+	}
+	// ...and the package it leaves has to be one the configuration allows too:
+	// moving an object out of a package this server may not touch is as much a
+	// write to it.
+	if err := s.adtClient.Safety().CheckPackage(sourcePkg); err != nil {
+		return newToolResultError(fmt.Sprintf("operation 'MoveObject': source package of %s %s: %v", objectType, objectName, err)), nil
 	}
 
 	// Ensure WebSocket client is connected
@@ -1002,15 +1048,33 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 		return newToolResultError(fmt.Sprintf("Failed to connect to ZADT_VSP WebSocket: %v. Ensure ZADT_VSP is deployed and SAPC/SICF are configured.", err)), nil
 	}
 
-	result, err := s.debugWSClient.MoveObject(ctx, objectType, objectName, newPackage)
+	result, err := s.debugWSClient.MoveObject(ctx, objectType, objectName, newPackage, transport)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("MoveObject failed: %v", err)), nil
 	}
 
 	// Format result
+	if result.Success && transport != "" && (result.Transport == "" || result.Recording == "") {
+		return newToolResultError(moveNotRecordedMessage(objectType, objectName, newPackage, transport)), nil
+	}
 	if result.Success {
-		return mcp.NewToolResultText(fmt.Sprintf("Object moved successfully.\n\nObject: %s %s\nNew Package: %s\nMessage: %s",
-			result.Object, result.ObjName, result.NewPackage, result.Message)), nil
+		text := fmt.Sprintf("Object moved successfully.\n\nObject: %s %s\nNew Package: %s\nMessage: %s",
+			result.Object, result.ObjName, result.NewPackage, result.Message)
+		if result.Transport != "" {
+			text += fmt.Sprintf("\nTransport: %s (%s)\nOld Package: %s", result.Transport, result.Recording, result.OldPackage)
+		}
+		return mcp.NewToolResultText(text), nil
+	}
+	if result.Code != "" {
+		return newToolResultError(fmt.Sprintf("Move failed [%s]: %s", result.Code, result.Message)), nil
 	}
 	return newToolResultError(fmt.Sprintf("Move failed: %s", result.Message)), nil
+}
+
+// moveNotRecordedMessage is the error for a move that named a transport but whose
+// answer carries no recording: the ZADT_VSP backend is older than this feature
+// (stale WebSocket session or install from src/) and did only the TADIR change.
+func moveNotRecordedMessage(objectType, objectName, newPackage, transport string) string {
+	return fmt.Sprintf("MoveObject: the ZADT_VSP backend answered without recording %s %s in %s. It probably predates the transport support (restart Claude Desktop or redeploy ZCL_VSP_RFC_SERVICE/ZADT_CL_TADIR_MOVE). The object may already be in package %s WITHOUT being in any request: check TADIR/E071 and repeat the same call once the backend is current.",
+		objectType, objectName, transport, newPackage)
 }

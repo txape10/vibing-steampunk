@@ -161,6 +161,28 @@ CLASS zcl_vsp_rfc_service IMPLEMENTATION.
     TRANSLATE lv_obj_name TO UPPER CASE.
     TRANSLATE lv_new_pkg TO UPPER CASE.
 
+    " With a transport request the object goes from a local package into a
+    " transportable one and is recorded in that request
+    DATA(lv_transport) = extract_param( iv_params = is_message-params iv_name = 'transport' ).
+    IF lv_transport IS NOT INITIAL.
+      TRANSLATE lv_transport TO UPPER CASE.
+      DATA(ls_moved) = zadt_cl_tadir_move=>move_object_to_request(
+        iv_object   = CONV #( lv_object )
+        iv_obj_name = CONV #( lv_obj_name )
+        iv_new_pkg  = CONV #( lv_new_pkg )
+        iv_request  = CONV #( lv_transport ) ).
+      DATA(lv_ok) = COND string( WHEN ls_moved-success = abap_true THEN 'true' ELSE 'false' ).
+      DATA(lv_br) = '{'.
+      DATA(lv_er) = '}'.
+      DATA lv_json_tr TYPE string.
+      lv_json_tr = |{ lv_br }"success":{ lv_ok },"pgmid":"{ lv_pgmid }","object":"{ lv_object }","obj_name":"{ lv_obj_name }",|.
+      lv_json_tr = lv_json_tr && |"new_package":"{ lv_new_pkg }","code":"{ escape_json( ls_moved-code ) }","transport":"{ lv_transport }",|.
+      lv_json_tr = lv_json_tr && |"recording":"{ escape_json( ls_moved-recording ) }","old_package":"{ ls_moved-old_pkg }",|.
+      lv_json_tr = lv_json_tr && |"message":"{ escape_json( ls_moved-message ) }"{ lv_er }|.
+      rs_response = VALUE #( id = is_message-id success = abap_true data = lv_json_tr ).
+      RETURN.
+    ENDIF.
+
     " Call ZADT_CL_TADIR_MOVE to perform the move
     DATA lv_result TYPE string.
     TRY.
