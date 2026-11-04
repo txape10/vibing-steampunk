@@ -286,6 +286,7 @@ Background jobs (SM37, free SQL on TBTCO/TBTCP, logon client only):
   SAP(action="analyze", params={"type": "spool_list", "job": "ZDEMO_NIGHTLY", "user": "TESTUSER", "program": "ZDEMO_RUN", "title": "Report*"})
   SAP(action="analyze", params={"type": "spool_read", "number": 27302})   — ABAP list decoded to text (TST01/TST03, max 20 MB)
   SAP(action="analyze", params={"type": "spool_read", "number": 27302, "via": "rfc"})   — through XBP over RFC (auto: SQL first, RFC only for spool kept in files)
+  SAP(action="analyze", params={"type": "badi_implementations", "badi": "ME_PROCESS_PO_CUST"})   — every implementation of a BAdI (BADI_IMPL) with class and active flag (read from each ENHO)
   SAP(action="analyze", params={"type": "job_log", "job": "ZDEMO_NIGHTLY", "count": "22554500"})   — job log through XBP over RFC (needs the gateway; refused under SAP_READ_ONLY)
       spool_read via SQL goes by table, NOT through the spool authorization checks (S_SPO_ACT, owner): anyone with free SQL on these tables reads any spool of the logon client.
       A spool kept in files on the application server (TST01 storage F) has no content in TST03.

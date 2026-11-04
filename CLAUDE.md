@@ -2468,6 +2468,14 @@ the code permanently — it is the fix, not a placeholder.
 - **Verified live (2026-11-03/04)**: dev, all four types; PRD read-only: `job_list`, `spool_list`, `spool_read` by SQL (spool 26278 decoded; 26277/26276 are OTF Smart Forms, reported as "not an ABAP list"), `job_log` correctly blocked. `ENQUEUE_READ` empty after RFC calls.
 - Code review: APPROVE, 0 CRITICAL/HIGH. Not applied (LOW): LOGOFF with the request context, duplicated Pin/logon block, no size cap on RFC outputs.
 
+### 2bk. Upstream #213 (adapted) -- read Enhancement Framework objects (ENHO) and list the implementations of a BAdI (2026-11-04)
+- Surface: `read ENHO <name>` (via `GetSource`) and `SAP(action="analyze", params={"type":"badi_implementations","badi":"<BAdI>"})`. Read-only (`checkSafety(OpRead)`); nothing locks, writes or activates. Files: `pkg/adt/enhancements.go` (+`_test.go`), `internal/mcp/handlers_enhancements.go`, hooks in `workflows_source.go`, `handlers_source.go`, `handlers_help.go`, `handlers_universal.go`.
+- **Deviation from upstream, found live**: upstream's subtype codes (XH/XC/XFB/XD/XBD) do not exist on S4D. Here ENHO is `ENHO/XHH` (source plug-in, `/enhancements/enhoxhh/<n>`, `source/main` text) or `ENHO/XHB` (BAdI implementation, `/enhancements/enhoxhb/<n>`, XML; `source/main` is 404). Other subtypes are rejected naming the code. PR #349 (BADI_IMPL creation) and the include-enhancements listing are out of scope.
+- XHH: source plus hook points from `ENHINCINX` (VERSION='A'), prepended as `* ENHANCEMENT n hooked at ... in <program>` comments. XHB: class, BAdI, spot, active flag, short text from the XML, plus the other implementations of the same BAdI from `BADI_IMPL` (active flag read from each ENHO's XML, capped at 25 reads; list capped at 100, ordered by POS). A failed active read becomes a note and a 401/403 stops further reads.
+- Free SQL has no bind parameters: names are whitelisted `^[A-Z0-9_/]{1,30}$` and rejected, never escaped. `BlockFreeSQL` is an error, not an empty list. ENHINCINX/BADI_IMPL are not in `stableTables`.
+- Review: APPROVE, 0 CRITICAL/HIGH; 3 MEDIUM (silent failed active read, non-deterministic cap, untested caps) fixed. Tests mutation-checked on the name whitelist.
+- **Verified live (2026-11-04)**: dev: `ZENH_DELVRY` (XHH, 2 hooks at SAPLV56K), `ZENH_ME_PROCESS_PO_CUST2` (XHB, class ZCL_IM_ME_PROCESS_PO_CUST2, 4 siblings), `badi_implementations ME_PROCESS_PO_CUST` (5, all active), non-existent name -> "not found", quote payload refused locally. Prod (read-only): same BAdI (4) and `ZENH_DELVRY`. Not exercised: an inactive implementation, the 25/100 caps (unit tests only).
+
 ## Known Open Issues (Not Fixed)
 
 ### Freestyle SQL (`RunQuery`/`action="query", target="SQL"`) silently drops WHERE conditions past 255 characters on a single-line query — SAP-side bug, root-caused (2026-09-22); MITIGATED in vsp by 2av (2026-10-16)

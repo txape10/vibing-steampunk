@@ -185,8 +185,11 @@ func (c *Client) getSourceUncached(ctx context.Context, objectType, name string,
 	case "ENQU":
 		return c.GetXMLMetadataObject(ctx, fmt.Sprintf("/sap/bc/adt/ddic/lockobjects/sources/%s", strings.ToLower(name)))
 
+	case "ENHO":
+		return c.getEnhancementText(ctx, name)
+
 	default:
-		return "", fmt.Errorf("unsupported object type: %s (supported: PROG, CLAS, INTF, FUNC, FUGR, INCL, DDLS, VIEW, BDEF, SRVD, SRVB, MSAG, DOMA, DTEL, TTYP, ENQU)", objectType)
+		return "", fmt.Errorf("unsupported object type: %s (supported: PROG, CLAS, INTF, FUNC, FUGR, INCL, DDLS, VIEW, BDEF, SRVD, SRVB, MSAG, DOMA, DTEL, TTYP, ENQU, ENHO)", objectType)
 	}
 }
 

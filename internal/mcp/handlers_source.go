@@ -17,10 +17,10 @@ import (
 // routeSourceAction routes "read" for GetSource and "edit" for WriteSource/EditSource.
 func (s *Server) routeSourceAction(ctx context.Context, action, objectType, objectName string, params map[string]any) (*mcp.CallToolResult, bool, error) {
 	if action == "read" {
-		// GetSource covers: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, MSAG, VIEW, DOMA, DTEL, TTYP, ENQU
+		// GetSource covers: CLAS, PROG, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD, MSAG, VIEW, DOMA, DTEL, TTYP, ENQU, ENHO
 		switch objectType {
 		case "CLAS", "PROG", "INTF", "FUNC", "FUGR", "INCL", "DDLS", "BDEF", "SRVD", "MSAG", "VIEW",
-			"DOMA", "DTEL", "TTYP", "ENQU":
+			"DOMA", "DTEL", "TTYP", "ENQU", "ENHO":
 			args := map[string]any{
 				"object_type": objectType,
 				"name":        objectName,
@@ -123,7 +123,7 @@ func (s *Server) registerGetSource() {
 		mcp.WithDescription("Unified tool for reading ABAP source code across different object types. Replaces GetProgram, GetClass, GetInterface, GetFunction, GetInclude, GetFunctionGroup, GetClassInclude."),
 		mcp.WithString("object_type",
 			mcp.Required(),
-			mcp.Description("Object type: PROG (program), CLAS (class), INTF (interface), FUNC (function module), FUGR (function group), INCL (include), DDLS (CDS DDL source), VIEW (DDIC view), BDEF (behavior definition), SRVD (service definition), SRVB (service binding), MSAG (message class), DOMA (domain), DTEL (data element), TTYP (table type), ENQU (lock object)"),
+			mcp.Description("Object type: PROG (program), CLAS (class), INTF (interface), FUNC (function module), FUGR (function group), INCL (include), DDLS (CDS DDL source), VIEW (DDIC view), BDEF (behavior definition), SRVD (service definition), SRVB (service binding), MSAG (message class), DOMA (domain), DTEL (data element), TTYP (table type), ENQU (lock object), ENHO (enhancement implementation: source of a plug-in XHH, class/active state of a BAdI implementation XHB)"),
 		),
 		mcp.WithString("name",
 			mcp.Required(),

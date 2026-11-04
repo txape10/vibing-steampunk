@@ -59,6 +59,7 @@ These tools replace 11 granular read/write operations with intelligent parameter
 | `GetStructure` | Get structure definition | Expert |
 | `GetPackage` | Get package contents (`read DEVC` with `inventory=true` lists TADIR/TDEVC/abapGit content) | Focused |
 | `GetTransaction` | Get transaction details (VIT header + TSTC/TSTCP, classified by kind) | Expert |
+| `read` `ENHO` / `analyze` `badi_implementations` | Enhancement Framework: XHH source + hook points, XHB BAdI implementations and who else implements the BAdI (read-only, free SQL for lookups) | Hyperfocused |
 | `analyze` `job_list` / `spool_list` / `spool_read` / `job_log` | SM37/SP01 over free SQL; `via="rfc"` and `job_log` use XBP (refused under read-only) | Hyperfocused |
 | `GetTypeInfo` | Get data type information | Expert |
 | `GetCDSDependencies` | Get CDS view dependency tree | Focused |
