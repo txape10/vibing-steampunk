@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/oisee/open-rfc-go/rfc"
+
+	"github.com/oisee/vibing-steampunk/pkg/adt"
 )
 
 // Running a report is the classic thing ADT cannot do: the APC WebSocket forbids
@@ -43,27 +45,6 @@ type JobRun struct {
 	Status    string `json:"status,omitempty"`      // TBTCO STATUS once known
 	StatusFor string `json:"status_text,omitempty"` // human reading of that letter
 	Spool     string `json:"spool,omitempty"`       // spool list, when requested and available
-}
-
-// jobStatusText turns a TBTCO status letter into words.
-func jobStatusText(s string) string {
-	switch strings.ToUpper(strings.TrimSpace(s)) {
-	case "P":
-		return "scheduled"
-	case "S":
-		return "released"
-	case "R":
-		return "running"
-	case "F":
-		return "finished"
-	case "A":
-		return "cancelled"
-	case "Y":
-		return "ready"
-	case "":
-		return ""
-	}
-	return "unknown"
 }
 
 // RunReport runs a report as a background job through the XBP interface.
@@ -163,7 +144,7 @@ func RunReport(ctx context.Context, c *rfc.Client, report, jobName string, param
 		if err != nil {
 			return run, err
 		}
-		run.Status, run.StatusFor = status, jobStatusText(status)
+		run.Status, run.StatusFor = status, adt.JobStatusText(status)
 		// P scheduled, S released, R running, Y ready — anything else is terminal.
 		if status != "" && !strings.Contains("PSRY", strings.ToUpper(status)) {
 			return run, nil
@@ -184,7 +165,7 @@ func RunReport(ctx context.Context, c *rfc.Client, report, jobName string, param
 // on it later without re-running RunReport.
 func JobStatus(ctx context.Context, c *rfc.Client, jobName, jobCount string) (status, statusText string, err error) {
 	status, err = jobStatus(ctx, c, jobName, jobCount)
-	return status, jobStatusText(status), err
+	return status, adt.JobStatusText(status), err
 }
 
 // xbpUser is the external scheduler identity XBP records against the job.
@@ -249,39 +230,6 @@ func bapiError(call string, ret any) error {
 	return fmt.Errorf("%s: %s", call, msg)
 }
 
-// validJobName reports whether name is safe to interpolate literally into an
-// RFC_READ_TABLE WHERE clause. TBTCO-JOBNAME is CHAR 32; SAP job names are
-// conventionally uppercase alphanumeric plus a few separators — nothing in that
-// set can close the quoted literal early.
-func validJobName(name string) bool {
-	if name == "" || len(name) > 32 {
-		return false
-	}
-	for _, r := range name {
-		switch {
-		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-		case r == '_', r == '-', r == '/':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// validJobCount reports whether count is a well-formed TBTCO-JOBCOUNT (an
-// 8-digit NUMC field).
-func validJobCount(count string) bool {
-	if count == "" || len(count) > 8 {
-		return false
-	}
-	for _, r := range count {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 // jobStatus reads one job's TBTCO status. jobName/jobCount are validated
 // against a character whitelist before being interpolated into the WHERE
 // clause — RFC_READ_TABLE's OPTIONS has no bind parameters, so an unvalidated
@@ -289,10 +237,10 @@ func validJobCount(count string) bool {
 // same class of bug already fixed in this codebase for RFC_SEARCH/TFDIR and
 // GetUserTransports/AS4USER).
 func jobStatus(ctx context.Context, c rfcCaller, jobName, jobCount string) (string, error) {
-	if !validJobName(jobName) {
+	if !adt.ValidJobName(jobName) {
 		return "", fmt.Errorf("invalid job name %q: expected up to 32 letters, digits, or _ - /", jobName)
 	}
-	if !validJobCount(jobCount) {
+	if !adt.ValidJobCount(jobCount) {
 		return "", fmt.Errorf("invalid job count %q: expected up to 8 digits", jobCount)
 	}
 	where := fmt.Sprintf("JOBNAME = '%s' AND JOBCOUNT = '%s'", jobName, jobCount)

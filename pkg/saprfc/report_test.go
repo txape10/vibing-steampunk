@@ -1,29 +1,8 @@
 package saprfc
 
 import (
-	"strings"
 	"testing"
 )
-
-func TestJobStatusText(t *testing.T) {
-	cases := map[string]string{
-		"P":   "scheduled",
-		"S":   "released",
-		"R":   "running",
-		"F":   "finished",
-		"A":   "cancelled",
-		"Y":   "ready",
-		"":    "",
-		"z":   "unknown",
-		"XX":  "unknown",
-		" p ": "scheduled", // TBTCO can pad the field
-	}
-	for in, want := range cases {
-		if got := jobStatusText(in); got != want {
-			t.Errorf("jobStatusText(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
 
 func TestSelectionRows_Defaults(t *testing.T) {
 	rows := selectionRows([]ReportParam{{Name: "p_matnr", Low: "4711"}})
@@ -93,47 +72,6 @@ func TestBapiError_FallsBackToIDNumber(t *testing.T) {
 	}
 	if got := err.Error(); got != "X: BT042" {
 		t.Errorf("unexpected message: %q", got)
-	}
-}
-
-func TestValidJobName_RejectsInjection(t *testing.T) {
-	cases := []string{
-		"VSP' OR JOBNAME LIKE 'Z",
-		"X'; DELETE FROM TBTCO WHERE ''='",
-		"",
-		strings.Repeat("A", 33), // longer than TBTCO-JOBNAME (CHAR 32)
-	}
-	for _, name := range cases {
-		if validJobName(name) {
-			t.Errorf("validJobName(%q) = true, want false", name)
-		}
-	}
-}
-
-func TestValidJobName_AcceptsRealNames(t *testing.T) {
-	cases := []string{"VSP_ZTESTRCG1", "job-name_123", "A"}
-	for _, name := range cases {
-		if !validJobName(name) {
-			t.Errorf("validJobName(%q) = false, want true", name)
-		}
-	}
-}
-
-func TestValidJobCount_RejectsInjection(t *testing.T) {
-	cases := []string{"12345678' OR '1'='1", "", "123456789", "abcdefgh"}
-	for _, count := range cases {
-		if validJobCount(count) {
-			t.Errorf("validJobCount(%q) = true, want false", count)
-		}
-	}
-}
-
-func TestValidJobCount_AcceptsRealCounts(t *testing.T) {
-	cases := []string{"00000001", "12345678", "1"}
-	for _, count := range cases {
-		if !validJobCount(count) {
-			t.Errorf("validJobCount(%q) = false, want true", count)
-		}
 	}
 }
 
