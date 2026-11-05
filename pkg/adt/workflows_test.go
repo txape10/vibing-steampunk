@@ -710,7 +710,7 @@ func TestClient_WriteProgram_AdoptsCorrNrFromLock_WhenTransportEmpty(t *testing.
 	// Adoption re-validates against the transportable-edit policy (issue #144
 	// follow-up), so it must be explicitly allowed for the adopted corrNr to
 	// reach UpdateSource.
-	cfg := NewConfig("https://sap.example.com:44300", "user", "pass", WithAllowTransportableEdits())
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass", WithAllowTransportableEdits(), WithTransportChoice("off"))
 	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
 
 	if _, err := client.WriteProgram(context.Background(), "ZTEST", "REPORT ztest.", ""); err != nil {
@@ -796,7 +796,7 @@ func TestClient_WriteClass_AdoptsCorrNrFromLock_WhenTransportEmpty(t *testing.T)
 	// Adoption re-validates against the transportable-edit policy (issue #144
 	// follow-up), so it must be explicitly allowed for the adopted corrNr to
 	// reach UpdateSource.
-	cfg := NewConfig("https://sap.example.com:44300", "user", "pass", WithAllowTransportableEdits())
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass", WithAllowTransportableEdits(), WithTransportChoice("off"))
 	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
 
 	if _, err := client.WriteClass(context.Background(), "ZCL_TEST", "CLASS zcl_test DEFINITION.", ""); err != nil {

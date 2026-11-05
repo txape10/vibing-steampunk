@@ -179,11 +179,11 @@ func (c *Client) chooseTransport(ctx context.Context, objectURL, devClass, lockC
 	if err != nil {
 		return nil, err
 	}
-	if !check.Recording {
-		return &TransportChoice{}, nil
-	}
 	if check.LockedIn != "" {
 		return &TransportChoice{Transport: check.LockedIn, Reason: "the request the object is already locked in"}, nil
+	}
+	if !check.Recording {
+		return &TransportChoice{}, nil
 	}
 	open := check.Candidates[:0:0]
 	for _, cand := range check.Candidates {
@@ -288,6 +288,38 @@ func (c *Client) planTransport(ctx context.Context, supplied, objectURL, devClas
 	return choice
 }
 
+// ErrUnexpectedLockTransport: a LOCK sent without a request answered with one.
+var ErrUnexpectedLockTransport = errors.New("the LOCK returned a transport request that was not chosen")
+
+// errStaleTransportableTarget: the name is already registered in a
+// transportable package although the create targets a local one.
+var errStaleTransportableTarget = errors.New("object name is registered in a transportable package")
+
+// verifyLocalTarget refuses a create in a local package when the transport
+// check (empty package, operation I) reports the name already lives in a
+// non-local package — typically a TADIR row left by a moved or deleted object
+// until its request is released. Nothing is sent to SAP that could take a lock.
+// A check that fails is not a refusal here: the TADIR row is then looked up
+// directly, and if that fails too the create proceeds (the LOCK guard in
+// lockForWrite is the second layer).
+func (c *Client) verifyLocalTarget(ctx context.Context, objectURL, pkg, name, objType string) error {
+	existing := ""
+	check, err := c.CheckTransport(ctx, objectURL, "", "I")
+	if err == nil {
+		existing = check.Package
+	} else if res, qerr := c.RunQuery(ctx, fmt.Sprintf("SELECT devclass FROM tadir WHERE pgmid = 'R3TR' AND object = '%s' AND obj_name = '%s'", escapeQuote(strings.ToUpper(strings.SplitN(objType, "/", 2)[0])), escapeQuote(strings.ToUpper(name))), 5); qerr == nil && res != nil {
+		for _, row := range res.Rows {
+			if d := strings.TrimSpace(getString(row, "DEVCLASS")); d != "" && !strings.HasPrefix(d, "$") {
+				existing = d
+			}
+		}
+	}
+	if existing != "" && !strings.HasPrefix(existing, "$") {
+		return fmt.Errorf("%w: %s is registered in package %s (stale TADIR entry until its request is released), the create in %s would make SAP generate a request; use another name, or release/delete the request holding the stale entry", errStaleTransportableTarget, name, existing, pkg)
+	}
+	return nil
+}
+
 // objectIsLocal reports whether the object lives in a local package ($...),
 // where no request is needed. Used only when the transport check failed.
 func (c *Client) objectIsLocal(ctx context.Context, objectURL, devClass string) bool {
@@ -312,6 +344,12 @@ func (c *Client) resolveWriteTransportFor(plan *TransportChoice, supplied, lockC
 		return "", "", plan.Err
 	}
 	if lockCorrNr != "" {
+		if plan.Transport == "" && !plan.Required {
+			// The check said no request was needed and none was sent on the
+			// LOCK, yet the LOCK came back with one: SAP generated it. Never
+			// adopt it; the caller's deferred release frees the lock.
+			return "", "", fmt.Errorf("%w: %s on %s (SAP generated a request nobody chose; it may need deleting in SE09)", ErrUnexpectedLockTransport, lockCorrNr, opName)
+		}
 		if err := c.checkTransportableEdit(lockCorrNr, opName); err != nil {
 			return "", "", err
 		}

@@ -732,6 +732,18 @@ func (c *Client) CreateObject(ctx context.Context, opts CreateObjectOptions) err
 		}
 	}
 
+	// A create in a local package over a name TADIR still holds in a
+	// transportable one (stale row of a moved/deleted object) would leave the
+	// object where it was, and the LOCK that follows would make SAP generate a
+	// request. Refuse before the POST.
+	if opts.ObjectType != ObjectTypePackage && strings.HasPrefix(opts.PackageName, "$") {
+		if objectURL, uerr := c.buildObjectURLWithParent(opts.ObjectType, opts.Name, opts.ParentName); uerr == nil {
+			if err := c.verifyLocalTarget(ctx, objectURL, opts.PackageName, opts.Name, string(opts.ObjectType)); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Package creation validation: local packages always allowed, transportable requires opt-in
 	if opts.ObjectType == ObjectTypePackage && !strings.HasPrefix(opts.Name, "$") {
 		// Transportable package - check if transports are enabled

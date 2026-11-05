@@ -51,7 +51,7 @@ func TestMutationGateSkip_EditSourceNoSearchBetweenLockAndPut(t *testing.T) {
 		// The lock response carries a real corrNr; transport adoption
 		// re-validates against this policy (issue #144 follow-up), so it
 		// must be allowed here for the PUT this test asserts on to be reached.
-		WithAllowTransportableEdits(),
+		WithAllowTransportableEdits(), WithTransportChoice("off"),
 	)
 	transport := NewTransportWithClient(cfg, mock)
 	client := NewClientWithTransport(cfg, transport)

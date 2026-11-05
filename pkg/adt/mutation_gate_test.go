@@ -214,7 +214,7 @@ func TestClient_WriteSource_Update_AllowedPackages_Allowed(t *testing.T) {
 	}
 	cfg := NewConfig("https://sap.example.com:44300", "user", "pass",
 		WithAllowedPackages("Z*"),
-		WithAllowTransportableEdits(), // lock response carries a real corrNr
+		WithAllowTransportableEdits(), WithTransportChoice("off"), // lock response carries a real corrNr
 	)
 	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
 

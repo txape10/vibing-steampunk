@@ -1553,7 +1553,9 @@ func TestWriteSourceFUNC_AdoptsLockCorrNrWhenTransportNotSupplied(t *testing.T) 
 		default:
 			w.WriteHeader(http.StatusOK)
 		}
-	}, WithAllowTransportableEdits())
+		// choice off: adoption of the lock's request is the #144 path under
+		// test; with the choice on, an unplanned lock request is refused.
+	}, WithAllowTransportableEdits(), WithTransportChoice("off"))
 
 	result, err := client.writeSourceUpdate(context.Background(), "FUNC", "Z_DEMO_FM",
 		"FUNCTION z_demo_fm.\nENDFUNCTION.\n", &WriteSourceOptions{Parent: "ZFG_DEMO"})
