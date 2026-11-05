@@ -989,6 +989,7 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 	if refused := s.refuseUnderSafety(adt.OpUpdate, "MoveObject"); refused != nil {
 		return refused, nil
 	}
+	dryRun, _ := request.GetArguments()["dry_run"].(bool)
 	// A move that names a transport request takes a local PROG/CLAS/INTF into a
 	// transportable package and records it in that request. Without one the move
 	// only changes TADIR (TR_TADIR_INTERFACE records nothing in any request), so
@@ -1019,6 +1020,9 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 	} else if !strings.HasPrefix(newPackage, "$") {
 		return newToolResultError(fmt.Sprintf("%s is transportable: moving a local object into it must be recorded in a request, so give transport=<workbench request>; without one MoveObject only moves between local ($) packages", newPackage)), nil
 	}
+	if dryRun && transport == "" {
+		return newToolResultError("dry_run needs a transport: it previews the move-and-record path"), nil
+	}
 	// The destination package is where the object ends up, so it has to be one
 	// the configuration lets this server write to.
 	if err := s.adtClient.Safety().CheckPackage(newPackage); err != nil {
@@ -1031,10 +1035,13 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 		return newToolResultError(err.Error()), nil
 	}
 	// An object already in the target package is allowed only with a transport: it
-	// completes the recording a half-done move left pending.
-	alreadyThere := transport != "" && strings.EqualFold(sourcePkg, newPackage)
-	if !strings.HasPrefix(sourcePkg, "$") && !alreadyThere {
-		return newToolResultError(fmt.Sprintf("MoveObject only moves objects out of local ($) packages; %s %s lives in the transportable package %s (use SE80/SE03)", objectType, objectName, sourcePkg)), nil
+	// completes the recording a half-done move left pending (the ABAP side
+	// answers already_recorded when nothing is left to do).
+	// With a transport the source may also be another transportable package: the
+	// ABAP side asks the CTS what must be recorded and refuses a change of
+	// transport layer.
+	if transport == "" && !strings.HasPrefix(sourcePkg, "$") {
+		return newToolResultError(fmt.Sprintf("MoveObject without a transport only moves objects out of local ($) packages; %s %s lives in the transportable package %s (give transport=<workbench request>, or use SE80/SE03)", objectType, objectName, sourcePkg)), nil
 	}
 	// ...and the package it leaves has to be one the configuration allows too:
 	// moving an object out of a package this server may not touch is as much a
@@ -1048,7 +1055,7 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 		return newToolResultError(fmt.Sprintf("Failed to connect to ZADT_VSP WebSocket: %v. Ensure ZADT_VSP is deployed and SAPC/SICF are configured.", err)), nil
 	}
 
-	result, err := s.debugWSClient.MoveObject(ctx, objectType, objectName, newPackage, transport)
+	result, err := s.debugWSClient.MoveObject(ctx, objectType, objectName, newPackage, transport, dryRun)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("MoveObject failed: %v", err)), nil
 	}
@@ -1056,6 +1063,14 @@ func (s *Server) handleMoveObject(ctx context.Context, request mcp.CallToolReque
 	// Format result
 	if result.Success && transport != "" && (result.Transport == "" || result.Recording == "") {
 		return newToolResultError(moveNotRecordedMessage(objectType, objectName, newPackage, transport)), nil
+	}
+	if result.Success && dryRun && result.Recording != "dry_run" && result.Recording != "already_recorded" {
+		// An old backend ignores dry_run and would have moved the object.
+		return newToolResultError(fmt.Sprintf("MoveObject dry_run: the ZADT_VSP backend did not honour dry_run and answered %q: the object may have been moved. Check TADIR/E071 (restart Claude Desktop or redeploy ZADT_CL_TADIR_MOVE/ZCL_VSP_RFC_SERVICE).", result.Recording)), nil
+	}
+	if result.Success && result.Recording == "dry_run" {
+		return mcp.NewToolResultText(fmt.Sprintf("Dry run, nothing changed.\n\nObject: %s %s\nTarget Package: %s\nTransport: %s\nOld Package: %s\nMessage: %s",
+			result.Object, result.ObjName, result.NewPackage, result.Transport, result.OldPackage, result.Message)), nil
 	}
 	if result.Success {
 		text := fmt.Sprintf("Object moved successfully.\n\nObject: %s %s\nNew Package: %s\nMessage: %s",

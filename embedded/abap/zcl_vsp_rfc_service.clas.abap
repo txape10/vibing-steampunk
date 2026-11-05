@@ -166,11 +166,13 @@ CLASS zcl_vsp_rfc_service IMPLEMENTATION.
     DATA(lv_transport) = extract_param( iv_params = is_message-params iv_name = 'transport' ).
     IF lv_transport IS NOT INITIAL.
       TRANSLATE lv_transport TO UPPER CASE.
+      DATA(lv_dry_run) = extract_param( iv_params = is_message-params iv_name = 'dry_run' ).
       DATA(ls_moved) = zadt_cl_tadir_move=>move_object_to_request(
         iv_object   = CONV #( lv_object )
         iv_obj_name = CONV #( lv_obj_name )
         iv_new_pkg  = CONV #( lv_new_pkg )
-        iv_request  = CONV #( lv_transport ) ).
+        iv_request  = CONV #( lv_transport )
+        iv_dry_run  = xsdbool( lv_dry_run = 'true' ) ).
       DATA(lv_ok) = COND string( WHEN ls_moved-success = abap_true THEN 'true' ELSE 'false' ).
       DATA(lv_br) = '{'.
       DATA(lv_er) = '}'.

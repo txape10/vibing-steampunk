@@ -258,7 +258,7 @@ type MoveObjectResult struct {
 // moveObjectParams builds the WebSocket parameters of a move. The transport is
 // sent only when given: its presence is what selects the move-and-record path
 // in ZADT_CL_TADIR_MOVE.
-func moveObjectParams(objectType, objectName, newPackage, transport string) map[string]any {
+func moveObjectParams(objectType, objectName, newPackage, transport string, dryRun bool) map[string]any {
 	params := map[string]any{
 		"object":      objectType,
 		"obj_name":    objectName,
@@ -266,6 +266,11 @@ func moveObjectParams(objectType, objectName, newPackage, transport string) map[
 	}
 	if transport != "" {
 		params["transport"] = transport
+		// The ABAP side reads quoted scalars only (extract_param), so the flag
+		// travels as a string.
+		if dryRun {
+			params["dry_run"] = "true"
+		}
 	}
 	return params
 }
@@ -276,16 +281,17 @@ func moveObjectParams(objectType, objectName, newPackage, transport string) map[
 // objectName: Name of the object (e.g., ZCL_TEST)
 // newPackage: Target package (e.g., $ZRAY)
 // transport: empty for a move between local packages (TADIR only); a workbench
-// request to move a local PROG/CLAS/INTF into a transportable package and
-// record it in that request.
-func (c *DebugWebSocketClient) MoveObject(ctx context.Context, objectType, objectName, newPackage, transport string) (*MoveObjectResult, error) {
+// request to move a PROG/CLAS/INTF from a local or another transportable package
+// into a transportable package and record it in that request.
+// dryRun (only with a transport): check everything, change and record nothing.
+func (c *DebugWebSocketClient) MoveObject(ctx context.Context, objectType, objectName, newPackage, transport string, dryRun bool) (*MoveObjectResult, error) {
 	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
 	id := c.GenerateID("move")
 
-	paramsObj := moveObjectParams(objectType, objectName, newPackage, transport)
+	paramsObj := moveObjectParams(objectType, objectName, newPackage, transport, dryRun)
 
 	rawMsg := map[string]any{
 		"id":      id,

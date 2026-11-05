@@ -153,6 +153,12 @@ func moveWithTransport(objType, name, pkg, transport string) map[string]any {
 	return map[string]any{"action": "debug", "target": "MOVE", "params": params}
 }
 
+// withDryRun adds dry_run=true to the params of a MOVE call.
+func withDryRun(args map[string]any) map[string]any {
+	args["params"].(map[string]any)["dry_run"] = true
+	return args
+}
+
 // allowTransports lets the test server's policy accept a named request (the
 // default policy refuses transportable edits).
 func allowTransports(server *Server) {
@@ -177,8 +183,8 @@ func TestMoveObject_RefusalsSendNothingAfterTheSearch(t *testing.T) {
 			moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK000001' OR 1=1"), "not a transport request number", false},
 		{"unsupported type with transport", []searchHit{{"FUGR/F", "ZDEMO", "$TMP"}},
 			moveWithTransport("FUNC", "ZDEMO", "ZABAP01", "S4DK000001"), "only supports PROG, CLAS and INTF", false},
-		{"transportable source to another transportable package", []searchHit{{"PROG/P", "ZDEMO", "ZOTHER"}},
-			moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK000001"), "out of local", true},
+		{"dry_run without transport", []searchHit{{"PROG/P", "ZDEMO", "$TMP"}},
+			withDryRun(moveWithTransport("PROG", "ZDEMO", "$ZOTHER", "")), "dry_run needs a transport", false},
 		{"transportable source to a local package", []searchHit{{"PROG/P", "ZDEMO", "ZABAP01"}},
 			moveWithTransport("PROG", "ZDEMO", "$TMP", ""), "out of local", true},
 	}
@@ -215,6 +221,10 @@ func TestMoveObject_ValidMovesReachTheConnection(t *testing.T) {
 			moveWithTransport("clas/oc", "ZCL_DEMO", "ZABAP01", "s4dk000001")},
 		{"already in the target: completes the recording", []searchHit{{"PROG/P", "ZDEMO", "ZABAP01"}},
 			moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK000001")},
+		{"transportable source into another transportable package", []searchHit{{"PROG/P", "ZDEMO", "ZOTHER"}},
+			moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK000001")},
+		{"dry run with a request", []searchHit{{"PROG/P", "ZDEMO", "ZOTHER"}},
+			withDryRun(moveWithTransport("PROG", "ZDEMO", "ZABAP01", "S4DK000001"))},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

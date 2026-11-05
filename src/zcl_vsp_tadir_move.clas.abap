@@ -39,8 +39,10 @@ CLASS zcl_vsp_tadir_move DEFINITION
       RETURNING
         VALUE(rv_msg) TYPE string.
 
-    "! Move a program, class or interface from a local ($) package to a
-    "! transportable one and record it in an explicit workbench request.
+    "! Move a program, class or interface into a transportable package and record
+    "! it in an explicit workbench request. The source is a local ($) package
+    "! (R3TR entry) or another transportable package of the same transport layer
+    "! (the entries TR_CHECK_CHANGE_OF_DEVCLASS asks for, as SE03 records them).
     "! TADIR is changed first and the object recorded afterwards: the CTS treats an
     "! object of a local package as not recordable. If the recording fails the
     "! package is put back. No COMMIT/ROLLBACK: illegal in an APC handler.
@@ -48,12 +50,14 @@ CLASS zcl_vsp_tadir_move DEFINITION
     "! @parameter iv_obj_name | Object name (up to 30 characters)
     "! @parameter iv_new_pkg | Transportable target package
     "! @parameter iv_request | Workbench request with a modifiable task of the user
+    "! @parameter iv_dry_run | Check everything, change and record nothing
     CLASS-METHODS move_object_to_request
       IMPORTING
         iv_object        TYPE tadir-object
         iv_obj_name      TYPE tadir-obj_name
         iv_new_pkg       TYPE devclass
         iv_request       TYPE trkorr
+        iv_dry_run       TYPE abap_bool DEFAULT abap_false
       RETURNING
         VALUE(rs_result) TYPE ty_move_result.
 
@@ -79,13 +83,34 @@ CLASS zcl_vsp_tadir_move DEFINITION
       RETURNING
         VALUE(rs_error) TYPE ty_move_result.
 
-    CLASS-METHODS is_recorded
+    "! True when every entry is in the request (or its tasks), or when the object
+    "! itself (R3TR) is there: the CTS adds no partial entry then
+    CLASS-METHODS are_recorded
       IMPORTING
+        it_objects         TYPE tredt_objects
         iv_object          TYPE tadir-object
         iv_obj_name        TYPE tadir-obj_name
         iv_request         TYPE trkorr
       RETURNING
         VALUE(rv_recorded) TYPE abap_bool.
+
+    "! Asks the CTS (as SE03 does) which entries a package change must record and
+    "! refuses what this class does not do: a change of transport layer (R3TR
+    "! entry), a lock in another request, any CTS refusal
+    CLASS-METHODS check_package_change
+      IMPORTING
+        is_tadir   TYPE tadir
+        iv_pkg     TYPE devclass
+        iv_request TYPE trkorr
+      EXPORTING
+        et_objects TYPE tredt_objects
+        es_error   TYPE ty_move_result.
+
+    CLASS-METHODS describe_objects
+      IMPORTING
+        it_objects     TYPE tredt_objects
+      RETURNING
+        VALUE(rv_text) TYPE string.
 
     CLASS-METHODS set_package
       IMPORTING
@@ -97,8 +122,7 @@ CLASS zcl_vsp_tadir_move DEFINITION
 
     CLASS-METHODS record
       IMPORTING
-        iv_object       TYPE tadir-object
-        iv_obj_name     TYPE tadir-obj_name
+        it_objects      TYPE tredt_objects
         iv_request      TYPE trkorr
       RETURNING
         VALUE(rv_error) TYPE string.
@@ -190,8 +214,11 @@ CLASS zcl_vsp_tadir_move IMPLEMENTATION.
     CONSTANTS lc_pgmid       TYPE tadir-pgmid VALUE 'R3TR'.
     CONSTANTS lc_local_start TYPE c LENGTH 1 VALUE '$'.
     CONSTANTS lc_max_name    TYPE i VALUE 30.
+    CONSTANTS lc_deleted     TYPE tadir-delflag VALUE 'X'.
     DATA ls_tadir TYPE tadir.
     DATA lv_error TYPE string.
+    DATA lt_objects TYPE tredt_objects.
+    DATA lv_from_transportable TYPE abap_bool.
 
     IF iv_object <> 'PROG' AND iv_object <> 'CLAS' AND iv_object <> 'INTF'.
       rs_result = fail( iv_code = `OBJECT_TYPE_NOT_SUPPORTED`
@@ -224,12 +251,15 @@ CLASS zcl_vsp_tadir_move IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    " Only a local object moves in; one already in the target package just gets
-    " its recording completed (retry after a half-done move)
+    " One already in the target package just gets its recording completed (retry
+    " after a half-done move)
     IF ls_tadir-devclass <> iv_new_pkg AND ls_tadir-devclass(1) <> lc_local_start.
-      rs_result = fail( iv_code = `SOURCE_NOT_LOCAL`
-                        iv_message = |{ iv_object } { iv_obj_name } lives in the transportable package { ls_tadir-devclass }; only local objects can be moved in| ).
-      RETURN.
+      lv_from_transportable = abap_true.
+      IF ls_tadir-delflag = lc_deleted.
+        rs_result = fail( iv_code = `OBJECT_DELETED`
+                          iv_message = |{ iv_object } { iv_obj_name } is marked as deleted in TADIR (package { ls_tadir-devclass }); there is nothing to move| ).
+        RETURN.
+      ENDIF.
     ENDIF.
 
     DATA(ls_error) = check_request( iv_request ).
@@ -245,8 +275,20 @@ CLASS zcl_vsp_tadir_move IMPLEMENTATION.
 
     rs_result-old_pkg = ls_tadir-devclass.
 
+    IF lv_from_transportable = abap_true.
+      check_package_change( EXPORTING is_tadir = ls_tadir iv_pkg = iv_new_pkg iv_request = iv_request
+                            IMPORTING et_objects = lt_objects es_error = ls_error ).
+      IF ls_error-code IS NOT INITIAL.
+        rs_result = ls_error.
+        rs_result-old_pkg = ls_tadir-devclass.
+        RETURN.
+      ENDIF.
+    ELSE.
+      lt_objects = VALUE #( ( pgmid = lc_pgmid object = iv_object obj_name = iv_obj_name ) ).
+    ENDIF.
+
     IF ls_tadir-devclass = iv_new_pkg.
-      IF is_recorded( iv_object = iv_object iv_obj_name = iv_obj_name iv_request = iv_request ) = abap_true.
+      IF are_recorded( it_objects = lt_objects iv_object = iv_object iv_obj_name = iv_obj_name iv_request = iv_request ) = abap_true.
         rs_result-success = abap_true.
         rs_result-code = `OK`.
         rs_result-recording = `already_recorded`.
@@ -262,6 +304,11 @@ CLASS zcl_vsp_tadir_move IMPLEMENTATION.
         rs_result-old_pkg = ls_tadir-devclass.
         RETURN.
       ENDIF.
+      IF iv_dry_run = abap_true.
+        rs_result = VALUE #( success = abap_true code = `OK` recording = `dry_run` old_pkg = ls_tadir-devclass
+                             message = |Dry run: { iv_object } { iv_obj_name } would go { ls_tadir-devclass } -> { iv_new_pkg } and be recorded in { iv_request } as { describe_objects( lt_objects ) }| ).
+        RETURN.
+      ENDIF.
       lv_error = set_package( is_tadir = ls_tadir iv_pkg = iv_new_pkg iv_test = abap_false ).
       IF lv_error IS NOT INITIAL.
         rs_result = fail( iv_code = `MOVE_FAILED` iv_message = lv_error ).
@@ -270,10 +317,16 @@ CLASS zcl_vsp_tadir_move IMPLEMENTATION.
       ENDIF.
     ENDIF.
 
+    IF iv_dry_run = abap_true.
+      rs_result = VALUE #( success = abap_true code = `OK` recording = `dry_run` old_pkg = ls_tadir-devclass
+                           message = |Dry run: { iv_object } { iv_obj_name } is already in { iv_new_pkg }; it would be recorded in { iv_request } as { describe_objects( lt_objects ) }| ).
+      RETURN.
+    ENDIF.
+
     " The object is in the target package now: record it. No rollback exists in
     " an APC handler, so a failure here puts the package back by hand.
-    lv_error = record( iv_object = iv_object iv_obj_name = iv_obj_name iv_request = iv_request ).
-    IF lv_error IS INITIAL AND is_recorded( iv_object = iv_object iv_obj_name = iv_obj_name iv_request = iv_request ) = abap_false.
+    lv_error = record( it_objects = lt_objects iv_request = iv_request ).
+    IF lv_error IS INITIAL AND are_recorded( it_objects = lt_objects iv_object = iv_object iv_obj_name = iv_obj_name iv_request = iv_request ) = abap_false.
       lv_error = |{ iv_object } { iv_obj_name } is not in request { iv_request } after the recording|.
     ENDIF.
     IF lv_error IS NOT INITIAL.
@@ -308,7 +361,7 @@ CLASS zcl_vsp_tadir_move IMPLEMENTATION.
     rs_result-code = `OK`.
     rs_result-old_pkg = ls_tadir-devclass.
     rs_result-recording = `recorded`.
-    rs_result-message = |{ iv_object } { iv_obj_name }: { ls_tadir-devclass } -> { iv_new_pkg }, recorded in { iv_request }|.
+    rs_result-message = |{ iv_object } { iv_obj_name }: { ls_tadir-devclass } -> { iv_new_pkg }, recorded in { iv_request } as { describe_objects( lt_objects ) }|.
   ENDMETHOD.
 
   METHOD fail.
@@ -385,13 +438,89 @@ CLASS zcl_vsp_tadir_move IMPLEMENTATION.
     ENDLOOP.
   ENDMETHOD.
 
-  METHOD is_recorded.
-    SELECT SINGLE e071~trkorr FROM e071
-      INNER JOIN e070 ON e070~trkorr = e071~trkorr
-      WHERE e071~pgmid = 'R3TR' AND e071~object = @iv_object AND e071~obj_name = @iv_obj_name
-        AND ( e070~trkorr = @iv_request OR e070~strkorr = @iv_request )
-      INTO @DATA(lv_found).
-    rv_recorded = xsdbool( sy-subrc = 0 ).
+  METHOD are_recorded.
+    IF it_objects IS INITIAL.
+      rv_recorded = abap_false.
+      RETURN.
+    ENDIF.
+    rv_recorded = abap_true.
+    LOOP AT it_objects INTO DATA(ls_object).
+      SELECT SINGLE e071~trkorr FROM e071
+        INNER JOIN e070 ON e070~trkorr = e071~trkorr
+        WHERE ( ( e071~pgmid = @ls_object-pgmid AND e071~object = @ls_object-object AND e071~obj_name = @ls_object-obj_name )
+             OR ( e071~pgmid = 'R3TR' AND e071~object = @iv_object AND e071~obj_name = @iv_obj_name ) )
+          AND ( e070~trkorr = @iv_request OR e070~strkorr = @iv_request )
+        INTO @DATA(lv_found).
+      IF sy-subrc <> 0.
+        rv_recorded = abap_false.
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD describe_objects.
+    LOOP AT it_objects INTO DATA(ls_object).
+      rv_text = COND string( WHEN rv_text IS INITIAL THEN `` ELSE rv_text && `, ` ) && |{ ls_object-pgmid } { ls_object-object } { ls_object-obj_name }|.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD check_package_change.
+    CONSTANTS lc_object_entry TYPE e071-pgmid VALUE 'R3TR'.
+    DATA lt_e071 TYPE STANDARD TABLE OF e071 WITH DEFAULT KEY.
+    DATA lv_foreign TYPE e070-trkorr.
+    DATA lv_text TYPE string.
+
+    CLEAR: et_objects, es_error, sy-msgid.
+
+    CALL FUNCTION 'TR_CHECK_CHANGE_OF_DEVCLASS'
+      EXPORTING
+        iv_pgmid              = is_tadir-pgmid
+        iv_object             = is_tadir-object
+        iv_obj_name           = is_tadir-obj_name
+        iv_new_devclass       = iv_pkg
+      IMPORTING
+        ev_foreign_lock_order = lv_foreign
+      TABLES
+        tt_e071               = lt_e071
+      EXCEPTIONS
+        error_message         = 1
+        OTHERS                = 2.
+    IF sy-subrc <> 0.
+      IF sy-msgid IS NOT INITIAL.
+        MESSAGE ID sy-msgid TYPE 'E' NUMBER sy-msgno WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 INTO lv_text.
+      ELSE.
+        lv_text = |function ended with return code { sy-subrc } and no message|.
+      ENDIF.
+      es_error = fail( iv_code = `PACKAGE_CHANGE_REFUSED`
+                       iv_message = |The CTS refuses moving { is_tadir-object } { is_tadir-obj_name } from { is_tadir-devclass } to { iv_pkg }: { lv_text }| ).
+      RETURN.
+    ENDIF.
+
+    IF lv_foreign IS NOT INITIAL.
+      DATA(lv_parent) = VALUE e070-strkorr( ).
+      SELECT SINGLE strkorr FROM e070 WHERE trkorr = @lv_foreign INTO @lv_parent.
+      DATA(lv_lock_request) = COND trkorr( WHEN lv_parent IS INITIAL THEN lv_foreign ELSE lv_parent ).
+      IF lv_lock_request <> iv_request.
+        es_error = fail( iv_code = `OBJECT_LOCKED_IN_OTHER_REQUEST`
+                         iv_message = |{ is_tadir-object } { is_tadir-obj_name } is locked in request { lv_lock_request }| ).
+        RETURN.
+      ENDIF.
+    ENDIF.
+
+    IF lt_e071 IS INITIAL.
+      es_error = fail( iv_code = `NOTHING_TO_RECORD`
+                       iv_message = |The CTS asks for no entry for moving { is_tadir-object } { is_tadir-obj_name } to { iv_pkg }; use SE03| ).
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_e071 INTO DATA(ls_e071).
+      IF ls_e071-pgmid = lc_object_entry.
+        es_error = fail( iv_code = `TRANSPORT_LAYER_CHANGE`
+                         iv_message = |Moving { is_tadir-object } { is_tadir-obj_name } from { is_tadir-devclass } to { iv_pkg } changes the transport layer or delivery unit (the CTS wants a { ls_e071-pgmid } entry); use SE03| ).
+        RETURN.
+      ENDIF.
+      APPEND VALUE #( pgmid = ls_e071-pgmid object = ls_e071-object obj_name = ls_e071-obj_name ) TO et_objects.
+    ENDLOOP.
   ENDMETHOD.
 
   METHOD set_package.
@@ -451,16 +580,13 @@ CLASS zcl_vsp_tadir_move IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD record.
-    DATA lt_objects TYPE tredt_objects.
     DATA lv_no_recording TYPE trboolean.
     DATA lv_text TYPE string.
-
-    lt_objects = VALUE #( ( pgmid = 'R3TR' object = iv_object obj_name = iv_obj_name ) ).
 
     CALL FUNCTION 'TR_RECORD_OBJ_CHANGE_TO_REQ'
       EXPORTING
         iv_request      = iv_request
-        it_objects      = lt_objects
+        it_objects      = it_objects
       IMPORTING
         ev_no_recording = lv_no_recording
       EXCEPTIONS
