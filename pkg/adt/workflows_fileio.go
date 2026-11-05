@@ -22,6 +22,8 @@ type RenameObjectResult struct {
 	// TransportNote says how it was chosen when the caller named none.
 	Transport     string `json:"transport,omitempty"`
 	TransportNote string `json:"transportNote,omitempty"`
+	// PackageCheck reports whether the new object is in the requested package.
+	PackageCheck string `json:"packageCheck,omitempty"`
 }
 
 // RenameObject renames an ABAP object by creating a copy with the new name and deleting the old one.
@@ -36,6 +38,28 @@ type RenameObjectResult struct {
 //
 // This is a destructive operation - use with caution!
 func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, oldName, newName, packageName, transport string) (*RenameObjectResult, error) {
+	return c.RenameObjectWithOptions(ctx, objType, oldName, newName, packageName, transport, nil)
+}
+
+// RenameObjectOptions lets the caller (the MCP layer, which owns the
+// WebSocket client a package correction needs) check the new object between
+// its activation and the deletion of the old one.
+type RenameObjectOptions struct {
+	// VerifyNew runs after the new object is created, written, unlocked and
+	// activated, with no lock open. ok=false stops the rename BEFORE the old
+	// object is touched: nothing is deleted and the new object is kept. note is
+	// reported as PackageCheck.
+	VerifyNew func(ctx context.Context) (ok bool, note string)
+	// IncompleteNote is added to Errors when the rename fails after the create
+	// request may have reached SAP.
+	IncompleteNote string
+}
+
+// RenameObjectWithOptions is RenameObject with the optional hooks above.
+func (c *Client) RenameObjectWithOptions(ctx context.Context, objType CreatableObjectType, oldName, newName, packageName, transport string, opts *RenameObjectOptions) (*RenameObjectResult, error) {
+	if opts == nil {
+		opts = &RenameObjectOptions{}
+	}
 	result := &RenameObjectResult{
 		OldName:    oldName,
 		NewName:    newName,
@@ -117,6 +141,9 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 	})
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to create new object: %v", err))
+		if opts.IncompleteNote != "" {
+			result.Errors = append(result.Errors, strings.TrimSpace(opts.IncompleteNote))
+		}
 		return result, nil
 	}
 
@@ -175,6 +202,9 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		} else {
 			result.Errors = append(result.Errors, fmt.Sprintf("rolled back the partially created %s", newName))
 		}
+		if opts.IncompleteNote != "" {
+			result.Errors = append(result.Errors, strings.TrimSpace(opts.IncompleteNote))
+		}
 		// The write was undone; a transport reported here would name the
 		// request it was rolled back out of, which misleads a consumer
 		// reading Transport on a failed result.
@@ -204,6 +234,21 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to activate new object: %v", err))
 		rollbackShell()
 		return result, nil
+	}
+
+	// 5b. The new object is unlocked and active; no lock is open, so a
+	// stateless TADIR read or a MOVE here cannot end any lock window (#91).
+	// If the new object ended up in the wrong package the old one is kept,
+	// and the new one is not rolled back: vsp never deletes on its own.
+	if opts.VerifyNew != nil {
+		ok, note := opts.VerifyNew(ctx)
+		result.PackageCheck = note
+		if !ok {
+			result.Success = false
+			result.Message = fmt.Sprintf("New object %s was created and activated, but its package check did not pass: %s The old object %s was NOT deleted and %s was NOT rolled back.",
+				newName, note, oldName, newName)
+			return result, nil
+		}
 	}
 
 	// 6. Delete old object. Gate + mark the context for oldURL *before* its

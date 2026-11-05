@@ -28,6 +28,12 @@ type DeployResult struct {
 	TargetSourceHash   string   `json:"targetSourceHash,omitempty"`
 	VerifiedSourceHash string   `json:"verifiedSourceHash,omitempty"`
 	Message            string   `json:"message,omitempty"`
+	// ObjectCreated is true when this call created the object in SAP, even if
+	// a later step failed (Created is true only for a complete success).
+	ObjectCreated bool `json:"objectCreated,omitempty"`
+	// PackageCheck is filled by the MCP layer after a create in a transportable
+	// package (see handlers_source_package.go).
+	PackageCheck string `json:"packageCheck,omitempty"`
 }
 
 // DeployFromFileOptions configures an optional optimistic-concurrency guard
@@ -96,6 +102,14 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 			Message:    fmt.Sprintf("Failed to create %s %s", info.ObjectType, info.ObjectName),
 		}, nil
 	}
+	// From here the object exists in SAP, whatever happens next: every result
+	// built below, success or failure, says so (a caller that checks the package
+	// needs to tell "failed after creating" from "failed without creating").
+	defer func() {
+		if result != nil {
+			result.ObjectCreated = true
+		}
+	}()
 	if chosen.Transport != "" {
 		transport = chosen.Transport
 	}

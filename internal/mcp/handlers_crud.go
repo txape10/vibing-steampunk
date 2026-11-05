@@ -216,9 +216,19 @@ func (s *Server) handleCreateObject(ctx context.Context, request mcp.CallToolReq
 		BindingCategory:   bindingCategory,
 	}
 
+	// A stale TADIR row (DELFLAG=X) can make SAP put the new object in the old
+	// package; refuse before the POST when the fix would be impossible.
+	pc, refused := s.planPackageCheck(ctx, objectType, name, packageName, transport, "create")
+	if refused != nil {
+		return refused, nil
+	}
+	if pc != nil {
+		pc.created = "created as an empty inactive shell"
+	}
+
 	err := s.adtClient.CreateObject(ctx, opts)
 	if err != nil {
-		return newToolResultError(fmt.Sprintf("Failed to create object: %v", err)), nil
+		return newToolResultError(fmt.Sprintf("Failed to create object: %v.%s", err, incompleteCreateNote(pc))), nil
 	}
 
 	// Return the object URL for convenience
@@ -227,8 +237,18 @@ func (s *Server) handleCreateObject(ctx context.Context, request mcp.CallToolReq
 		"status":     "created",
 		"object_url": objURL,
 	}
+	mismatch := false
+	if pc != nil {
+		text, st := s.checkPackageAfterCreate(ctx, pc)
+		result["packageCheck"] = pc.withWarning(text)
+		mismatch = st == pkgMismatch
+	}
 	output, _ := json.MarshalIndent(result, "", "  ")
-	return mcp.NewToolResultText(string(output)), nil
+	res := mcp.NewToolResultText(string(output))
+	if mismatch {
+		res.IsError = true
+	}
+	return res, nil
 }
 
 func (s *Server) handleCreatePackage(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

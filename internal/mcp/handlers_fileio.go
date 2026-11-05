@@ -53,15 +53,63 @@ func (s *Server) deployFromFile(ctx context.Context, request mcp.CallToolRequest
 	}
 	expectedSourceHash, _ := request.GetArguments()["expected_source_hash"].(string)
 
+	// The file may create the object. A stale TADIR row would then put it in the
+	// old package: refuse before anything is created when the fix is impossible.
+	// (An update finds no stale row, so this costs one TADIR read.)
+	var pc *packageCheck
+	if info, perr := adt.ParseABAPFile(filePath); perr == nil && (info.ClassIncludeType == "" || info.ClassIncludeType == adt.ClassIncludeMain) {
+		var refused *mcp.CallToolResult
+		pc, refused = s.planPackageCheck(ctx, string(info.ObjectType), info.ObjectName, packageName, transport, "create")
+		if refused != nil {
+			return refused, nil
+		}
+	}
+
 	result, err := s.adtClient.DeployFromFileWithOptions(ctx, filePath, packageName, transport, &adt.DeployFromFileOptions{
 		ExpectedSourceHash: expectedSourceHash,
 	})
 	if err != nil {
-		return newToolResultError(fmt.Sprintf("DeployFromFile failed: %v", err)), nil
+		return newToolResultError(fmt.Sprintf("DeployFromFile failed: %v.%s", err, incompleteCreateNote(pc))), nil
 	}
 
+	mismatch := s.applyDeployPackageCheck(ctx, pc, result)
+
 	output, _ := json.MarshalIndent(result, "", "  ")
-	return mcp.NewToolResultText(string(output)), nil
+	res := mcp.NewToolResultText(string(output))
+	if mismatch {
+		res.IsError = true
+	}
+	return res, nil
+}
+
+// applyDeployPackageCheck fills result.PackageCheck after a deploy and returns
+// true when the new object is in the wrong package and could not be moved.
+func (s *Server) applyDeployPackageCheck(ctx context.Context, pc *packageCheck, result *adt.DeployResult) (mismatch bool) {
+	if pc == nil || result == nil {
+		return false
+	}
+	switch {
+	case result.ObjectCreated && result.Success:
+		text, st := s.checkPackageAfterCreate(ctx, pc)
+		result.PackageCheck = pc.withWarning(text)
+		return st == pkgMismatch
+	case result.ObjectCreated:
+		// Failed after creating it: say where it is, never move it.
+		result.PackageCheck = pc.withWarning(s.reportPackageOnly(ctx, pc))
+	case !result.Success:
+		// The create call itself may have reached SAP before it failed.
+		result.PackageCheck = strings.TrimSpace(incompleteCreateNote(pc))
+	}
+	return false
+}
+
+// renameVerifier is the Rename hook: the old object is deleted only when the
+// new one is in the right package (an unreadable TADIR keeps it too).
+func (s *Server) renameVerifier(pc *packageCheck) func(context.Context) (bool, string) {
+	return func(ctx context.Context) (bool, string) {
+		text, st := s.checkPackageAfterCreate(ctx, pc)
+		return st == pkgOK || st == pkgCorrected, pc.withWarning(text)
+	}
 }
 
 func (s *Server) handleSaveToFile(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -193,13 +241,30 @@ func (s *Server) handleRenameObject(ctx context.Context, request mcp.CallToolReq
 	// Parse object type
 	objType := adt.CreatableObjectType(objTypeStr)
 
-	result, err := s.adtClient.RenameObject(ctx, objType, oldName, newName, packageName, transport)
+	// The new name may sit on a stale TADIR row: refuse before anything is read,
+	// created or deleted when the package could not be corrected afterwards.
+	pc, refused := s.planPackageCheck(ctx, objTypeStr, newName, packageName, transport, "create")
+	if refused != nil {
+		return refused, nil
+	}
+	ropts := &adt.RenameObjectOptions{IncompleteNote: incompleteCreateNote(pc)}
+	if pc != nil {
+		// The old object is deleted only if the new one is in the right package;
+		// an unreadable TADIR also keeps the old object (a rename is destructive).
+		ropts.VerifyNew = s.renameVerifier(pc)
+	}
+
+	result, err := s.adtClient.RenameObjectWithOptions(ctx, objType, oldName, newName, packageName, transport, ropts)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("RenameObject failed: %v", err)), nil
 	}
 
 	output, _ := json.MarshalIndent(result, "", "  ")
-	return mcp.NewToolResultText(string(output)), nil
+	res := mcp.NewToolResultText(string(output))
+	if result != nil && !result.Success && result.PackageCheck != "" {
+		res.IsError = true
+	}
+	return res, nil
 }
 
 func (s *Server) handleEditSource(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
