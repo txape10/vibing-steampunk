@@ -301,13 +301,34 @@ func (s *Server) handleWriteSource(ctx context.Context, request mcp.CallToolRequ
 		opts.Mode = adt.WriteSourceMode(mode)
 	}
 
+	// A create in a transportable package over a stale TADIR row would leave the
+	// object in the old package: refuse up front when it could not be moved back.
+	pc, refused := s.planPackageCheck(ctx, objectType, name, packageName, transport, mode)
+	if refused != nil {
+		return refused, nil
+	}
+
 	result, err := s.adtClient.WriteSource(ctx, objectType, name, source, opts)
 	if err != nil {
-		return newToolResultError(fmt.Sprintf("WriteSource failed: %v", err)), nil
+		return newToolResultError(fmt.Sprintf("WriteSource failed: %v.%s", err, incompleteCreateNote(pc))), nil
+	}
+
+	mismatch := false
+	if pc != nil && result != nil && !result.Success && result.Mode == "created" {
+		result.PackageCheck = strings.TrimSpace(incompleteCreateNote(pc))
+	}
+	if pc != nil && result != nil && result.Success && result.Mode == "created" {
+		mismatch = s.verifyPackageAfterCreate(ctx, pc, result)
+		if pc.warning != "" {
+			result.PackageCheck = strings.TrimSpace(pc.warning + ". " + result.PackageCheck)
+		}
 	}
 
 	output, _ := json.MarshalIndent(result, "", "  ")
 	res := mcp.NewToolResultText(string(output))
+	if mismatch {
+		res.IsError = true
+	}
 
 	// After a program or class is written, add a hint (never a write) about
 	// screen fields with no selection text and TEXT-xxx symbols the source

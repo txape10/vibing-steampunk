@@ -3,6 +3,7 @@ package adt
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -98,4 +99,39 @@ func searchTypeRoot(t string) string {
 		return "PROG"
 	}
 	return t
+}
+
+// TADIRInfo is the TADIR row of an object: where the repository says it lives.
+type TADIRInfo struct {
+	Found   bool
+	Package string
+	Deleted bool // DELFLAG = 'X': the row outlived the object
+}
+
+var tadirNamePattern = regexp.MustCompile(`^[A-Z0-9_/<>$]{1,120}$`)
+
+// TADIRRow reads the TADIR row (R3TR, type, name) with one stateless query, so
+// it never belongs inside a lock window. The name and type are whitelisted and
+// rejected, never escaped: free SQL has no bind parameters. A missing row is
+// not an error (Found=false).
+func (c *Client) TADIRRow(ctx context.Context, objType, name string) (TADIRInfo, error) {
+	t := searchTypeRoot(objType)
+	n := strings.ToUpper(strings.TrimSpace(name))
+	if !tadirNamePattern.MatchString(t) || !tadirNamePattern.MatchString(n) {
+		return TADIRInfo{}, fmt.Errorf("TADIR lookup refused: invalid object type or name %q %q", objType, name)
+	}
+	res, err := c.RunQuery(ctx, fmt.Sprintf("SELECT devclass, delflag FROM tadir WHERE pgmid = 'R3TR' AND object = '%s' AND obj_name = '%s'", t, escapeQuote(n)), 5)
+	if err != nil {
+		return TADIRInfo{}, fmt.Errorf("reading TADIR for %s %s: %w", t, n, err)
+	}
+	var info TADIRInfo
+	if res == nil {
+		return info, nil
+	}
+	for _, row := range res.Rows {
+		info.Found = true
+		info.Package = strings.TrimSpace(getString(row, "DEVCLASS"))
+		info.Deleted = strings.EqualFold(strings.TrimSpace(getString(row, "DELFLAG")), "X")
+	}
+	return info, nil
 }

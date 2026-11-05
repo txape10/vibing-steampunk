@@ -236,6 +236,9 @@ type WriteSourceResult struct {
 	TargetSourceHash   string              `json:"targetSourceHash,omitempty"`
 	VerifiedSourceHash string              `json:"verifiedSourceHash,omitempty"`
 	Message            string              `json:"message,omitempty"`
+	// PackageCheck is set by the MCP layer after a create in a transportable
+	// package: what TADIR says afterwards and whether vsp had to move the object.
+	PackageCheck string `json:"packageCheck,omitempty"`
 }
 
 // writeSourceObjectURL resolves the ADT object URL for a WriteSource target

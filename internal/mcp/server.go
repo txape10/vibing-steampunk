@@ -23,8 +23,8 @@ import (
 // AsyncTask represents a background task status.
 type AsyncTask struct {
 	ID        string      `json:"id"`
-	Type      string      `json:"type"`       // "report", "export", etc.
-	Status    string      `json:"status"`     // "running", "completed", "error"
+	Type      string      `json:"type"`   // "report", "export", etc.
+	Status    string      `json:"status"` // "running", "completed", "error"
 	StartedAt time.Time   `json:"started_at"`
 	EndedAt   *time.Time  `json:"ended_at,omitempty"`
 	Result    interface{} `json:"result,omitempty"`
@@ -33,14 +33,15 @@ type AsyncTask struct {
 
 // Server wraps the MCP server with ADT client.
 type Server struct {
-	mcpServer      *server.MCPServer
-	adtClient      *adt.Client
-	amdpWSClient   *adt.AMDPWebSocketClient   // WebSocket-based AMDP client (ZADT_VSP)
-	debugWSClient  *adt.DebugWebSocketClient  // WebSocket-based debug client (ZADT_VSP)
-	rfcClient      *rfc.Client                // Classic-RFC client (open-rfc-go), no ZADT_VSP needed
-	config         *Config                    // Server configuration for session manager creation
-	featureProber  *adt.FeatureProber         // Feature detection system (safety network)
-	featureConfig  adt.FeatureConfig          // Feature configuration
+	mcpServer     *server.MCPServer
+	adtClient     *adt.Client
+	amdpWSClient  *adt.AMDPWebSocketClient                                                                                    // WebSocket-based AMDP client (ZADT_VSP)
+	debugWSClient *adt.DebugWebSocketClient                                                                                   // WebSocket-based debug client (ZADT_VSP)
+	moveFn        func(ctx context.Context, objType, name, pkg, transport string, dryRun bool) (*adt.MoveObjectResult, error) // test seam for the automatic post-create MOVE
+	rfcClient     *rfc.Client                                                                                                 // Classic-RFC client (open-rfc-go), no ZADT_VSP needed
+	config        *Config                                                                                                     // Server configuration for session manager creation
+	featureProber *adt.FeatureProber                                                                                          // Feature detection system (safety network)
+	featureConfig adt.FeatureConfig                                                                                           // Feature configuration
 
 	// Async task management
 	asyncTasks   map[string]*AsyncTask
@@ -82,11 +83,11 @@ type Config struct {
 	DisabledGroups string
 
 	// Safety configuration
-	ReadOnly         bool
-	BlockFreeSQL     bool
-	AllowedOps       string
-	DisallowedOps    string
-	AllowedPackages  []string
+	ReadOnly                bool
+	BlockFreeSQL            bool
+	AllowedOps              string
+	DisallowedOps           string
+	AllowedPackages         []string
 	EnableTransports        bool     // Explicitly enable transport management (default: disabled)
 	TransportReadOnly       bool     // Only allow read operations on transports (list, get)
 	AllowedTransports       []string // Whitelist specific transports (supports wildcards like "A4HK*")
